@@ -873,6 +873,31 @@ table {
   border-spacing: 0;
 }
 
+.batch-table {
+  min-width: 1450px;
+  table-layout: fixed;
+}
+
+.batch-table .route-column {
+  width: 280px;
+}
+
+.batch-table .flight-column {
+  width: 230px;
+}
+
+.batch-table .platform-column {
+  width: 150px;
+}
+
+.batch-table .gap-column {
+  width: 180px;
+}
+
+.batch-table .conclusion-column {
+  width: 320px;
+}
+
 th,
 td {
   padding: 18px 20px;
@@ -890,6 +915,10 @@ th {
   font-size: 14px;
   font-weight: 900;
   text-align: center;
+}
+
+.batch-table th {
+  white-space: nowrap;
 }
 
 td {
@@ -915,13 +944,61 @@ tbody tr:hover td {
   text-align: center;
 }
 
+.platform-price-cell {
+  text-align: center;
+  padding: 20px 18px;
+}
+
+.platform-price-cell b,
 .qingmao-cell b {
   color: var(--qingmao);
   font-size: 24px;
   font-weight: 950;
+  white-space: nowrap;
+}
+
+.platform-price-cell span {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.platform-price-cell:not(.qingmao-cell) b {
+  color: var(--ink);
+  font-size: 22px;
+  font-weight: 900;
+}
+
+.platform-price-cell.unavailable b {
+  color: var(--ink);
+  font-size: 20px;
+  line-height: 1.15;
+}
+
+.platform-price-cell.unavailable span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.ctrip-cell {
+  background: #fbfdff;
+}
+
+.ali-cell {
+  border-right: 1px solid var(--line-strong);
 }
 
 td:not(.qingmao-cell) b {
+  font-size: 20px;
+}
+
+.batch-table .platform-price-cell:not(.qingmao-cell) b {
+  font-size: 22px;
+}
+
+.batch-table .platform-price-cell.unavailable b {
   font-size: 20px;
 }
 
@@ -961,6 +1038,19 @@ td:not(.qingmao-cell) b {
   gap: 14px;
 }
 
+.route-cell > div {
+  min-width: 0;
+}
+
+.batch-table .route-cell b,
+.batch-table .route-cell span:not(.route-icon) {
+  white-space: nowrap;
+}
+
+.batch-table .route-cell b {
+  font-size: 22px;
+}
+
 .route-icon {
   display: inline-flex;
   align-items: center;
@@ -985,6 +1075,7 @@ td:not(.qingmao-cell) b {
 
 .gap-cell {
   min-width: 150px;
+  padding-left: 28px;
 }
 
 .gap-badge {

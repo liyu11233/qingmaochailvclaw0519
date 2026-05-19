@@ -20,6 +20,7 @@ describe("fake batch generation", () => {
         "阿里商旅"
       ]);
       expect(sample.quotes).toHaveLength(3);
+      expect(sample.quotes.every((quote) => quote.available && typeof quote.price === "number" && quote.status === "可订")).toBe(true);
     }
   });
 

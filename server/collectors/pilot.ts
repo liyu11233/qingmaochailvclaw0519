@@ -655,9 +655,10 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       const batchArtifactDir = path.join(options.artifactDir, batchId);
       const outputRoot = path.dirname(options.artifactDir);
       const publicScreenshotDir = path.join(outputRoot, "screenshots", batchId);
+      const targetSampleCount = typeof limit === "number" && limit > 0 ? Math.min(limit, 10) : 10;
       const routes = FIXED_ROUTES
         .filter((route) => route.scope === "国内")
-        .slice(0, typeof limit === "number" && limit > 0 ? Math.min(limit, 10) : 10);
+        .slice(0, targetSampleCount);
 
       await fsp.mkdir(batchArtifactDir, { recursive: true });
       await fsp.mkdir(publicScreenshotDir, { recursive: true });
@@ -687,12 +688,15 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
 
       const samples: FlightSample[] = [];
       const failureNotes: string[] = [];
-      let failedCount = 0;
 
       try {
         for (const routeConfig of routes) {
+          if (samples.length >= targetSampleCount) {
+            break;
+          }
+
           const route = buildRouteFromConfig(routeConfig, collectedAt);
-          const sampleIndex = samples.length + failedCount + 1;
+          const sampleIndex = samples.length + 1;
           const sampleId = `real-domestic-${String(sampleIndex).padStart(2, "0")}`;
           const sampleArtifactDir = path.join(batchArtifactDir, sampleId);
           await fsp.mkdir(sampleArtifactDir, { recursive: true });
@@ -704,38 +708,65 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
 
             if (!selectedFlight) {
               failureNotes.push(`${route.origin}-${route.destination}: 青猫候选航班为空`);
-              failedCount += 1;
               continue;
             }
 
-            const qingmaoScreenshot = path.join(publicScreenshotDir, `${sampleId}-${platformSlug("青猫差旅")}.png`);
-            const qingmaoEvidencePath = await savePageEvidence(qingmaoPage, qingmaoScreenshot, {
-              platform: "青猫差旅",
-              route,
-              selectedFlight,
-              price: selectedFlight.price,
-              bodyText: selectedFlight.rawText
-            });
-            const ctripQuote = await searchCtripSameFlightQuote(context, sampleArtifactDir, route, selectedFlight, `${sampleId}-${platformSlug("携程商旅")}.png`);
-            const aliQuote = await searchAliSameFlightQuote(context, sampleArtifactDir, route, selectedFlight, `${sampleId}-${platformSlug("阿里商旅")}.png`);
-            const quotes = [
-              mapSameFlightQuoteToPlatformQuote(buildQingmaoQuote(selectedFlight, qingmaoEvidencePath), batchId, sampleId),
-              await persistSameFlightQuote(ctripQuote, publicScreenshotDir, batchId, sampleId),
-              await persistSameFlightQuote(aliQuote, publicScreenshotDir, batchId, sampleId)
-            ];
+            const randomizedCandidates = shuffledQingmaoCandidates(candidates, random);
+            const skippedFlights: string[] = [];
+            let acceptedSample: FlightSample | null = null;
 
-            samples.push(buildFlightSampleFromRealQuote(sampleId, routeConfig, route, selectedFlight, quotes));
+            for (const candidate of randomizedCandidates) {
+              try {
+                const ctripQuote = await searchCtripSameFlightQuote(context, sampleArtifactDir, route, candidate, `${sampleId}-${platformSlug("携程商旅")}.png`);
+                const aliQuote = await searchAliSameFlightQuote(context, sampleArtifactDir, route, candidate, `${sampleId}-${platformSlug("阿里商旅")}.png`);
+                const sameFlightQuotes = [buildQingmaoQuote(candidate), ctripQuote, aliQuote];
+
+                if (!hasCompleteSameFlightQuotes(sameFlightQuotes)) {
+                  skippedFlights.push(`${candidate.flightNo}: ${incompleteQuoteReason(sameFlightQuotes)}`);
+                  continue;
+                }
+
+                const qingmaoScreenshot = path.join(publicScreenshotDir, `${sampleId}-${platformSlug("青猫差旅")}.png`);
+                const qingmaoEvidencePath = await savePageEvidence(qingmaoPage, qingmaoScreenshot, {
+                  platform: "青猫差旅",
+                  route,
+                  selectedFlight: candidate,
+                  price: candidate.price,
+                  bodyText: candidate.rawText
+                });
+                const quotes = [
+                  mapSameFlightQuoteToPlatformQuote(buildQingmaoQuote(candidate, qingmaoEvidencePath), batchId, sampleId),
+                  await persistSameFlightQuote(ctripQuote, publicScreenshotDir, batchId, sampleId),
+                  await persistSameFlightQuote(aliQuote, publicScreenshotDir, batchId, sampleId)
+                ];
+                acceptedSample = buildFlightSampleFromRealQuote(sampleId, routeConfig, route, candidate, quotes);
+                break;
+              } catch (error) {
+                skippedFlights.push(`${candidate.flightNo}: ${errorMessage(error)}`);
+              }
+            }
+
+            if (acceptedSample) {
+              samples.push(acceptedSample);
+            } else {
+              failureNotes.push(`${route.origin}-${route.destination}: 已跳过 ${randomizedCandidates.length} 个航班，未找到三平台均可订同航班${skippedFlights.length ? `（${skippedFlights.slice(0, 3).join("；")}）` : ""}`);
+            }
           } catch (error) {
             failureNotes.push(`${route.origin}-${route.destination}: ${errorMessage(error)}`);
-            failedCount += 1;
           }
         }
       } finally {
         await browser.disconnect?.();
       }
 
+      const failedCount = Math.max(targetSampleCount - samples.length, 0);
+
       if (samples.length === 0 && failureNotes.length > 0) {
         throw new Error(`国内真实采集未获得有效样本：${failureNotes.join("；")}`);
+      }
+
+      if (samples.length < targetSampleCount) {
+        throw new Error(`国内真实采集未凑够 ${targetSampleCount} 条三平台完整样本，当前成功 ${samples.length} 条：${failureNotes.join("；")}`);
       }
 
       return {
@@ -805,23 +836,46 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
               continue;
             }
 
-            const qingmaoScreenshot = path.join(publicScreenshotDir, `${sampleId}-${platformSlug("青猫差旅")}.png`);
-            const qingmaoEvidencePath = await savePageEvidence(qingmaoPage, qingmaoScreenshot, {
-              platform: "青猫差旅",
-              route,
-              selectedFlight,
-              price: selectedFlight.price,
-              bodyText: selectedFlight.rawText
-            });
-            const ctripQuote = await searchCtripSameFlightQuote(context, sampleArtifactDir, route, selectedFlight, `${sampleId}-${platformSlug("携程商旅")}.png`);
-            const aliQuote = await searchAliSameFlightQuote(context, sampleArtifactDir, route, selectedFlight, `${sampleId}-${platformSlug("阿里商旅")}.png`);
-            const quotes = [
-              mapSameFlightQuoteToPlatformQuote(buildQingmaoQuote(selectedFlight, qingmaoEvidencePath), batchId, sampleId),
-              await persistSameFlightQuote(ctripQuote, publicScreenshotDir, batchId, sampleId),
-              await persistSameFlightQuote(aliQuote, publicScreenshotDir, batchId, sampleId)
-            ];
+            const randomizedCandidates = shuffledQingmaoCandidates(candidates, random);
+            const skippedFlights: string[] = [];
+            let acceptedSample: FlightSample | null = null;
 
-            samples.push(buildFlightSampleFromRealQuote(sampleId, routeConfig, route, selectedFlight, quotes));
+            for (const candidate of randomizedCandidates) {
+              try {
+                const ctripQuote = await searchCtripSameFlightQuote(context, sampleArtifactDir, route, candidate, `${sampleId}-${platformSlug("携程商旅")}.png`);
+                const aliQuote = await searchAliSameFlightQuote(context, sampleArtifactDir, route, candidate, `${sampleId}-${platformSlug("阿里商旅")}.png`);
+                const sameFlightQuotes = [buildQingmaoQuote(candidate), ctripQuote, aliQuote];
+
+                if (!hasCompleteSameFlightQuotes(sameFlightQuotes)) {
+                  skippedFlights.push(`${candidate.flightNo}: ${incompleteQuoteReason(sameFlightQuotes)}`);
+                  continue;
+                }
+
+                const qingmaoScreenshot = path.join(publicScreenshotDir, `${sampleId}-${platformSlug("青猫差旅")}.png`);
+                const qingmaoEvidencePath = await savePageEvidence(qingmaoPage, qingmaoScreenshot, {
+                  platform: "青猫差旅",
+                  route,
+                  selectedFlight: candidate,
+                  price: candidate.price,
+                  bodyText: candidate.rawText
+                });
+                const quotes = [
+                  mapSameFlightQuoteToPlatformQuote(buildQingmaoQuote(candidate, qingmaoEvidencePath), batchId, sampleId),
+                  await persistSameFlightQuote(ctripQuote, publicScreenshotDir, batchId, sampleId),
+                  await persistSameFlightQuote(aliQuote, publicScreenshotDir, batchId, sampleId)
+                ];
+                acceptedSample = buildFlightSampleFromRealQuote(sampleId, routeConfig, route, candidate, quotes);
+                break;
+              } catch (error) {
+                skippedFlights.push(`${candidate.flightNo}: ${errorMessage(error)}`);
+              }
+            }
+
+            if (acceptedSample) {
+              samples.push(acceptedSample);
+            } else {
+              failureNotes.push(`已替换 ${route.origin}-${route.destination}: 已跳过 ${randomizedCandidates.length} 个航班，未找到三平台均可订同航班${skippedFlights.length ? `（${skippedFlights.slice(0, 3).join("；")}）` : ""}`);
+            }
           } catch (error) {
             failureNotes.push(`已替换 ${route.origin}-${route.destination}: ${errorMessage(error)}`);
           }
@@ -837,7 +891,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
 
       if (samples.length < targetSampleCount) {
-        throw new Error(`国际真实采集未凑够 ${targetSampleCount} 条有效样本，当前成功 ${samples.length} 条：${failureNotes.join("；")}`);
+        throw new Error(`国际真实采集未凑够 ${targetSampleCount} 条三平台完整样本，当前成功 ${samples.length} 条：${failureNotes.join("；")}`);
       }
 
       return {
@@ -1422,6 +1476,17 @@ function pickRandomQingmaoCandidate(candidates: QingmaoFlightCandidate[], random
   return selectable[index];
 }
 
+function shuffledQingmaoCandidates(candidates: QingmaoFlightCandidate[], random: () => number) {
+  const selectable = candidates.filter((candidate) => candidate.flightNo && typeof candidate.price === "number" && !candidate.shared);
+
+  for (let index = selectable.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.min(index, Math.floor(random() * (index + 1)));
+    [selectable[index], selectable[swapIndex]] = [selectable[swapIndex], selectable[index]];
+  }
+
+  return selectable;
+}
+
 function buildQingmaoQuote(candidate: QingmaoFlightCandidate, screenshotPath?: string): SameFlightPlatformQuote {
   return {
     platform: "青猫差旅",
@@ -1430,6 +1495,27 @@ function buildQingmaoQuote(candidate: QingmaoFlightCandidate, screenshotPath?: s
     screenshotPath,
     rawText: candidate.rawText
   };
+}
+
+const requiredPlatforms: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅"];
+
+export function hasCompleteSameFlightQuotes(quotes: SameFlightPlatformQuote[]) {
+  return requiredPlatforms.every((platform) =>
+    quotes.some((quote) => quote.platform === platform && quote.status === "available" && typeof quote.price === "number")
+  );
+}
+
+function incompleteQuoteReason(quotes: SameFlightPlatformQuote[]) {
+  return requiredPlatforms
+    .filter((platform) => !quotes.some((quote) => quote.platform === platform && quote.status === "available" && typeof quote.price === "number"))
+    .map((platform) => {
+      const quote = quotes.find((item) => item.platform === platform);
+      if (!quote) return `${platform}未返回`;
+      if (quote.error) return `${platform}${quote.status === "failed" ? "采集失败" : "无可订价格"}：${quote.error}`;
+      if (quote.status === "not-found") return `${platform}无同航班`;
+      return `${platform}无可订价格`;
+    })
+    .join("，");
 }
 
 function mapQuoteStatus(status: SameFlightQuoteStatus) {

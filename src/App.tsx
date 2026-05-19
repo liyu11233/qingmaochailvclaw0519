@@ -374,9 +374,11 @@ export function App() {
   }, [scope, view]);
   const [collectionStartedAt, setCollectionStartedAt] = useState<number | null>(null);
   const [progressNow, setProgressNow] = useState(Date.now());
+  const serverOperation = status?.activeOperation ?? null;
   const isCollectionRunning = collecting || realCollecting || internationalCollecting || fullCollecting;
-  const operationLocked = isCollectionRunning || Boolean(pilotBusy);
-  const runningCollectionLabel = fullCollecting
+  const isOperationRunning = isCollectionRunning || Boolean(serverOperation);
+  const operationLocked = isOperationRunning || Boolean(pilotBusy);
+  const localCollectionLabel = fullCollecting
     ? "完整真实采集"
     : realCollecting
       ? "国内真实采集"
@@ -385,10 +387,16 @@ export function App() {
         : collecting
           ? "模拟采集"
           : "";
-  const runningEstimateText = fullCollecting ? "预计 10-18 分钟" : realCollecting || internationalCollecting ? "预计 5-10 分钟" : "预计 10 秒内";
-  const runningEstimateMs = fullCollecting ? 15 * 60 * 1000 : realCollecting || internationalCollecting ? 8 * 60 * 1000 : 10 * 1000;
-  const runningElapsedMs = collectionStartedAt ? progressNow - collectionStartedAt : 0;
-  const runningProgress = isCollectionRunning ? estimateProgress(runningElapsedMs, runningEstimateMs) : 0;
+  const runningCollectionLabel = localCollectionLabel || serverOperation?.label || "";
+  const serverStartedAt = serverOperation ? Date.parse(serverOperation.startedAt) : Number.NaN;
+  const runningStartedAt = collectionStartedAt ?? (Number.isNaN(serverStartedAt) ? null : serverStartedAt);
+  const runningIsFull = runningCollectionLabel.includes("完整真实采集");
+  const runningIsSegment = runningCollectionLabel.includes("国内真实采集") || runningCollectionLabel.includes("国际真实采集");
+  const runningEstimateText = runningIsFull ? "预计 10-18 分钟" : runningIsSegment ? "预计 5-10 分钟" : "预计 10 秒内";
+  const runningEstimateMs = runningIsFull ? 15 * 60 * 1000 : runningIsSegment ? 8 * 60 * 1000 : 10 * 1000;
+  const runningElapsedMs = runningStartedAt ? progressNow - runningStartedAt : 0;
+  const runningProgress = isOperationRunning ? estimateProgress(runningElapsedMs, runningEstimateMs) : 0;
+  const fullCollectionRunning = fullCollecting || serverOperation?.label === "完整真实采集";
 
   function markCollectionStart() {
     const startedAt = Date.now();
@@ -438,6 +446,7 @@ export function App() {
     } finally {
       setCollecting(false);
       setCollectionStartedAt(null);
+      void refreshStatus().catch(() => undefined);
     }
   }
 
@@ -460,6 +469,7 @@ export function App() {
     } finally {
       setRealCollecting(false);
       setCollectionStartedAt(null);
+      void refreshStatus().catch(() => undefined);
     }
   }
 
@@ -482,6 +492,7 @@ export function App() {
     } finally {
       setInternationalCollecting(false);
       setCollectionStartedAt(null);
+      void refreshStatus().catch(() => undefined);
     }
   }
 
@@ -500,6 +511,7 @@ export function App() {
     } finally {
       setFullCollecting(false);
       setCollectionStartedAt(null);
+      void refreshStatus().catch(() => undefined);
     }
   }
 
@@ -580,11 +592,25 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!isCollectionRunning) return;
+    if (!isOperationRunning) return;
 
     const timer = window.setInterval(() => setProgressNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [isCollectionRunning]);
+  }, [isOperationRunning]);
+
+  useEffect(() => {
+    if (loading) return;
+
+    void refreshStatus().catch(() => undefined);
+    const timer = window.setInterval(
+      () => {
+        void refreshStatus().catch(() => undefined);
+      },
+      isOperationRunning || !status?.hasBatch ? 3000 : 15000
+    );
+
+    return () => window.clearInterval(timer);
+  }, [loading, isOperationRunning, status?.hasBatch, status?.batchId]);
 
   return (
     <main className="app-shell">
@@ -630,11 +656,11 @@ export function App() {
             </div>
             <p>{connection.detail}</p>
           </div>
-          <button className="primary-button real-button strong-action" type="button" onClick={collectRealFull} disabled={isCollectionRunning || Boolean(pilotBusy) || loading}>
-            <Radar size={18} className={fullCollecting ? "spin" : ""} />
-            {fullCollecting ? "完整真实采集中" : "开始完整真实采集"}
+          <button className="primary-button real-button strong-action" type="button" onClick={collectRealFull} disabled={isOperationRunning || Boolean(pilotBusy) || loading}>
+            <Radar size={18} className={fullCollectionRunning ? "spin" : ""} />
+            {fullCollectionRunning ? "完整真实采集中" : "开始完整真实采集"}
           </button>
-          {isCollectionRunning ? (
+          {isOperationRunning ? (
             <div className="collection-progress-card" role="status" aria-live="polite">
               <div className="progress-head">
                 <div>
@@ -918,7 +944,16 @@ export function App() {
             </div>
 
             <div className="table-frame">
-              <table>
+              <table className="batch-table">
+                <colgroup>
+                  <col className="route-column" />
+                  <col className="flight-column" />
+                  <col className="platform-column" />
+                  <col className="platform-column" />
+                  <col className="platform-column" />
+                  <col className="gap-column" />
+                  <col className="conclusion-column" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>航线</th>
@@ -947,9 +982,16 @@ export function App() {
                         <span>{sample.airline} / {sample.transferLabel} / {sample.durationLabel}</span>
                       </td>
                       {sample.quotes.map((quote) => (
-                        <td key={quote.platform} className={quote.isQingmao ? "qingmao-cell" : ""}>
+                        <td
+                          key={quote.platform}
+                          className={[
+                            "platform-price-cell",
+                            quote.isQingmao ? "qingmao-cell" : quote.platform === "携程商旅" ? "ctrip-cell" : "ali-cell",
+                            quote.available ? "available" : "unavailable"
+                          ].join(" ")}
+                        >
                           <b>{quote.priceLabel}</b>
-                          <span>{quote.status}</span>
+                          {quote.status !== quote.priceLabel ? <span>{quote.status}</span> : null}
                         </td>
                       ))}
                       <td className={`gap-cell ${sample.gapTone}`}>

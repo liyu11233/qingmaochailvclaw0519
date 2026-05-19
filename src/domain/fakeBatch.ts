@@ -82,14 +82,13 @@ function buildQuotes(sampleId: string, basePrice: number, index: number): Platfo
   ];
 
   return PLATFORMS.map((platform, platformIndex) => {
-    const missingAli = platform === "阿里商旅" && index % 11 === 0;
     return {
       platform,
-      price: missingAli ? null : Math.max(280, basePrice + deltas[platformIndex]),
-      refundRule: missingAli ? "无同航班退改规则" : platformIndex === 0 ? "退改¥180起，按航司规则执行" : "退改¥160起，免费托运20kg",
-      baggageRule: missingAli ? "无同航班行李规则" : "20kg托运行李，随身行李1件",
-      available: !missingAli,
-      status: missingAli ? "无同航班" : "可订",
+      price: Math.max(280, basePrice + deltas[platformIndex]),
+      refundRule: platformIndex === 0 ? "退改¥180起，按航司规则执行" : "退改¥160起，免费托运20kg",
+      baggageRule: "20kg托运行李，随身行李1件",
+      available: true,
+      status: "可订",
       evidencePath: `screenshots/${sampleId}-${platformIndex + 1}.svg`,
       sourceUrl: PLATFORM_VERIFY_URLS[platform]
     };

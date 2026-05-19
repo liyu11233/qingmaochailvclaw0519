@@ -1,4 +1,6 @@
 import express from "express";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildFakeBatch } from "../src/domain/fakeBatch";
@@ -48,18 +50,96 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       profileDir: path.join(projectRoot, ".runtime", "browser-profile"),
       artifactDir: path.join(outputDir, "pilot")
     });
-  const state: AppState = {
-    batch: null,
-    artifacts: null,
-    pilot: pilotCollector.getStatus(),
-    qingmaoCandidates: pilotCollector.getQingmaoCandidateStatus(),
-    sameFlightComparison: pilotCollector.getSameFlightComparisonStatus()
-  };
   let activeOperation: ActiveOperation | null = null;
 
   function toOutputUrl(filePath: string) {
     const relativePath = path.relative(servedOutputsRoot, filePath);
     return `/outputs/${relativePath.split(path.sep).map(encodeURIComponent).join("/")}`;
+  }
+
+  function loadPersistedBatchState(): Pick<AppState, "batch" | "artifacts"> {
+    const persistedStatePath = path.join(outputDir, "current-state.json");
+
+    try {
+      if (fs.existsSync(persistedStatePath)) {
+        const persisted = JSON.parse(fs.readFileSync(persistedStatePath, "utf8")) as Pick<AppState, "batch" | "artifacts">;
+        if (persisted.batch && persisted.artifacts) {
+          return persisted;
+        }
+      }
+
+      if (!fs.existsSync(outputDir)) {
+        return { batch: null, artifacts: null };
+      }
+
+      const packageDirectories = fs
+        .readdirSync(outputDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith("青猫差旅离线演示包-"))
+        .map((entry) => {
+          const directoryPath = path.join(outputDir, entry.name);
+          return {
+            directoryPath,
+            modifiedAt: fs.statSync(directoryPath).mtimeMs
+          };
+        })
+        .sort((left, right) => right.modifiedAt - left.modifiedAt);
+
+      for (const packageDirectory of packageDirectories) {
+        const batchPath = path.join(packageDirectory.directoryPath, "data", "batch.json");
+        if (!fs.existsSync(batchPath)) continue;
+
+        const batch = JSON.parse(fs.readFileSync(batchPath, "utf8")) as CollectionBatch;
+        const excelPath = path.join(outputDir, `青猫差旅航班比价-${batch.id}.xlsx`);
+        const offlinePackagePath = path.join(outputDir, `青猫差旅离线演示包-${batch.id}.zip`);
+        if (!fs.existsSync(excelPath) || !fs.existsSync(offlinePackagePath)) continue;
+
+        const recoveredState = {
+          batch,
+          artifacts: {
+            excel: toOutputUrl(excelPath),
+            offlinePackage: toOutputUrl(offlinePackagePath)
+          }
+        };
+        fs.writeFileSync(persistedStatePath, JSON.stringify(recoveredState, null, 2), "utf8");
+        return recoveredState;
+      }
+    } catch {
+      return { batch: null, artifacts: null };
+    }
+
+    return { batch: null, artifacts: null };
+  }
+
+  const persistedState = loadPersistedBatchState();
+  const state: AppState = {
+    batch: persistedState.batch,
+    artifacts: persistedState.artifacts,
+    pilot: pilotCollector.getStatus(),
+    qingmaoCandidates: pilotCollector.getQingmaoCandidateStatus(),
+    sameFlightComparison: pilotCollector.getSameFlightComparisonStatus()
+  };
+
+  async function persistCurrentBatchState() {
+    await fsp.mkdir(outputDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(outputDir, "current-state.json"),
+      JSON.stringify({ batch: state.batch, artifacts: state.artifacts }, null, 2),
+      "utf8"
+    );
+  }
+
+  async function setCurrentBatchArtifacts(batch: CollectionBatch, excelPath: string, offlinePackagePath: string) {
+    state.batch = batch;
+    state.artifacts = {
+      excel: toOutputUrl(excelPath),
+      offlinePackage: toOutputUrl(offlinePackagePath)
+    };
+    await persistCurrentBatchState();
+
+    return {
+      batch,
+      artifacts: state.artifacts
+    };
   }
 
   async function runExclusiveOperation(
@@ -155,16 +235,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       const excel = await exportBatchWorkbook(batch, outputDir);
       const offlinePackage = await exportOfflinePackage(batch, outputDir);
 
-      state.batch = batch;
-      state.artifacts = {
-        excel: toOutputUrl(excel.path),
-        offlinePackage: toOutputUrl(offlinePackage.path)
-      };
-
-      return {
-        batch,
-        artifacts: state.artifacts
-      };
+      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
     });
   });
 
@@ -175,16 +246,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       const excel = await exportBatchWorkbook(batch, outputDir);
       const offlinePackage = await exportOfflinePackage(batch, outputDir);
 
-      state.batch = batch;
-      state.artifacts = {
-        excel: toOutputUrl(excel.path),
-        offlinePackage: toOutputUrl(offlinePackage.path)
-      };
-
-      return {
-        batch,
-        artifacts: state.artifacts
-      };
+      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
     });
   });
 
@@ -195,16 +257,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       const excel = await exportBatchWorkbook(batch, outputDir);
       const offlinePackage = await exportOfflinePackage(batch, outputDir);
 
-      state.batch = batch;
-      state.artifacts = {
-        excel: toOutputUrl(excel.path),
-        offlinePackage: toOutputUrl(offlinePackage.path)
-      };
-
-      return {
-        batch,
-        artifacts: state.artifacts
-      };
+      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
     });
   });
 
@@ -214,16 +267,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       const excel = await exportBatchWorkbook(batch, outputDir);
       const offlinePackage = await exportOfflinePackage(batch, outputDir);
 
-      state.batch = batch;
-      state.artifacts = {
-        excel: toOutputUrl(excel.path),
-        offlinePackage: toOutputUrl(offlinePackage.path)
-      };
-
-      return {
-        batch,
-        artifacts: state.artifacts
-      };
+      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
     });
   });
 

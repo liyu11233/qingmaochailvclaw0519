@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyProbeOutcome,
   extractSameFlightQuoteFromText,
+  hasCompleteSameFlightQuotes,
   parseDurationMinutes,
   parseQingmaoFlightCandidateText,
   parseQingmaoInternationalFlightCandidatesText
@@ -124,5 +125,23 @@ T1
     );
 
     expect(quote).toMatchObject({ status: "available", price: 730 });
+  });
+
+  it("requires all three platforms to have available same-flight prices for a complete sample", () => {
+    expect(
+      hasCompleteSameFlightQuotes([
+        { platform: "青猫差旅", status: "available", price: 370 },
+        { platform: "携程商旅", status: "available", price: 390 },
+        { platform: "阿里商旅", status: "available", price: 380 }
+      ])
+    ).toBe(true);
+
+    expect(
+      hasCompleteSameFlightQuotes([
+        { platform: "青猫差旅", status: "available", price: 370 },
+        { platform: "携程商旅", status: "available", price: 390 },
+        { platform: "阿里商旅", status: "not-found", price: null }
+      ])
+    ).toBe(false);
   });
 });

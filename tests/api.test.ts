@@ -1,12 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import request from "supertest";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { createApp } from "../server/app";
 import { createPlaywrightPilotCollector } from "../server/collectors/pilot";
 import { buildFakeBatch } from "../src/domain/fakeBatch";
 
 describe("management API", () => {
+  async function createTempOutputDir() {
+    return fsp.mkdtemp(path.join(os.tmpdir(), "qingmao-api-test-"));
+  }
+
   it("starts empty, creates a fake collection batch, and exposes export links", async () => {
-    const app = createApp();
+    const app = createApp({ outputDir: await createTempOutputDir() });
 
     const initialStatus = await request(app).get("/api/status").expect(200);
     expect(initialStatus.body.hasBatch).toBe(false);
@@ -26,6 +33,21 @@ describe("management API", () => {
     expect(status.body.hasBatch).toBe(true);
     expect(status.body.successCount).toBe(20);
     expect(status.body.failedCount).toBe(0);
+  });
+
+  it("restores the latest persisted batch after the server restarts", async () => {
+    const outputDir = await fsp.mkdtemp(path.join(os.tmpdir(), "qingmao-persisted-state-"));
+    const app = createApp({ outputDir });
+
+    const collect = await request(app).post("/api/collect").expect(200);
+    const restartedApp = createApp({ outputDir });
+    const restoredStatus = await request(restartedApp).get("/api/status").expect(200);
+
+    expect(restoredStatus.body.hasBatch).toBe(true);
+    expect(restoredStatus.body.batchId).toBe(collect.body.batch.id);
+    expect(restoredStatus.body.sampleCount).toBe(20);
+    expect(restoredStatus.body.artifacts.excel).toMatch(/\.xlsx$/);
+    expect(restoredStatus.body.artifacts.offlinePackage).toMatch(/\.zip$/);
   });
 
   it("exposes a separate one-route real collection pilot flow", async () => {
@@ -376,7 +398,7 @@ describe("management API", () => {
         ]
       }))
     };
-    const app = createApp({ pilotCollector } as never);
+    const app = createApp({ outputDir: await createTempOutputDir(), pilotCollector } as never);
 
     const initial = await request(app).get("/api/pilot/status").expect(200);
     expect(initial.body.status).toBe("idle");
