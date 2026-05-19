@@ -1,0 +1,10 @@
+node_modules/
+dist/
+data/
+outputs/
+.runtime/
+.DS_Store
+*.log
+.~*
+playwright/.auth/
+.gstack/
