@@ -5,6 +5,10 @@ outputs/
 .runtime/
 .DS_Store
 *.log
+.env
+.env.*
+!.env.example
+screenshots/
 .~*
 playwright/.auth/
 .gstack/
