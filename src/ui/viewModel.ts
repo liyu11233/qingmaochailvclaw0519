@@ -3,7 +3,7 @@ import type { CollectionBatch, FlightSample, PlatformQuote } from "../domain/typ
 
 export interface ArtifactLinks {
   excel: string;
-  offlinePackage: string;
+  salesSnapshot: string;
 }
 
 export interface QuoteView {

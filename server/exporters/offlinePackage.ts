@@ -1,24 +1,8 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
-import { createRequire } from "node:module";
 import path from "node:path";
 import { summarizeFlight } from "../../src/domain/comparison";
-import type { CollectionBatch, FlightSample, PlatformQuote } from "../../src/domain/types";
-
-const require = createRequire(import.meta.url);
-
-interface ArchiveWriter {
-  pipe(destination: NodeJS.WritableStream): void;
-  directory(sourceDir: string, destinationPath: false | string): void;
-  finalize(): Promise<void>;
-  on(event: "error", listener: (error: Error) => void): void;
-}
-
-interface ZipArchiveConstructor {
-  new (options: { zlib: { level: number } }): ArchiveWriter;
-}
-
-const { ZipArchive } = require("archiver") as { ZipArchive: ZipArchiveConstructor };
+import type { CollectionBatch, PlatformQuote } from "../../src/domain/types";
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] ?? char);
@@ -37,6 +21,16 @@ function formatDisplayTime(value: string) {
   }).formatToParts(date);
   const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
+}
+
+function resolveBrowserExecutable() {
+  const candidates = [
+    process.env.PLAYWRIGHT_CHROME_PATH,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium"
+  ].filter(Boolean) as string[];
+
+  return candidates.find((candidate) => fs.existsSync(candidate));
 }
 
 function formatPrice(quote: PlatformQuote) {
@@ -74,18 +68,7 @@ function renderQuoteCard(quote: PlatformQuote) {
           </div>`;
 }
 
-function renderEvidenceSvg(sample: FlightSample, platform: string) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
-  <rect width="1280" height="720" fill="#f6f8fb"/>
-  <rect x="64" y="72" width="1152" height="560" rx="24" fill="#ffffff" stroke="#d0d7de"/>
-  <text x="104" y="140" font-family="Arial, sans-serif" font-size="38" font-weight="700" fill="#0f3d5e">${escapeHtml(platform)} 网页截图</text>
-  <text x="104" y="210" font-family="Arial, sans-serif" font-size="28" fill="#111827">${escapeHtml(sample.origin)}-${escapeHtml(sample.destination)} / ${escapeHtml(sample.flightNo)}</text>
-  <text x="104" y="270" font-family="Arial, sans-serif" font-size="24" fill="#667085">真实采集阶段这里会替换为平台页面截图。</text>
-  <text x="104" y="330" font-family="Arial, sans-serif" font-size="24" fill="#667085">网页截图用于会后复核，不用于 OCR 采集。</text>
-</svg>`;
-}
-
-function renderIndex(batch: CollectionBatch) {
+function renderIndex(batch: CollectionBatch, options: { staticSnapshot?: boolean } = {}) {
   const displayTime = formatDisplayTime(batch.generatedAt);
   const advantageCount = batch.samples.filter((sample) => {
     const summary = summarizeFlight(sample);
@@ -192,10 +175,14 @@ function renderIndex(batch: CollectionBatch) {
       <div class="overview-item"><span>对比口径</span><strong>同日同航班</strong></div>
       <div class="overview-item"><span>网页复核入口</span><strong>携程 / 阿里</strong></div>
     </section>
-    <div class="toolbar">
+    ${
+      options.staticSnapshot
+        ? ""
+        : `<div class="toolbar">
       <button type="button" onclick="randomCard()">随机看一条航班</button>
       <button type="button" class="secondary" onclick="showAll()">显示全部</button>
-    </div>
+    </div>`
+    }
     <section class="flight-grid" id="cards">${cards}</section>
   </main>
   <script>
@@ -223,54 +210,32 @@ function renderIndex(batch: CollectionBatch) {
 </html>`;
 }
 
-async function zipDirectory(sourceDir: string, outputPath: string) {
-  await fsp.mkdir(path.dirname(outputPath), { recursive: true });
-  const output = fs.createWriteStream(outputPath);
-  const archive = new ZipArchive({ zlib: { level: 9 } });
+export async function exportSalesLongScreenshot(batch: CollectionBatch, outputDir: string) {
+  await fsp.mkdir(outputDir, { recursive: true });
 
-  const done = new Promise<void>((resolve, reject) => {
-    output.on("close", resolve);
-    archive.on("error", reject);
+  const filename = `青猫差旅销售长截图-${batch.id}.png`;
+  const outputPath = path.join(outputDir, filename);
+  const { chromium } = await import("playwright");
+  const executablePath = resolveBrowserExecutable();
+  const browser = await chromium.launch({
+    headless: true,
+    ...(executablePath ? { executablePath } : {}),
+    args: ["--no-sandbox"]
   });
 
-  archive.pipe(output);
-  archive.directory(sourceDir, false);
-  await archive.finalize();
-  await done;
-}
-
-export async function exportOfflinePackage(batch: CollectionBatch, outputDir: string) {
-  const packageName = `青猫差旅离线演示包-${batch.id}`;
-  const packageDir = path.join(outputDir, packageName);
-  const screenshotDir = path.join(packageDir, "screenshots");
-  const dataDir = path.join(packageDir, "data");
-  await fsp.mkdir(screenshotDir, { recursive: true });
-  await fsp.mkdir(dataDir, { recursive: true });
-
-  await fsp.writeFile(path.join(packageDir, "index.html"), renderIndex(batch), "utf8");
-  await fsp.writeFile(path.join(dataDir, "batch.json"), JSON.stringify(batch, null, 2), "utf8");
-
-  for (const sample of batch.samples) {
-    for (const quote of sample.quotes) {
-      const packagedEvidencePath = path.join(packageDir, quote.evidencePath);
-      const sourceEvidencePath = path.join(outputDir, quote.evidencePath);
-      await fsp.mkdir(path.dirname(packagedEvidencePath), { recursive: true });
-
-      if (fs.existsSync(sourceEvidencePath)) {
-        await fsp.copyFile(sourceEvidencePath, packagedEvidencePath);
-      } else {
-        await fsp.writeFile(packagedEvidencePath, renderEvidenceSvg(sample, quote.platform), "utf8");
-      }
-    }
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 1200 },
+      deviceScaleFactor: 1
+    });
+    await page.setContent(renderIndex(batch, { staticSnapshot: true }), { waitUntil: "domcontentloaded" });
+    await page.screenshot({ path: outputPath, fullPage: true });
+  } finally {
+    await browser.close();
   }
-
-  const filename = `${packageName}.zip`;
-  const outputPath = path.join(outputDir, filename);
-  await zipDirectory(packageDir, outputPath);
 
   return {
     path: outputPath,
-    filename,
-    entryFile: "index.html"
+    filename
   };
 }

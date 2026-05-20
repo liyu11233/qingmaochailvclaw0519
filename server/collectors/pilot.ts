@@ -1128,8 +1128,6 @@ export function parseQingmaoInternationalFlightCandidatesText(rawText: string): 
 }
 
 async function openQingmaoDomesticFlightTab(page: BrowserPage) {
-  await page.bringToFront().catch(() => undefined);
-
   if (!/TravelBooking/i.test(page.url())) {
     await page.getByText("差旅预订", { exact: true }).first().click({ timeout: 8_000 });
     await page.waitForTimeout(3_000);
@@ -1196,8 +1194,6 @@ async function clickVisibleFrameElement(frame: BrowserFrame, selector: string, t
 }
 
 async function openQingmaoInternationalFlightTab(page: BrowserPage) {
-  await page.bringToFront().catch(() => undefined);
-
   if (!/TravelBooking/i.test(page.url())) {
     await page.getByText("差旅预订", { exact: true }).first().click({ timeout: 8_000 });
     await page.waitForTimeout(3_000);
@@ -1393,28 +1389,55 @@ async function searchQingmaoInternationalFlightRoute(page: BrowserPage, route: P
 }
 
 async function selectQingmaoCity(frame: BrowserFrame, selectIndex: number, city: string) {
-  await frame.locator(".el-select").nth(selectIndex).click({ timeout: 8_000 });
-  await frame.waitForTimeout(300);
-  await frame.locator("input.el-select__input").nth(selectIndex).fill(city);
-  await frame.waitForTimeout(1_000);
-  const cityName = JSON.stringify(city);
-  const clicked = await frame.evaluate<boolean>(`(() => {
-    const cityName = ${cityName};
-    const isVisible = (element) => {
-      const rect = element.getBoundingClientRect();
-      const style = window.getComputedStyle(element);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const items = Array.from(document.querySelectorAll(".el-select-dropdown__item, [role='option']"))
-      .filter((element) => (element.textContent || "").trim().includes(cityName) && isVisible(element));
-    const item = items[0];
-    if (item) item.click();
-    return Boolean(item);
-  })()`);
-  if (!clicked) {
-    await frame.getByRole("option", { name: city, exact: false }).first().click({ timeout: 8_000 });
+  const select = frame.locator(".el-select").nth(selectIndex);
+  const currentText = await select.innerText({ timeout: 3_000 }).catch(() => "");
+  if (currentText.includes(city)) {
+    return;
   }
-  await frame.waitForTimeout(500);
+
+  const cityNameValue = JSON.stringify(city);
+  const clickCityOption = async () => frame.evaluate<boolean>(`(() => {
+      const cityName = ${cityNameValue};
+      const isVisible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+      const item = Array.from(document.querySelectorAll(".el-select-dropdown__item, [role='option']"))
+        .find((element) => {
+          const text = (element.textContent || "").trim();
+          return isVisible(element) && (text === cityName || text.includes(cityName));
+        });
+      if (!item) return false;
+      item.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true, view: window }));
+      item.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      item.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      item.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      return true;
+    })()`);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await select.click({ timeout: 8_000 });
+    await frame.waitForTimeout(300);
+    await frame.locator("input.el-select__input").nth(selectIndex).fill(city);
+
+    for (let index = 0; index < 10; index += 1) {
+      const clicked = await clickCityOption();
+      if (clicked) {
+        await frame.waitForTimeout(500);
+        const selectedText = await select.innerText({ timeout: 2_000 }).catch(() => "");
+        if (selectedText.includes(city)) return;
+      }
+      await frame.waitForTimeout(300);
+    }
+
+    const selectedText = await select.innerText({ timeout: 2_000 }).catch(() => "");
+    if (selectedText.includes(city)) {
+      return;
+    }
+  }
+
+  throw new Error(`青猫国内未找到城市 ${city}`);
 }
 
 async function searchQingmaoFlightRoute(frame: BrowserFrame, route: PilotRoute) {
@@ -1860,65 +1883,6 @@ async function searchCtripSameFlightQuote(
   }
 }
 
-async function selectAliCity(page: BrowserPage, inputIndex: number, city: string) {
-  const searchName = qingmaoCitySearchName(city);
-  const input = page.locator("input.ant-input.truncate").nth(inputIndex);
-  await input.click({ timeout: 10_000 });
-  await page.waitForTimeout(300);
-
-  if (aliInternationalCities.has(city) || aliInternationalCities.has(searchName)) {
-    const clickedInternationalTab = await page.evaluate<boolean>(`(() => {
-      const isVisible = (element) => {
-        const rect = element.getBoundingClientRect();
-        const style = window.getComputedStyle(element);
-        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-      };
-      const tab = Array.from(document.querySelectorAll("div, span"))
-        .find((element) => (element.textContent || "").trim() === "国际、中国港澳台" && isVisible(element));
-      if (tab) {
-        tab.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-        return true;
-      }
-      return false;
-    })()`);
-
-    if (!clickedInternationalTab) {
-      throw new Error("阿里商旅未找到国际城市标签");
-    }
-
-    await page.waitForTimeout(500);
-  }
-
-  await input.fill(searchName);
-  await page.waitForTimeout(1_000);
-
-  const targetCityValue = JSON.stringify(searchName);
-  const selected = await page.evaluate<boolean>(`(() => {
-    const targetCity = ${targetCityValue};
-    const normalize = (value) => value.replace(/\\s+/g, "");
-    const isVisible = (element) => {
-      const rect = element.getBoundingClientRect();
-      const style = window.getComputedStyle(element);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const target = normalize(targetCity);
-    const item = Array.from(document.querySelectorAll(".btrip-city-select-city-item"))
-      .find((element) => normalize(element.textContent || "").includes(target) && isVisible(element));
-    if (item) {
-      item.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-      return true;
-    }
-    return false;
-  })()`);
-
-  if (selected) {
-    await page.waitForTimeout(700);
-    return;
-  }
-
-  throw new Error(`阿里商旅未找到城市 ${city}`);
-}
-
 function isAliFlightHomeUrl(urlValue: string) {
   return /travel\.alibtrip\.com\/index\.html.*#\/flight/i.test(urlValue);
 }
@@ -1933,24 +1897,6 @@ function explainAliInternationalSubmitFailure(bodyText: string, preSaveText: str
   }
 
   return "阿里商旅国际查询提交后仍停留在首页，未进入国际机票结果页";
-}
-
-async function selectAliDate(page: BrowserPage, travelDate: string) {
-  await page.locator("input.example-custom-input").first().click({ timeout: 10_000 });
-  await page.waitForTimeout(500);
-  const dateValue = JSON.stringify(travelDate);
-  const clicked = await page.evaluate<boolean>(`(() => {
-    const [year, monthValue, dayValue] = ${dateValue}.split("-").map(Number);
-    const target = year + "年" + monthValue + "月" + dayValue + "日";
-    const day = Array.from(document.querySelectorAll("[aria-label^='Choose']"))
-      .find((element) => (element.getAttribute("aria-label") || "").includes(target));
-    if (day) day.click();
-    return Boolean(day);
-  })()`);
-
-  if (!clicked) {
-    throw new Error(`阿里商旅未找到日期 ${travelDate}`);
-  }
 }
 
 function readAliItineraryIdFromUrl(urlValue: string) {
@@ -2230,12 +2176,6 @@ async function searchAliSameFlightQuote(
   const page = await getOrCreatePlatformPage(context, "https://travel.alibtrip.com");
   const screenshotPath = path.join(artifactDir, screenshotFilename);
   const preExistingItineraryId = readAliItineraryIdFromUrl(page.url());
-  const itineraryIds: string[] = [];
-
-  page.on?.("console", (message) => {
-    const match = message.text().match(/preSave行程单号\s+([a-zA-Z0-9-]+)/);
-    if (match) itineraryIds.push(match[1]);
-  });
 
   try {
     await page.goto("https://travel.alibtrip.com/index.html#/flight", { waitUntil: "domcontentloaded", timeout: 45_000 });
@@ -2267,22 +2207,9 @@ async function searchAliSameFlightQuote(
       };
     }
 
-    await selectAliCity(page, 0, route.origin);
-    await selectAliCity(page, 1, route.destination);
-    await selectAliDate(page, route.travelDate);
-    const preSaveResponse = page.waitForResponse?.((response) => response.url().includes("mtop.alitrip.btriphome.pre.select.save"), { timeout: 30_000 }).catch(() => null) ?? Promise.resolve(null);
-    await clickVisibleText(page, "搜索机票");
-    const preSaveText = await (await preSaveResponse)?.text().catch(() => "") ?? "";
-    await page.waitForLoadState?.("domcontentloaded", { timeout: 30_000 }).catch(() => undefined);
-    await page.waitForTimeout(4_000);
-
-    if (!/flight-2025/i.test(page.url())) {
-      const itineraryId = itineraryIds.at(-1) ?? preExistingItineraryId;
-      if (itineraryId) {
-        await page.goto(buildAliSearchListUrl(page.url(), route, itineraryId), { waitUntil: "domcontentloaded", timeout: 45_000 });
-        await page.waitForTimeout(5_000);
-      }
-    }
+    const itineraryId = preExistingItineraryId ?? await createAliFlightItineraryNo(context, page);
+    await page.goto(buildAliSearchListUrl(page.url(), route, itineraryId), { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await page.waitForTimeout(5_000);
 
     const bodyText = await waitForSearchText(page, selectedFlight.flightNo);
     const extracted = extractSameFlightQuoteFromText(bodyText, selectedFlight.flightNo);

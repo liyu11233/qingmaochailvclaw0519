@@ -13,7 +13,7 @@ import {
   type SameFlightComparisonProbeResult
 } from "./collectors/pilot";
 import { exportBatchWorkbook } from "./exporters/excel";
-import { exportOfflinePackage } from "./exporters/offlinePackage";
+import { exportSalesLongScreenshot } from "./exporters/offlinePackage";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
@@ -21,7 +21,7 @@ const servedOutputsRoot = path.join(projectRoot, "outputs");
 
 interface ArtifactState {
   excel: string;
-  offlinePackage: string;
+  salesSnapshot: string;
 }
 
 interface AppState {
@@ -37,13 +37,36 @@ interface ActiveOperation {
   startedAt: string;
 }
 
+interface ArtifactExporters {
+  workbook: typeof exportBatchWorkbook;
+  salesSnapshot: typeof exportSalesLongScreenshot;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-export function createApp(options: { outputDir?: string; pilotCollector?: PilotCollector } = {}) {
+function restoreArtifactState(value: unknown): ArtifactState | null {
+  if (!isRecord(value) || typeof value.excel !== "string") {
+    return null;
+  }
+
+  const salesSnapshot = typeof value.salesSnapshot === "string" ? value.salesSnapshot : typeof value.offlinePackage === "string" ? value.offlinePackage : "";
+  if (!salesSnapshot) {
+    return null;
+  }
+
+  return {
+    excel: value.excel,
+    salesSnapshot
+  };
+}
+
+export function createApp(options: { outputDir?: string; pilotCollector?: PilotCollector; exporters?: Partial<ArtifactExporters> } = {}) {
   const app = express();
   const outputDir = options.outputDir ?? path.join(servedOutputsRoot, "current");
+  const workbookExporter = options.exporters?.workbook ?? exportBatchWorkbook;
+  const salesSnapshotExporter = options.exporters?.salesSnapshot ?? exportSalesLongScreenshot;
   const pilotCollector =
     options.pilotCollector ??
     createPlaywrightPilotCollector({
@@ -63,45 +86,17 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     try {
       if (fs.existsSync(persistedStatePath)) {
         const persisted = JSON.parse(fs.readFileSync(persistedStatePath, "utf8")) as Pick<AppState, "batch" | "artifacts">;
-        if (persisted.batch && persisted.artifacts) {
-          return persisted;
+        const artifacts = restoreArtifactState(persisted.artifacts);
+        if (persisted.batch && artifacts) {
+          return {
+            batch: persisted.batch,
+            artifacts
+          };
         }
       }
 
       if (!fs.existsSync(outputDir)) {
         return { batch: null, artifacts: null };
-      }
-
-      const packageDirectories = fs
-        .readdirSync(outputDir, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory() && entry.name.startsWith("青猫差旅离线演示包-"))
-        .map((entry) => {
-          const directoryPath = path.join(outputDir, entry.name);
-          return {
-            directoryPath,
-            modifiedAt: fs.statSync(directoryPath).mtimeMs
-          };
-        })
-        .sort((left, right) => right.modifiedAt - left.modifiedAt);
-
-      for (const packageDirectory of packageDirectories) {
-        const batchPath = path.join(packageDirectory.directoryPath, "data", "batch.json");
-        if (!fs.existsSync(batchPath)) continue;
-
-        const batch = JSON.parse(fs.readFileSync(batchPath, "utf8")) as CollectionBatch;
-        const excelPath = path.join(outputDir, `青猫差旅航班比价-${batch.id}.xlsx`);
-        const offlinePackagePath = path.join(outputDir, `青猫差旅离线演示包-${batch.id}.zip`);
-        if (!fs.existsSync(excelPath) || !fs.existsSync(offlinePackagePath)) continue;
-
-        const recoveredState = {
-          batch,
-          artifacts: {
-            excel: toOutputUrl(excelPath),
-            offlinePackage: toOutputUrl(offlinePackagePath)
-          }
-        };
-        fs.writeFileSync(persistedStatePath, JSON.stringify(recoveredState, null, 2), "utf8");
-        return recoveredState;
       }
     } catch {
       return { batch: null, artifacts: null };
@@ -128,11 +123,11 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     );
   }
 
-  async function setCurrentBatchArtifacts(batch: CollectionBatch, excelPath: string, offlinePackagePath: string) {
+  async function setCurrentBatchArtifacts(batch: CollectionBatch, excelPath: string, salesSnapshotPath: string) {
     state.batch = batch;
     state.artifacts = {
       excel: toOutputUrl(excelPath),
-      offlinePackage: toOutputUrl(offlinePackagePath)
+      salesSnapshot: toOutputUrl(salesSnapshotPath)
     };
     await persistCurrentBatchState();
 
@@ -232,10 +227,10 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
   app.post("/api/collect", async (_req, res, next) => {
     await runExclusiveOperation("模拟采集", res, next, async () => {
       const batch = buildFakeBatch(new Date());
-      const excel = await exportBatchWorkbook(batch, outputDir);
-      const offlinePackage = await exportOfflinePackage(batch, outputDir);
+      const excel = await workbookExporter(batch, outputDir);
+      const salesSnapshot = await salesSnapshotExporter(batch, outputDir);
 
-      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+      return setCurrentBatchArtifacts(batch, excel.path, salesSnapshot.path);
     });
   });
 
@@ -243,10 +238,10 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     await runExclusiveOperation("国内真实采集", res, next, async () => {
       const rawLimit = isRecord(req.body) && typeof req.body.limit === "number" ? req.body.limit : undefined;
       const batch = await pilotCollector.runDomesticBatchCollection(rawLimit);
-      const excel = await exportBatchWorkbook(batch, outputDir);
-      const offlinePackage = await exportOfflinePackage(batch, outputDir);
+      const excel = await workbookExporter(batch, outputDir);
+      const salesSnapshot = await salesSnapshotExporter(batch, outputDir);
 
-      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+      return setCurrentBatchArtifacts(batch, excel.path, salesSnapshot.path);
     });
   });
 
@@ -254,20 +249,20 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     await runExclusiveOperation("国际真实采集", res, next, async () => {
       const rawLimit = isRecord(req.body) && typeof req.body.limit === "number" ? req.body.limit : undefined;
       const batch = await pilotCollector.runInternationalBatchCollection(rawLimit);
-      const excel = await exportBatchWorkbook(batch, outputDir);
-      const offlinePackage = await exportOfflinePackage(batch, outputDir);
+      const excel = await workbookExporter(batch, outputDir);
+      const salesSnapshot = await salesSnapshotExporter(batch, outputDir);
 
-      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+      return setCurrentBatchArtifacts(batch, excel.path, salesSnapshot.path);
     });
   });
 
   app.post("/api/collect-real-full", async (_req, res, next) => {
     await runExclusiveOperation("完整真实采集", res, next, async () => {
       const batch = await pilotCollector.runFullBatchCollection();
-      const excel = await exportBatchWorkbook(batch, outputDir);
-      const offlinePackage = await exportOfflinePackage(batch, outputDir);
+      const excel = await workbookExporter(batch, outputDir);
+      const salesSnapshot = await salesSnapshotExporter(batch, outputDir);
 
-      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+      return setCurrentBatchArtifacts(batch, excel.path, salesSnapshot.path);
     });
   });
 

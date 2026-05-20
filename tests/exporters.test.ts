@@ -6,7 +6,7 @@ import ExcelJS from "exceljs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildFakeBatch } from "../src/domain/fakeBatch";
 import { exportBatchWorkbook } from "../server/exporters/excel";
-import { exportOfflinePackage } from "../server/exporters/offlinePackage";
+import { exportSalesLongScreenshot } from "../server/exporters/offlinePackage";
 
 const ONE_PIXEL_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
@@ -36,10 +36,14 @@ describe("export artifacts", () => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(result.path);
     const summarySheet = workbook.getWorksheet("汇总页");
-    const gapCell = summarySheet?.getCell("L5");
+    const headerValues = summarySheet?.getRow(8).values;
+    const gapCell = summarySheet?.getRow(9).getCell(13);
 
+    expect(summarySheet?.getCell("A1").value).toBe("青猫差旅航班价格对比汇总");
+    expect(headerValues).not.toContain("退改/行李摘要");
+    expect(headerValues).toContain("网页截图索引");
     expect(gapCell?.value).toMatchObject({
-      formula: 'IF(COUNT(I5:J5)=0,"",H5-MIN(I5:J5))',
+      formula: 'IF(COUNT(J9:K9)=0,"",I9-MIN(J9:K9))',
       result: -63
     });
     expect(gapCell?.font?.bold).toBe(true);
@@ -49,7 +53,7 @@ describe("export artifacts", () => {
     });
   });
 
-  it("embeds available webpage screenshots inside the Excel workbook", async () => {
+  it("keeps webpage screenshots as a text index without embedding images", async () => {
     const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
     batch.samples = batch.samples.slice(0, 1);
     batch.sampleCount = 1;
@@ -62,32 +66,26 @@ describe("export artifacts", () => {
     const workbookZip = await readFile(result.path);
     const mediaMarker = Buffer.from("xl/media/image");
 
-    expect(workbookZip.includes(mediaMarker)).toBe(true);
+    expect(workbookZip.includes(mediaMarker)).toBe(false);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(result.path);
+    const evidenceSheet = workbook.getWorksheet("网页截图索引页");
+    expect(evidenceSheet?.getRow(5).getCell(7).value).toBe("embedded-qingmao.png");
+    expect(evidenceSheet?.getRow(5).getCell(9).value).toBe("screenshots/embedded-qingmao.png");
   });
 
-  it("exports a self-contained offline demo package", async () => {
+  it("exports a customer-facing sales long screenshot", async () => {
     const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
-    const result = await exportOfflinePackage(batch, outputDir);
-    const packageDir = path.join(outputDir, result.filename.replace(/\.zip$/, ""));
-    const indexHtml = await readFile(path.join(packageDir, "index.html"), "utf8");
-    const screenshotSvg = await readFile(path.join(packageDir, "screenshots", "flight-01-1.svg"), "utf8");
+    batch.samples = batch.samples.slice(0, 4);
+    batch.sampleCount = 4;
+    batch.successCount = 4;
+    const result = await exportSalesLongScreenshot(batch, outputDir);
+    const image = await readFile(result.path);
 
-    expect(result.filename.endsWith(".zip")).toBe(true);
+    expect(result.filename.endsWith(".png")).toBe(true);
     expect(existsSync(result.path)).toBe(true);
-    expect(statSync(result.path).size).toBeGreaterThan(5_000);
-    expect(result.entryFile).toBe("index.html");
-    expect(indexHtml).not.toContain("证据");
-    expect(indexHtml).not.toContain("假数据");
-    expect(indexHtml).not.toContain("当前批次");
-    expect(indexHtml).not.toContain("20 条样本");
-    expect(indexHtml).toContain("同一航班，三平台价格对比。当前为 2026-05-18 10:00 的数据。");
-    expect(indexHtml).toContain("查看网页截图");
-    expect(indexHtml).not.toContain("打开携程商旅验证");
-    expect(indexHtml).not.toContain("打开阿里商旅验证");
-    expect(indexHtml).toContain('data-url="https://ct.ctrip.com/"');
-    expect(indexHtml).toContain('data-url="https://www.alibtrip.com/alibtrip"');
-    expect(indexHtml).toContain('onclick="openPlatform(event, this)"');
-    expect(screenshotSvg).not.toContain("证据");
-    expect(screenshotSvg).toContain("网页截图");
-  });
+    expect(statSync(result.path).size).toBeGreaterThan(20_000);
+    expect(image.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+  }, 15_000);
 });

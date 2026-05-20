@@ -287,6 +287,44 @@ td span {
   line-height: 1.55;
 }
 
+.collection-result-card {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid rgba(7, 139, 132, 0.34);
+  background: #f1fbfa;
+}
+
+.collection-result-card.failed {
+  border-color: rgba(143, 64, 86, 0.34);
+  background: #fff5f6;
+}
+
+.collection-result-card > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--qingmao);
+}
+
+.collection-result-card.failed > div {
+  color: var(--rose);
+}
+
+.collection-result-card strong {
+  color: var(--black);
+}
+
+.collection-result-card p {
+  max-height: 132px;
+  margin: 0;
+  overflow: auto;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .primary-button,
 .ghost-button {
   min-height: 44px;

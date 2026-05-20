@@ -7,13 +7,36 @@ import { createApp } from "../server/app";
 import { createPlaywrightPilotCollector } from "../server/collectors/pilot";
 import { buildFakeBatch } from "../src/domain/fakeBatch";
 
+const ONE_PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+  "base64"
+);
+
 describe("management API", () => {
   async function createTempOutputDir() {
     return fsp.mkdtemp(path.join(os.tmpdir(), "qingmao-api-test-"));
   }
 
+  async function exportTestSalesSnapshot(batch: ReturnType<typeof buildFakeBatch>, outputDir: string) {
+    await fsp.mkdir(outputDir, { recursive: true });
+    const filename = `青猫差旅销售长截图-${batch.id}.png`;
+    const snapshotPath = path.join(outputDir, filename);
+    await fsp.writeFile(snapshotPath, ONE_PIXEL_PNG);
+    return { path: snapshotPath, filename };
+  }
+
+  function createTestApp(options: Parameters<typeof createApp>[0] = {}) {
+    return createApp({
+      ...options,
+      exporters: {
+        ...options.exporters,
+        salesSnapshot: exportTestSalesSnapshot
+      }
+    });
+  }
+
   it("starts empty, creates a fake collection batch, and exposes export links", async () => {
-    const app = createApp({ outputDir: await createTempOutputDir() });
+    const app = createTestApp({ outputDir: await createTempOutputDir() });
 
     const initialStatus = await request(app).get("/api/status").expect(200);
     expect(initialStatus.body.hasBatch).toBe(false);
@@ -23,8 +46,8 @@ describe("management API", () => {
     expect(collect.body.batch.status).toBe("ready");
     expect(collect.body.artifacts.excel).toMatch(/^\/outputs\//);
     expect(collect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(collect.body.artifacts.offlinePackage).toMatch(/^\/outputs\//);
-    expect(collect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(collect.body.artifacts.salesSnapshot).toMatch(/^\/outputs\//);
+    expect(collect.body.artifacts.salesSnapshot).toMatch(/\.png$/);
 
     const latest = await request(app).get("/api/batch/latest").expect(200);
     expect(latest.body.batch.samples).toHaveLength(20);
@@ -37,17 +60,17 @@ describe("management API", () => {
 
   it("restores the latest persisted batch after the server restarts", async () => {
     const outputDir = await fsp.mkdtemp(path.join(os.tmpdir(), "qingmao-persisted-state-"));
-    const app = createApp({ outputDir });
+    const app = createTestApp({ outputDir });
 
     const collect = await request(app).post("/api/collect").expect(200);
-    const restartedApp = createApp({ outputDir });
+    const restartedApp = createTestApp({ outputDir });
     const restoredStatus = await request(restartedApp).get("/api/status").expect(200);
 
     expect(restoredStatus.body.hasBatch).toBe(true);
     expect(restoredStatus.body.batchId).toBe(collect.body.batch.id);
     expect(restoredStatus.body.sampleCount).toBe(20);
     expect(restoredStatus.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(restoredStatus.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(restoredStatus.body.artifacts.salesSnapshot).toMatch(/\.png$/);
   });
 
   it("exposes a separate one-route real collection pilot flow", async () => {
@@ -398,7 +421,7 @@ describe("management API", () => {
         ]
       }))
     };
-    const app = createApp({ outputDir: await createTempOutputDir(), pilotCollector } as never);
+    const app = createTestApp({ outputDir: await createTempOutputDir(), pilotCollector } as never);
 
     const initial = await request(app).get("/api/pilot/status").expect(200);
     expect(initial.body.status).toBe("idle");
@@ -460,21 +483,21 @@ describe("management API", () => {
     expect(realCollect.body.batch.id).toContain("real-domestic");
     expect(realCollect.body.batch.sampleCount).toBe(1);
     expect(realCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(realCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(realCollect.body.artifacts.salesSnapshot).toMatch(/\.png$/);
     expect(pilotCollector.runDomesticBatchCollection).toHaveBeenCalledWith(1);
 
     const realInternationalCollect = await request(app).post("/api/collect-real-international").send({ limit: 1 }).expect(200);
     expect(realInternationalCollect.body.batch.id).toContain("real-international");
     expect(realInternationalCollect.body.batch.sampleCount).toBe(1);
     expect(realInternationalCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(realInternationalCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(realInternationalCollect.body.artifacts.salesSnapshot).toMatch(/\.png$/);
     expect(pilotCollector.runInternationalBatchCollection).toHaveBeenCalledWith(1);
 
     const realFullCollect = await request(app).post("/api/collect-real-full").expect(200);
     expect(realFullCollect.body.batch.id).toContain("real-full");
     expect(realFullCollect.body.batch.sampleCount).toBe(2);
     expect(realFullCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(realFullCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(realFullCollect.body.artifacts.salesSnapshot).toMatch(/\.png$/);
     expect(pilotCollector.runFullBatchCollection).toHaveBeenCalledTimes(1);
   });
 
@@ -563,7 +586,7 @@ describe("management API", () => {
         });
       })
     };
-    const app = createApp({ outputDir: "/tmp/qingmao-api-concurrency-test", pilotCollector } as never);
+    const app = createTestApp({ outputDir: "/tmp/qingmao-api-concurrency-test", pilotCollector } as never);
 
     const fullRequest = new Promise<void>((resolve, reject) => {
       request(app)

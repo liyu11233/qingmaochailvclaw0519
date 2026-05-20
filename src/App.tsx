@@ -7,9 +7,9 @@ import {
   Download,
   ExternalLink,
   FileSpreadsheet,
+  Image as ImageIcon,
   LogIn,
   Monitor,
-  PackageOpen,
   Plane,
   Radar,
   RefreshCw,
@@ -35,6 +35,12 @@ interface StatusResponse {
 interface BatchResponse {
   batch: CollectionBatch;
   artifacts: ArtifactLinks | null;
+}
+
+interface CollectionResultNotice {
+  tone: "success" | "failed";
+  title: string;
+  detail: string;
 }
 
 type PilotStatus = "idle" | "login-browser-open" | "running" | "completed" | "failed";
@@ -364,6 +370,7 @@ export function App() {
   const [pilotError, setPilotError] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [collectionResult, setCollectionResult] = useState<CollectionResultNotice | null>(null);
   const [scope, setScope] = useState<ScopeFilter>("全部");
 
   const view = useMemo(() => (batch ? buildDashboardView(batch) : null), [batch]);
@@ -403,6 +410,7 @@ export function App() {
     setCollectionStartedAt(startedAt);
     setProgressNow(startedAt);
     setPilotError("");
+    setCollectionResult(null);
   }
 
   async function refreshStatus() {
@@ -440,9 +448,12 @@ export function App() {
       const result = await readJson<BatchResponse>("/api/collect", { method: "POST" });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
+      setCollectionResult({ tone: "success", title: "模拟采集完成", detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和销售长截图。` });
       await refreshStatus();
     } catch (collectionError) {
-      setError(collectionError instanceof Error ? collectionError.message : "采集失败");
+      const message = collectionError instanceof Error ? collectionError.message : "采集失败";
+      setError(message);
+      setCollectionResult({ tone: "failed", title: "模拟采集失败", detail: message });
     } finally {
       setCollecting(false);
       setCollectionStartedAt(null);
@@ -463,9 +474,12 @@ export function App() {
       });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
+      setCollectionResult({ tone: "success", title: "国内真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条国内样本，可以导出 Excel 和销售长截图。` });
       await refreshStatus();
     } catch (collectionError) {
-      setError(collectionError instanceof Error ? collectionError.message : "国内真实采集失败");
+      const message = collectionError instanceof Error ? collectionError.message : "国内真实采集失败";
+      setError(message);
+      setCollectionResult({ tone: "failed", title: "国内真实采集失败", detail: message });
     } finally {
       setRealCollecting(false);
       setCollectionStartedAt(null);
@@ -486,9 +500,12 @@ export function App() {
       });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
+      setCollectionResult({ tone: "success", title: "国际真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条国际样本，可以导出 Excel 和销售长截图。` });
       await refreshStatus();
     } catch (collectionError) {
-      setError(collectionError instanceof Error ? collectionError.message : "国际真实采集失败");
+      const message = collectionError instanceof Error ? collectionError.message : "国际真实采集失败";
+      setError(message);
+      setCollectionResult({ tone: "failed", title: "国际真实采集失败", detail: message });
     } finally {
       setInternationalCollecting(false);
       setCollectionStartedAt(null);
@@ -505,9 +522,12 @@ export function App() {
       const result = await readJson<BatchResponse>("/api/collect-real-full", { method: "POST" });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
+      setCollectionResult({ tone: "success", title: "完整真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条三平台同航班样本，可以导出 Excel 和销售长截图。` });
       await refreshStatus();
     } catch (collectionError) {
-      setError(collectionError instanceof Error ? collectionError.message : "完整真实采集失败");
+      const message = collectionError instanceof Error ? collectionError.message : "完整真实采集失败";
+      setError(message);
+      setCollectionResult({ tone: "failed", title: "完整真实采集失败", detail: message });
     } finally {
       setFullCollecting(false);
       setCollectionStartedAt(null);
@@ -630,7 +650,7 @@ export function App() {
           <p className="eyebrow">Manual Collection Console</p>
           <h1>航班比价采集台</h1>
           <p>
-            先人工登录三平台，再由系统随机抽取未来 3 天后的航班，生成三平台同航班价格对比、Excel 和离线销售演示包。
+            先人工登录三平台，再由系统随机抽取未来 3 天后的航班，生成三平台同航班价格对比、Excel 和销售长截图。
           </p>
         </div>
 
@@ -673,13 +693,22 @@ export function App() {
                 <span style={{ width: `${runningProgress}%` }} />
               </div>
               <p>
-                {runningEstimateText}。系统正在占用已登录浏览器执行采集，期间已锁定连接和后台探测按钮，避免重复点击导致连接失败。
+                {runningEstimateText}。系统正在通过已登录浏览器后台采集，期间已锁定连接和后台探测按钮，避免重复点击导致连接失败。
               </p>
+            </div>
+          ) : null}
+          {!isOperationRunning && collectionResult ? (
+            <div className={`collection-result-card ${collectionResult.tone}`} role={collectionResult.tone === "failed" ? "alert" : "status"} aria-live="polite">
+              <div>
+                {collectionResult.tone === "success" ? <CircleCheckBig size={18} /> : <AlertTriangle size={18} />}
+                <strong>{collectionResult.title}</strong>
+              </div>
+              <p>{collectionResult.detail}</p>
             </div>
           ) : null}
           <div className="download-row">
             <DownloadButton href={artifacts?.excel ?? null} icon={<FileSpreadsheet size={17} />} label="导出 Excel" />
-            <DownloadButton href={artifacts?.offlinePackage ?? null} icon={<PackageOpen size={17} />} label="离线演示包" />
+            <DownloadButton href={artifacts?.salesSnapshot ?? null} icon={<ImageIcon size={17} />} label="销售长截图" />
           </div>
         </div>
       </section>
@@ -888,7 +917,7 @@ export function App() {
           <Monitor size={34} />
           <div>
             <h2>还没有可展示的数据</h2>
-            <p>登录三平台并连接当前窗口后，点击“开始完整真实采集”生成 Excel 和销售离线包。</p>
+            <p>登录三平台并连接当前窗口后，点击“开始完整真实采集”生成 Excel 和销售长截图。</p>
           </div>
         </section>
       ) : null}
