@@ -17,12 +17,20 @@ describe("management API", () => {
     return fsp.mkdtemp(path.join(os.tmpdir(), "qingmao-api-test-"));
   }
 
-  async function exportTestSalesSnapshot(batch: ReturnType<typeof buildFakeBatch>, outputDir: string) {
+  async function exportTestOfflinePackage(batch: ReturnType<typeof buildFakeBatch>, outputDir: string) {
     await fsp.mkdir(outputDir, { recursive: true });
-    const filename = `青猫差旅销售长截图-${batch.id}.png`;
-    const snapshotPath = path.join(outputDir, filename);
-    await fsp.writeFile(snapshotPath, ONE_PIXEL_PNG);
-    return { path: snapshotPath, filename };
+    const filename = `青猫差旅离线网页包-${batch.id}.zip`;
+    const packagePath = path.join(outputDir, filename);
+    await fsp.writeFile(packagePath, ONE_PIXEL_PNG);
+    return { path: packagePath, filename, directory: outputDir };
+  }
+
+  async function exportTestWorkbook(batch: ReturnType<typeof buildFakeBatch>, outputDir: string) {
+    await fsp.mkdir(outputDir, { recursive: true });
+    const filename = `青猫差旅一体化比价-${batch.id}.xlsx`;
+    const workbookPath = path.join(outputDir, filename);
+    await fsp.writeFile(workbookPath, Buffer.from("test workbook"));
+    return { path: workbookPath, filename, sheets: ["总览页"] };
   }
 
   function createTestApp(options: Parameters<typeof createApp>[0] = {}) {
@@ -30,7 +38,8 @@ describe("management API", () => {
       ...options,
       exporters: {
         ...options.exporters,
-        salesSnapshot: exportTestSalesSnapshot
+        workbook: exportTestWorkbook,
+        offlinePackage: exportTestOfflinePackage
       }
     });
   }
@@ -46,8 +55,8 @@ describe("management API", () => {
     expect(collect.body.batch.status).toBe("ready");
     expect(collect.body.artifacts.excel).toMatch(/^\/outputs\//);
     expect(collect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(collect.body.artifacts.salesSnapshot).toMatch(/^\/outputs\//);
-    expect(collect.body.artifacts.salesSnapshot).toMatch(/\.png$/);
+    expect(collect.body.artifacts.offlinePackage).toMatch(/^\/outputs\//);
+    expect(collect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
 
     const latest = await request(app).get("/api/batch/latest").expect(200);
     expect(latest.body.batch.samples).toHaveLength(20);
@@ -70,7 +79,7 @@ describe("management API", () => {
     expect(restoredStatus.body.batchId).toBe(collect.body.batch.id);
     expect(restoredStatus.body.sampleCount).toBe(20);
     expect(restoredStatus.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(restoredStatus.body.artifacts.salesSnapshot).toMatch(/\.png$/);
+    expect(restoredStatus.body.artifacts.offlinePackage).toMatch(/\.zip$/);
   });
 
   it("exposes a separate one-route real collection pilot flow", async () => {
@@ -95,6 +104,69 @@ describe("management API", () => {
         updatedAt: null,
         message: "等待读取青猫航班候选池"
       })),
+      getQingmaoHotelCandidateStatus: vi.fn(() => ({
+        status: "idle",
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        candidates: [],
+        selectedCandidate: null,
+        totalHotels: null,
+        updatedAt: null,
+        message: "等待读取青猫酒店候选池"
+      })),
+      getHotelMainRateStatus: vi.fn(() => ({
+        status: "idle",
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        selectedCandidate: null,
+        quotes: [],
+        updatedAt: null,
+        message: "等待验证酒店当前口径大床有早餐"
+      })),
+      getHotelGroupMainRateStatus: vi.fn(() => ({
+        status: "idle",
+        samples: [],
+        updatedAt: null,
+        message: "等待验证每个集团 1 家酒店主口径"
+      })),
+      getHotelSingleDiagnosisStatus: vi.fn(() => ({
+        status: "idle",
+        input: null,
+        selectedCandidate: null,
+        platforms: [],
+        updatedAt: null,
+        message: "等待严格单酒店诊断"
+      })),
+      getAliHotelMatchStatus: vi.fn(() => ({
+        status: "idle",
+        samples: [],
+        updatedAt: null,
+        message: "等待验证阿里商旅同店匹配"
+      })),
+      getHotelRatePlanProbeStatus: vi.fn(() => ({
+        status: "idle",
+        plans: [],
+        recommendedRatePlan: null,
+        updatedAt: null,
+        message: "等待验证酒店 4 个房型早餐口径完整率"
+      })),
+      getHotelAllRatePlanStatus: vi.fn(() => ({
+        status: "idle",
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        selectedCandidate: null,
+        samples: [],
+        updatedAt: null,
+        message: "等待选择青猫候选酒店并采集四平台四口径"
+      })),
+      getHotelCalibrationStatus: vi.fn(() => ({
+        status: "idle",
+        mode: "calibration",
+        limit: 3,
+        mainRatePlan: "大床有早餐",
+        platformOrder: ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"],
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        samples: [],
+        updatedAt: null,
+        message: "等待执行 3 家酒店校准测试"
+      })),
       getSameFlightComparisonStatus: vi.fn(() => ({
         status: "idle",
         route: { scope: "国内", origin: "广州", destination: "上海", travelDate: "2026-05-21" },
@@ -102,6 +174,30 @@ describe("management API", () => {
         quotes: [],
         updatedAt: null,
         message: "等待随机抽取同航班并查询竞品"
+      })),
+      getZtripStatus: vi.fn(() => ({
+        status: "idle",
+        loginUrl: "https://www.z-trip.cn/v/vcommon/home",
+        checks: [],
+        updatedAt: null,
+        message: "等待验证在途商旅"
+      })),
+      getZtripFlightStatus: vi.fn(() => ({
+        status: "idle",
+        route: { scope: "国内", origin: "广州", destination: "上海", travelDate: "2026-05-21" },
+        selectedFlight: null,
+        candidates: [],
+        totalFlights: null,
+        updatedAt: null,
+        message: "等待采集在途商旅航班样本"
+      })),
+      getZtripHotelStatus: vi.fn(() => ({
+        status: "idle",
+        query: { city: "广州", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        selectedRate: null,
+        rates: [],
+        updatedAt: null,
+        message: "等待采集在途商旅酒店样本"
       })),
       openLoginSession: vi.fn(async () => ({
         status: "login-browser-open",
@@ -179,6 +275,262 @@ describe("management API", () => {
         updatedAt: "2026-05-18T10:03:00.000Z",
         message: "已读取青猫差旅 1 条候选航班"
       })),
+      runQingmaoHotelCandidateProbe: vi.fn(async () => ({
+        status: "completed",
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        candidates: [
+          {
+            hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+            level: "舒适型",
+            score: "4.7",
+            area: "距市中心直线9.2公里·白云同和/龙洞地区·白云区",
+            address: "白云区广州大道北1420号",
+            price: 228,
+            rawText: "如家商旅酒店(广州白云山京溪南方医院地铁站店) 舒适型 ￥ 228 起 查看详情"
+          }
+        ],
+        selectedCandidate: {
+          hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+          level: "舒适型",
+          score: "4.7",
+          area: "距市中心直线9.2公里·白云同和/龙洞地区·白云区",
+          address: "白云区广州大道北1420号",
+          price: 228,
+          rawText: "如家商旅酒店(广州白云山京溪南方医院地铁站店) 舒适型 ￥ 228 起 查看详情"
+        },
+        totalHotels: 9,
+        finalUrl: "https://booking.tmctrip.com/TravelBooking",
+        screenshotPath: "/tmp/qingmao-hotel-candidates.png",
+        updatedAt: "2026-05-18T10:03:30.000Z",
+        message: "已读取青猫酒店候选池：广州 / 如家商旅，共 9 家，解析 1 家"
+      })),
+      runHotelMainRateProbe: vi.fn(async () => ({
+        status: "partial",
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        selectedCandidate: {
+          hotelName: "如家商旅酒店(广州天河东圃科学城珠吉店)",
+          level: "舒适型",
+          score: "4.8",
+          area: "距市中心直线17.2公里·奥体中心/国际金融城·天河区",
+          address: "天河区珠村东横三路1号",
+          price: 252,
+          rawText: "如家商旅酒店(广州天河东圃科学城珠吉店) 舒适型 ￥ 252 起 查看详情"
+        },
+        quotes: [
+          {
+            platform: "青猫差旅",
+            status: "available",
+            price: 222,
+            hotelName: "如家商旅酒店(广州天河东圃科学城珠吉店)",
+            roomType: "大床房",
+            ratePlan: "大床有早餐",
+            screenshotPath: "/tmp/qingmao-hotel-main-rate.png",
+            rawText: "大床房 2份早餐 ￥ 222 起"
+          },
+          { platform: "携程商旅", status: "pending", price: null, hotelName: "如家商旅酒店(广州天河东圃科学城珠吉店)", roomType: "", ratePlan: "大床有早餐", error: "酒店同店同口径匹配尚未接入" },
+          { platform: "阿里商旅", status: "pending", price: null, hotelName: "如家商旅酒店(广州天河东圃科学城珠吉店)", roomType: "", ratePlan: "大床有早餐", error: "酒店同店同口径匹配尚未接入" },
+          {
+            platform: "在途商旅",
+            status: "available",
+            price: 213,
+            hotelName: "如家商旅酒店(广州天河东圃科学城珠吉店)",
+            roomType: "高级大床房",
+            ratePlan: "大床有早餐",
+            screenshotPath: "/tmp/ztrip-hotel-main-rate.png",
+            rawText: "高级大床房 2份早餐 CNY 213"
+          }
+        ],
+        updatedAt: "2026-05-18T10:03:40.000Z",
+        message: "已找到青猫酒店主口径锚点"
+      })),
+      runHotelGroupMainRateProbe: vi.fn(async () => ({
+        status: "completed",
+        samples: [
+          {
+            group: "首旅如家",
+            query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+            status: "completed",
+            selectedCandidate: {
+              hotelName: "如家商旅酒店(广州天河东圃科学城珠吉店)",
+              level: "舒适型",
+              score: "4.8",
+              area: "距市中心直线17.2公里·奥体中心/国际金融城·天河区",
+              address: "天河区珠村东横三路1号",
+              price: 252,
+              rawText: "如家商旅酒店(广州天河东圃科学城珠吉店) 舒适型 ￥ 252 起 查看详情"
+            },
+            quotes: [
+              {
+                platform: "青猫差旅",
+                status: "available",
+                price: 222,
+                hotelName: "如家商旅酒店(广州天河东圃科学城珠吉店)",
+                roomType: "大床房",
+                ratePlan: "大床有早餐",
+                screenshotPath: "/tmp/qingmao-group-main-rate.png",
+                rawText: "大床房 2份早餐 ￥ 222 起"
+              },
+              {
+                platform: "在途商旅",
+                status: "available",
+                price: 213,
+                hotelName: "如家商旅酒店(广州天河东圃科学城珠吉店)",
+                roomType: "高级大床房",
+                ratePlan: "大床有早餐",
+                screenshotPath: "/tmp/ztrip-group-main-rate.png",
+                rawText: "高级大床房 2份早餐 CNY 213"
+              }
+            ],
+            message: "已找到酒店主口径锚点"
+          }
+        ],
+        updatedAt: "2026-05-18T10:03:50.000Z",
+        message: "已完成每个集团 1 家酒店主口径验证：完整 1/1，部分 0/1"
+      })),
+      runHotelSingleDiagnosisProbe: vi.fn(async (input) => ({
+        status: "completed",
+        input,
+        selectedCandidate: {
+          hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+          level: "舒适型",
+          score: "4.7",
+          area: "白云同和/龙洞地区",
+          address: "白云区广州大道北1420号",
+          price: 228,
+          rawText: "如家商旅酒店(广州白云山京溪南方医院地铁站店) ￥228 起"
+        },
+        platforms: [
+          {
+            platform: "青猫差旅",
+            step: "success",
+            sameHotel: true,
+            matchBasis: "青猫候选源酒店",
+            sourceDoorPlate: "广州大道北1420号",
+            targetDoorPlate: "广州大道北1420号",
+            durationMs: 1200,
+            price: 240,
+            screenshotPath: path.resolve("outputs/current/pilot/hotel-single-diagnosis/test-run/qingmao.png"),
+            finalUrl: "https://booking.tmctrip.com/TravelBooking"
+          },
+          {
+            platform: "携程商旅",
+            step: "failed",
+            sameHotel: false,
+            matchBasis: "未匹配到同城市同门牌号",
+            sourceDoorPlate: "广州大道北1420号",
+            targetDoorPlate: "广州大道中301号",
+            durationMs: 3400,
+            price: null,
+            error: "门牌号不一致",
+            screenshotPath: path.resolve("outputs/current/pilot/hotel-single-diagnosis/test-run/ctrip.png"),
+            finalUrl: "https://ct.ctrip.com/corp-hotel-booking/hotelList"
+          }
+        ],
+        updatedAt: "2026-05-18T10:04:00.000Z",
+        message: "严格单酒店诊断完成"
+      })),
+      runAliHotelMatchProbe: vi.fn(),
+      runHotelRatePlanProbe: vi.fn(async () => ({
+        status: "completed",
+        plans: [
+          {
+            ratePlan: "大床有早餐",
+            status: "completed",
+            completedCount: 1,
+            partialCount: 0,
+            failedCount: 0,
+            completeRate: 1,
+            durationMs: 1000,
+            samples: []
+          },
+          {
+            ratePlan: "大床无早餐",
+            status: "partial",
+            completedCount: 0,
+            partialCount: 1,
+            failedCount: 0,
+            completeRate: 0,
+            durationMs: 900,
+            samples: []
+          }
+        ],
+        recommendedRatePlan: "大床有早餐",
+        updatedAt: "2026-05-18T10:03:55.000Z",
+        message: "口径探针完成：建议主口径为大床有早餐"
+      })),
+      runHotelAllRatePlanProbe: vi.fn(async () => ({
+        status: "completed",
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        selectedCandidate: {
+          hotelName: "如家商旅酒店(广州天河东圃科学城珠吉店)",
+          level: "舒适型",
+          score: "4.7",
+          area: "天河区",
+          address: "天河区珠吉路1号",
+          price: 213,
+          rawText: "如家商旅酒店"
+        },
+        samples: [],
+        updatedAt: "2026-05-18T10:03:56.000Z",
+        message: "四平台四口径采集完成：完整 4/4"
+      })),
+      runHotelCalibrationProbe: vi.fn(async (input: { checkInDate?: string; checkOutDate?: string; platforms?: string[] } = {}) => ({
+        status: "partial",
+        mode: "calibration",
+        limit: 3,
+        mainRatePlan: "大床有早餐",
+        platformOrder: input.platforms?.length ? ["青猫差旅", ...input.platforms] : ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"],
+        query: {
+          city: "广州",
+          keyword: "如家商旅",
+          checkInDate: input.checkInDate ?? "2026-05-21",
+          checkOutDate: input.checkOutDate ?? "2026-05-22",
+          nights: 1
+        },
+        samples: Array.from({ length: 3 }, (_, index) => ({
+          index: index + 1,
+          status: index === 0 ? "completed" : "partial",
+          sourceHotel: {
+            hotelName: `如家商旅酒店${index + 1}`,
+            city: "广州",
+            address: `广州大道北142${index}号`,
+            doorPlate: `广州大道北142${index}号`,
+            rawText: `如家商旅酒店${index + 1}`
+          },
+          platforms: (input.platforms?.length ? ["青猫差旅", ...input.platforms] : ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"]).map((platform, platformIndex) => ({
+            platform,
+            sameHotel: platformIndex === 1 && index === 1 ? false : true,
+            matchBasis: platformIndex === 1 && index === 1 ? "未匹配到同城市同门牌号" : "同城市同门牌号一致",
+            platformHotelName: `如家商旅酒店${index + 1}`,
+            platformAddress: `广州大道北142${index}号`,
+            platformDoorPlate: `广州大道北142${index}号`,
+            hasMainRate: !(platformIndex === 1 && index === 1),
+            mainRatePrice: platformIndex === 1 && index === 1 ? null : 240 + index + platformIndex,
+            otherRates: {
+              大床无早餐: null,
+              双床有早餐: 260 + index + platformIndex,
+              双床无早餐: null
+            },
+            durationMs: 1000 + platformIndex,
+            failureType: platformIndex === 1 && index === 1 ? "competitor_no_same_hotel" : null,
+            failureReason: platformIndex === 1 && index === 1 ? "门牌号不一致" : "",
+            screenshotPath: path.resolve(`outputs/current/pilot/hotel-calibration/test-run/hotel-${index + 1}-${platformIndex + 1}.png`),
+            finalUrl: "https://example.com/hotel",
+            pageTextSummary: "酒店详情 大床 早餐 价格"
+          })),
+          message: `如家商旅酒店${index + 1} 校准完成`
+        })),
+        updatedAt: "2026-05-18T10:04:10.000Z",
+        message: "3 家酒店校准测试完成：完整 1/3"
+      })),
+      cleanupBrowserPages: vi.fn(async () => ({
+        status: "completed",
+        beforeCount: 86,
+        closedCount: 80,
+        afterCount: 6,
+        updatedAt: "2026-05-18T10:03:56.000Z",
+        message: "已关闭 80 个采集临时窗口"
+      })),
       runSameFlightComparisonProbe: vi.fn(async () => ({
         status: "completed",
         route: { scope: "国内", origin: "广州", destination: "上海", travelDate: "2026-05-21" },
@@ -205,6 +557,64 @@ describe("management API", () => {
         ],
         updatedAt: "2026-05-18T10:04:00.000Z",
         message: "已随机抽取 9C8930，并完成三平台同航班价格读取"
+      })),
+      runZtripProbe: vi.fn(async () => ({
+        status: "completed",
+        loginUrl: "https://www.z-trip.cn/v/vcommon/home",
+        checks: [
+          {
+            target: "入口页",
+            outcome: "login-required",
+            note: "页面可访问，但需要人工登录",
+            finalUrl: "https://www.z-trip.cn/v/vcommon/home",
+            screenshotPath: "/tmp/ztrip-entry.png"
+          }
+        ],
+        updatedAt: "2026-05-18T10:04:30.000Z",
+        message: "在途商旅入口验证完成"
+      })),
+      runZtripFlightProbe: vi.fn(async () => ({
+        status: "completed",
+        route: { scope: "国内", origin: "广州", destination: "上海", travelDate: "2026-05-21" },
+        selectedFlight: {
+          airline: "海南航空",
+          flightNo: "HU7431",
+          aircraft: "空客320NEO(窄体) |",
+          departureTime: "06:35",
+          arrivalTime: "08:55",
+          originAirport: "白云T3",
+          destinationAirport: "浦东T2",
+          durationMinutes: null,
+          price: 470,
+          cabin: "经济舱",
+          discount: "经济舱T 2.4折",
+          meal: "",
+          shared: false,
+          rawText: "海南航空HU7431 空客320NEO(窄体) | 06:35 白云T3 08:55 浦东T2 CNY 470 起 经济舱T 2.4折"
+        },
+        candidates: [],
+        totalFlights: 53,
+        finalUrl: "https://www.z-trip.cn/v/pg/flight/multiList",
+        screenshotPath: "/tmp/ztrip-flight.png",
+        updatedAt: "2026-05-18T10:04:40.000Z",
+        message: "已读取在途商旅 1 条航班样本"
+      })),
+      runZtripHotelProbe: vi.fn(async () => ({
+        status: "completed",
+        query: { city: "广州", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        selectedRate: {
+          hotelName: "广州科尔海悦酒店",
+          roomType: "精英大床房",
+          bedType: "大床",
+          breakfast: "有早餐",
+          price: 388,
+          rawText: "精英大床房 2份早餐 CNY 388"
+        },
+        rates: [],
+        finalUrl: "https://www.z-trip.cn/v/pg/hotel/hotelList",
+        screenshotPath: "/tmp/ztrip-hotel.png",
+        updatedAt: "2026-05-18T10:04:50.000Z",
+        message: "已读取在途商旅酒店大床有早餐样本"
       })),
       runDomesticBatchCollection: vi.fn(async () => ({
         id: "batch-2026-05-18-100500-real-domestic",
@@ -479,25 +889,230 @@ describe("management API", () => {
     expect(pilotCollector.runQingmaoCandidateProbe).toHaveBeenCalledTimes(1);
     expect(pilotCollector.runSameFlightComparisonProbe).toHaveBeenCalledTimes(1);
 
+    const qingmaoHotelStatus = await request(app).get("/api/pilot/qingmao-hotel-candidates/status").expect(200);
+    expect(qingmaoHotelStatus.body.status).toBe("idle");
+
+    const qingmaoHotelCandidates = await request(app).post("/api/pilot/qingmao-hotel-candidates/run").expect(200);
+    expect(qingmaoHotelCandidates.body.status).toBe("completed");
+    expect(qingmaoHotelCandidates.body.totalHotels).toBe(9);
+    expect(qingmaoHotelCandidates.body.selectedCandidate).toMatchObject({
+      hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+      price: 228
+    });
+    expect(pilotCollector.runQingmaoHotelCandidateProbe).toHaveBeenCalledTimes(1);
+
+    const hotelMainRateStatus = await request(app).get("/api/pilot/hotel-main-rate/status").expect(200);
+    expect(hotelMainRateStatus.body.status).toBe("idle");
+
+    const hotelMainRate = await request(app).post("/api/pilot/hotel-main-rate/run").expect(200);
+    expect(hotelMainRate.body.status).toBe("partial");
+    expect(hotelMainRate.body.quotes.find((quote: { platform: string }) => quote.platform === "青猫差旅")).toMatchObject({
+      status: "available",
+      price: 222,
+      ratePlan: "大床有早餐"
+    });
+    expect(pilotCollector.runHotelMainRateProbe).toHaveBeenCalledTimes(1);
+
+    const hotelGroupMainRateStatus = await request(app).get("/api/pilot/hotel-group-main-rate/status").expect(200);
+    expect(hotelGroupMainRateStatus.body.status).toBe("idle");
+
+    const hotelGroupMainRate = await request(app).post("/api/pilot/hotel-group-main-rate/run").expect(200);
+    expect(hotelGroupMainRate.body.status).toBe("completed");
+    expect(hotelGroupMainRate.body.samples[0]).toMatchObject({
+      group: "首旅如家",
+      status: "completed"
+    });
+    expect(hotelGroupMainRate.body.samples[0].quotes.find((quote: { platform: string }) => quote.platform === "青猫差旅")).toMatchObject({
+      screenshotPath: "/tmp/qingmao-group-main-rate.png"
+    });
+    expect(pilotCollector.runHotelGroupMainRateProbe).toHaveBeenCalledTimes(1);
+
+    const singleDiagnosisStatus = await request(app).get("/api/pilot/hotel-single-diagnosis/status").expect(200);
+    expect(singleDiagnosisStatus.body.status).toBe("idle");
+
+    const singleDiagnosisInput = {
+      city: "广州",
+      keyword: "如家商旅",
+      checkInDate: "2026-05-23",
+      checkOutDate: "2026-05-24",
+      ratePlan: "大床有早餐"
+    };
+    const singleDiagnosis = await request(app).post("/api/pilot/hotel-single-diagnosis/run").send(singleDiagnosisInput).expect(200);
+    expect(singleDiagnosis.body).toMatchObject({
+      status: "completed",
+      input: singleDiagnosisInput,
+      selectedCandidate: {
+        hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+        address: "白云区广州大道北1420号"
+      }
+    });
+    expect(singleDiagnosis.body.platforms).toHaveLength(2);
+    expect(singleDiagnosis.body.platforms[0]).toMatchObject({
+      platform: "青猫差旅",
+      step: "success",
+      sameHotel: true,
+      matchBasis: "青猫候选源酒店",
+      sourceDoorPlate: "广州大道北1420号",
+      targetDoorPlate: "广州大道北1420号",
+      price: 240,
+      screenshotUrl: "/outputs/current/pilot/hotel-single-diagnosis/test-run/qingmao.png"
+    });
+    expect(singleDiagnosis.body.platforms[1]).toMatchObject({
+      platform: "携程商旅",
+      step: "failed",
+      sameHotel: false,
+      matchBasis: "未匹配到同城市同门牌号",
+      sourceDoorPlate: "广州大道北1420号",
+      targetDoorPlate: "广州大道中301号",
+      price: null,
+      error: "门牌号不一致",
+      screenshotUrl: "/outputs/current/pilot/hotel-single-diagnosis/test-run/ctrip.png"
+    });
+    expect(pilotCollector.runHotelSingleDiagnosisProbe).toHaveBeenCalledWith(singleDiagnosisInput);
+
+    const ratePlanStatus = await request(app).get("/api/pilot/hotel-rate-plan-probe/status").expect(200);
+    expect(ratePlanStatus.body.status).toBe("idle");
+
+    const ratePlanProbe = await request(app).post("/api/pilot/hotel-rate-plan-probe/run").expect(200);
+    expect(ratePlanProbe.body).toMatchObject({
+      status: "completed",
+      recommendedRatePlan: "大床有早餐"
+    });
+    expect(ratePlanProbe.body.plans).toHaveLength(2);
+    expect(pilotCollector.runHotelRatePlanProbe).toHaveBeenCalledTimes(1);
+
+    const calibrationStatus = await request(app).get("/api/pilot/hotel-calibration/status").expect(200);
+    expect(calibrationStatus.body).toMatchObject({
+      status: "idle",
+      mode: "calibration",
+      limit: 3,
+      mainRatePlan: "大床有早餐"
+    });
+
+    const calibrationInput = { checkInDate: "2026-05-25", checkOutDate: "2026-05-26" };
+    const calibration = await request(app).post("/api/pilot/hotel-calibration/run").send(calibrationInput).expect(200);
+    expect(calibration.body).toMatchObject({
+      status: "partial",
+      mode: "calibration",
+      limit: 3,
+      mainRatePlan: "大床有早餐",
+      query: {
+        checkInDate: "2026-05-25",
+        checkOutDate: "2026-05-26",
+        nights: 1
+      }
+    });
+    expect(calibration.body.platformOrder).toEqual(["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"]);
+    expect(calibration.body.samples).toHaveLength(3);
+    expect(calibration.body.samples[0].platforms).toHaveLength(4);
+    expect(calibration.body.samples[0].platforms[0]).toMatchObject({
+      platform: "青猫差旅",
+      hasMainRate: true,
+      otherRates: {
+        大床无早餐: null,
+        双床无早餐: null
+      },
+      screenshotUrl: "/outputs/current/pilot/hotel-calibration/test-run/hotel-1-1.png",
+      pageTextSummary: "酒店详情 大床 早餐 价格"
+    });
+    expect(calibration.body.samples[1].platforms[1]).toMatchObject({
+      platform: "阿里商旅",
+      failureType: "competitor_no_same_hotel",
+      failureReason: "门牌号不一致"
+    });
+    expect(pilotCollector.runHotelCalibrationProbe).toHaveBeenCalledWith(calibrationInput);
+
+    const aliOnlyCalibrationInput = {
+      checkInDate: "2026-05-25",
+      checkOutDate: "2026-05-26",
+      platforms: ["阿里商旅"]
+    };
+    const aliOnlyCalibration = await request(app).post("/api/pilot/hotel-calibration/run").send(aliOnlyCalibrationInput).expect(200);
+    expect(aliOnlyCalibration.body.platformOrder).toEqual(["青猫差旅", "阿里商旅"]);
+    expect(aliOnlyCalibration.body.samples[0].platforms.map((platform: { platform: string }) => platform.platform)).toEqual(["青猫差旅", "阿里商旅"]);
+    expect(pilotCollector.runHotelCalibrationProbe).toHaveBeenLastCalledWith(aliOnlyCalibrationInput);
+
+    const invalidCalibration = await request(app)
+      .post("/api/pilot/hotel-calibration/run")
+      .send({ checkInDate: "2026-05-25", checkOutDate: "2026-05-26", platforms: ["青猫差旅"] })
+      .expect(400);
+    expect(invalidCalibration.body.error).toContain("platforms 暂只支持");
+
+    const cleanup = await request(app).post("/api/pilot/cleanup-browser-pages").expect(200);
+    expect(cleanup.body).toMatchObject({
+      status: "completed",
+      beforeCount: 86,
+      closedCount: 80,
+      afterCount: 6
+    });
+    expect(pilotCollector.cleanupBrowserPages).toHaveBeenCalledTimes(1);
+
+    const ztripStatus = await request(app).get("/api/pilot/ztrip/status").expect(200);
+    expect(ztripStatus.body).toMatchObject({
+      status: "idle",
+      loginUrl: "https://www.z-trip.cn/v/vcommon/home",
+      message: "等待验证在途商旅"
+    });
+
+    const ztripProbe = await request(app).post("/api/pilot/ztrip/run").expect(200);
+    expect(ztripProbe.body.status).toBe("completed");
+    expect(ztripProbe.body.checks[0]).toMatchObject({
+      target: "入口页",
+      outcome: "login-required",
+      screenshotPath: "/tmp/ztrip-entry.png"
+    });
+    expect(pilotCollector.runZtripProbe).toHaveBeenCalledTimes(1);
+
+    const ztripFlightStatus = await request(app).get("/api/pilot/ztrip-flight/status").expect(200);
+    expect(ztripFlightStatus.body).toMatchObject({
+      status: "idle",
+      message: "等待采集在途商旅航班样本"
+    });
+
+    const ztripFlight = await request(app).post("/api/pilot/ztrip-flight/run").expect(200);
+    expect(ztripFlight.body.status).toBe("completed");
+    expect(ztripFlight.body.selectedFlight).toMatchObject({
+      flightNo: "HU7431",
+      price: 470
+    });
+    expect(ztripFlight.body.totalFlights).toBe(53);
+    expect(pilotCollector.runZtripFlightProbe).toHaveBeenCalledTimes(1);
+
+    const ztripHotelStatus = await request(app).get("/api/pilot/ztrip-hotel/status").expect(200);
+    expect(ztripHotelStatus.body).toMatchObject({
+      status: "idle",
+      message: "等待采集在途商旅酒店样本"
+    });
+
+    const ztripHotel = await request(app).post("/api/pilot/ztrip-hotel/run").expect(200);
+    expect(ztripHotel.body.status).toBe("completed");
+    expect(ztripHotel.body.selectedRate).toMatchObject({
+      hotelName: "广州科尔海悦酒店",
+      roomType: "精英大床房",
+      breakfast: "有早餐",
+      price: 388
+    });
+    expect(pilotCollector.runZtripHotelProbe).toHaveBeenCalledTimes(1);
+
     const realCollect = await request(app).post("/api/collect-real-domestic").send({ limit: 1 }).expect(200);
     expect(realCollect.body.batch.id).toContain("real-domestic");
     expect(realCollect.body.batch.sampleCount).toBe(1);
     expect(realCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(realCollect.body.artifacts.salesSnapshot).toMatch(/\.png$/);
+    expect(realCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
     expect(pilotCollector.runDomesticBatchCollection).toHaveBeenCalledWith(1);
 
     const realInternationalCollect = await request(app).post("/api/collect-real-international").send({ limit: 1 }).expect(200);
     expect(realInternationalCollect.body.batch.id).toContain("real-international");
     expect(realInternationalCollect.body.batch.sampleCount).toBe(1);
     expect(realInternationalCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(realInternationalCollect.body.artifacts.salesSnapshot).toMatch(/\.png$/);
+    expect(realInternationalCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
     expect(pilotCollector.runInternationalBatchCollection).toHaveBeenCalledWith(1);
 
     const realFullCollect = await request(app).post("/api/collect-real-full").expect(200);
     expect(realFullCollect.body.batch.id).toContain("real-full");
     expect(realFullCollect.body.batch.sampleCount).toBe(2);
     expect(realFullCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(realFullCollect.body.artifacts.salesSnapshot).toMatch(/\.png$/);
+    expect(realFullCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
     expect(pilotCollector.runFullBatchCollection).toHaveBeenCalledTimes(1);
   });
 
@@ -517,19 +1132,21 @@ describe("management API", () => {
     expect(status.platforms).toEqual([
       { platform: "青猫差旅", loginUrl: "https://booking.tmctrip.com/TravelBooking", configured: true },
       { platform: "携程商旅", loginUrl: "https://ct.ctrip.com/login", configured: true },
-      { platform: "阿里商旅", loginUrl: "https://travel.alibtrip.com/index.html#/login", configured: true }
+      { platform: "阿里商旅", loginUrl: "https://travel.alibtrip.com/index.html#/login", configured: true },
+      { platform: "在途商旅", loginUrl: "https://www.z-trip.cn/v/vcommon/home", configured: true }
     ]);
 
     const login = await pilotCollector.openLoginSession();
     expect(login.status).toBe("login-browser-open");
-    expect(login.platforms.map((platform) => platform.outcome)).toEqual(["opened", "opened", "opened"]);
+    expect(login.platforms.map((platform) => platform.outcome)).toEqual(["opened", "opened", "opened", "opened"]);
     expect(opened).toEqual([
       {
         profileDir: "/tmp/qingmao-browser-profile",
         urls: [
           "https://booking.tmctrip.com/TravelBooking",
           "https://ct.ctrip.com/login",
-          "https://travel.alibtrip.com/index.html#/login"
+          "https://travel.alibtrip.com/index.html#/login",
+          "https://www.z-trip.cn/v/vcommon/home"
         ],
         debuggingPort: 9223
       }
@@ -564,6 +1181,69 @@ describe("management API", () => {
         updatedAt: null,
         message: "等待读取青猫航班候选池"
       })),
+      getQingmaoHotelCandidateStatus: vi.fn(() => ({
+        status: "idle",
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        candidates: [],
+        selectedCandidate: null,
+        totalHotels: null,
+        updatedAt: null,
+        message: "等待读取青猫酒店候选池"
+      })),
+      getHotelMainRateStatus: vi.fn(() => ({
+        status: "idle",
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        selectedCandidate: null,
+        quotes: [],
+        updatedAt: null,
+        message: "等待验证酒店当前口径大床有早餐"
+      })),
+      getHotelGroupMainRateStatus: vi.fn(() => ({
+        status: "idle",
+        samples: [],
+        updatedAt: null,
+        message: "等待验证每个集团 1 家酒店主口径"
+      })),
+      getHotelSingleDiagnosisStatus: vi.fn(() => ({
+        status: "idle",
+        input: null,
+        selectedCandidate: null,
+        platforms: [],
+        updatedAt: null,
+        message: "等待严格单酒店诊断"
+      })),
+      getAliHotelMatchStatus: vi.fn(() => ({
+        status: "idle",
+        samples: [],
+        updatedAt: null,
+        message: "等待验证阿里商旅同店匹配"
+      })),
+      getHotelRatePlanProbeStatus: vi.fn(() => ({
+        status: "idle",
+        plans: [],
+        recommendedRatePlan: null,
+        updatedAt: null,
+        message: "等待验证酒店 4 个房型早餐口径完整率"
+      })),
+      getHotelAllRatePlanStatus: vi.fn(() => ({
+        status: "idle",
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        selectedCandidate: null,
+        samples: [],
+        updatedAt: null,
+        message: "等待选择青猫候选酒店并采集四平台四口径"
+      })),
+      getHotelCalibrationStatus: vi.fn(() => ({
+        status: "idle",
+        mode: "calibration",
+        limit: 3,
+        mainRatePlan: "大床有早餐",
+        platformOrder: ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"],
+        query: { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        samples: [],
+        updatedAt: null,
+        message: "等待执行 3 家酒店校准测试"
+      })),
       getSameFlightComparisonStatus: vi.fn(() => ({
         status: "idle",
         route: { scope: "国内", origin: "广州", destination: "上海", travelDate: "2026-05-21" },
@@ -572,11 +1252,47 @@ describe("management API", () => {
         updatedAt: null,
         message: "等待随机抽取同航班并查询竞品"
       })),
+      getZtripStatus: vi.fn(() => ({
+        status: "idle",
+        loginUrl: "https://www.z-trip.cn/v/vcommon/home",
+        checks: [],
+        updatedAt: null,
+        message: "等待验证在途商旅"
+      })),
+      getZtripFlightStatus: vi.fn(() => ({
+        status: "idle",
+        route: { scope: "国内", origin: "广州", destination: "上海", travelDate: "2026-05-21" },
+        selectedFlight: null,
+        candidates: [],
+        totalFlights: null,
+        updatedAt: null,
+        message: "等待采集在途商旅航班样本"
+      })),
+      getZtripHotelStatus: vi.fn(() => ({
+        status: "idle",
+        query: { city: "广州", checkInDate: "2026-05-21", checkOutDate: "2026-05-22", nights: 1 },
+        selectedRate: null,
+        rates: [],
+        updatedAt: null,
+        message: "等待采集在途商旅酒店样本"
+      })),
       openLoginSession: vi.fn(),
       runSilentProbe: vi.fn(async () => idlePilot),
       runAttachedProbe: vi.fn(),
       runQingmaoCandidateProbe: vi.fn(),
+      runQingmaoHotelCandidateProbe: vi.fn(),
+      runHotelMainRateProbe: vi.fn(),
+      runHotelGroupMainRateProbe: vi.fn(),
+      runHotelSingleDiagnosisProbe: vi.fn(),
+      runAliHotelMatchProbe: vi.fn(),
+      runHotelRatePlanProbe: vi.fn(),
+      runHotelAllRatePlanProbe: vi.fn(),
+      runHotelCalibrationProbe: vi.fn(),
+      cleanupBrowserPages: vi.fn(),
       runSameFlightComparisonProbe: vi.fn(),
+      runZtripProbe: vi.fn(),
+      runZtripFlightProbe: vi.fn(),
+      runZtripHotelProbe: vi.fn(),
       runDomesticBatchCollection: vi.fn(),
       runInternationalBatchCollection: vi.fn(),
       runFullBatchCollection: vi.fn(async () => {

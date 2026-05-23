@@ -13,7 +13,8 @@ import {
   Plane,
   Radar,
   RefreshCw,
-  ShieldCheck
+  ShieldCheck,
+  Trash2
 } from "lucide-react";
 import type { CollectionBatch } from "./domain/types";
 import { type ArtifactLinks, buildDashboardView } from "./ui/viewModel";
@@ -48,7 +49,10 @@ type PilotOutcome = "needs-config" | "opened" | "reachable" | "login-required" |
 type QingmaoCandidateStatus = "idle" | "running" | "completed" | "failed";
 type SameFlightComparisonStatus = "idle" | "running" | "completed" | "failed";
 type SameFlightQuoteStatus = "available" | "not-found" | "failed";
-type PilotBusyAction = "login" | "probe" | "attached" | "qingmao-candidates" | "same-flight" | "";
+type ZtripProbeStatus = "idle" | "running" | "completed" | "failed";
+type ZtripFlightProbeStatus = "idle" | "running" | "completed" | "failed";
+type ZtripHotelProbeStatus = "idle" | "running" | "completed" | "failed";
+type PilotBusyAction = "login" | "probe" | "attached" | "cleanup" | "qingmao-candidates" | "same-flight" | "ztrip" | "ztrip-flight" | "ztrip-hotel" | "";
 
 interface PilotPlatformState {
   platform: string;
@@ -135,6 +139,79 @@ interface SameFlightComparisonProbeResult {
   error?: string;
 }
 
+interface ZtripProbeCheck {
+  target: "入口页" | "航班入口" | "酒店入口";
+  outcome?: PilotOutcome;
+  note?: string;
+  pageTitle?: string;
+  finalUrl?: string;
+  screenshotUrl?: string;
+  error?: string;
+}
+
+interface ZtripProbeResult {
+  status: ZtripProbeStatus;
+  loginUrl: string;
+  checks: ZtripProbeCheck[];
+  updatedAt: string | null;
+  message: string;
+  error?: string;
+}
+
+interface ZtripFlightProbeResult {
+  status: ZtripFlightProbeStatus;
+  route: {
+    scope: "国内" | "国际";
+    origin: string;
+    destination: string;
+    travelDate: string;
+  };
+  selectedFlight: QingmaoFlightCandidate | null;
+  candidates: QingmaoFlightCandidate[];
+  totalFlights: number | null;
+  screenshotUrl?: string;
+  finalUrl?: string;
+  updatedAt: string | null;
+  message: string;
+  error?: string;
+}
+
+interface ZtripHotelRate {
+  hotelName: string;
+  roomType: string;
+  bedType: "大床" | "双床" | "";
+  breakfast: "有早餐" | "无早餐" | "";
+  price: number | null;
+  rawText: string;
+}
+
+interface ZtripHotelProbeResult {
+  status: ZtripHotelProbeStatus;
+  query: {
+    city: string;
+    checkInDate: string;
+    checkOutDate: string;
+    nights: number;
+  };
+  selectedRate: ZtripHotelRate | null;
+  rates: ZtripHotelRate[];
+  screenshotUrl?: string;
+  finalUrl?: string;
+  updatedAt: string | null;
+  message: string;
+  error?: string;
+}
+
+interface BrowserCleanupResult {
+  status: "completed" | "failed";
+  beforeCount: number;
+  closedCount: number;
+  afterCount: number;
+  updatedAt: string;
+  message: string;
+  error?: string;
+}
+
 type ScopeFilter = "全部" | "国内" | "国际";
 
 const scopeFilters: ScopeFilter[] = ["全部", "国内", "国际"];
@@ -196,7 +273,7 @@ function connectionStatus(pilot: PilotResult | null, busy: PilotBusyAction, erro
     return {
       tone: "running",
       title: "正在连接当前登录窗口",
-      detail: "系统正在检查三平台是否已经登录并可读取页面。"
+      detail: "系统正在检查四个平台是否已经登录并可读取页面。"
     };
   }
 
@@ -212,7 +289,7 @@ function connectionStatus(pilot: PilotResult | null, busy: PilotBusyAction, erro
     return {
       tone: "idle",
       title: "尚未连接",
-      detail: "先打开登录浏览器，登录三平台并保持窗口打开，再点击连接。"
+      detail: "先打开登录浏览器，登录四个平台并保持窗口打开，再点击连接。"
     };
   }
 
@@ -220,7 +297,7 @@ function connectionStatus(pilot: PilotResult | null, busy: PilotBusyAction, erro
     return {
       tone: "idle",
       title: "等待人工登录",
-      detail: "登录青猫差旅、携程商旅、阿里商旅后，回到这里点击连接当前登录窗口。"
+      detail: "登录青猫差旅、携程商旅、阿里商旅、在途商旅后，回到这里点击连接当前登录窗口。"
     };
   }
 
@@ -228,7 +305,7 @@ function connectionStatus(pilot: PilotResult | null, busy: PilotBusyAction, erro
     return {
       tone: "idle",
       title: "尚未连接",
-      detail: "先打开登录浏览器，登录三平台并保持窗口打开，再点击连接。"
+      detail: "先打开登录浏览器，登录四个平台并保持窗口打开，再点击连接。"
     };
   }
 
@@ -258,8 +335,8 @@ function connectionStatus(pilot: PilotResult | null, busy: PilotBusyAction, erro
 
   return {
     tone: reachable.length > 0 ? "partial" : "idle",
-    title: `未完全连接：${reachable.length}/${configured.length || 3} 个平台可访问`,
-    detail: pending || "请确认三平台已经登录，并且登录窗口没有关闭。"
+    title: `未完全连接：${reachable.length}/${configured.length || 4} 个平台可访问`,
+    detail: pending || "请确认四个平台已经登录，并且登录窗口没有关闭。"
   };
 }
 
@@ -281,6 +358,39 @@ function sameFlightStatusLabel(status?: SameFlightComparisonStatus) {
     running: "查询中",
     completed: "已完成",
     failed: "查询失败"
+  };
+  return labels[status];
+}
+
+function ztripStatusLabel(status?: ZtripProbeStatus) {
+  if (!status) return "待验证";
+  const labels: Record<ZtripProbeStatus, string> = {
+    idle: "待验证",
+    running: "验证中",
+    completed: "已完成",
+    failed: "验证失败"
+  };
+  return labels[status];
+}
+
+function ztripFlightStatusLabel(status?: ZtripFlightProbeStatus) {
+  if (!status) return "待采集";
+  const labels: Record<ZtripFlightProbeStatus, string> = {
+    idle: "待采集",
+    running: "采集中",
+    completed: "已完成",
+    failed: "采集失败"
+  };
+  return labels[status];
+}
+
+function ztripHotelStatusLabel(status?: ZtripHotelProbeStatus) {
+  if (!status) return "待采集";
+  const labels: Record<ZtripHotelProbeStatus, string> = {
+    idle: "待采集",
+    running: "采集中",
+    completed: "已完成",
+    failed: "采集失败"
   };
   return labels[status];
 }
@@ -366,6 +476,9 @@ export function App() {
   const [pilot, setPilot] = useState<PilotResult | null>(null);
   const [qingmaoCandidates, setQingmaoCandidates] = useState<QingmaoCandidateProbeResult | null>(null);
   const [sameFlightComparison, setSameFlightComparison] = useState<SameFlightComparisonProbeResult | null>(null);
+  const [ztripProbe, setZtripProbe] = useState<ZtripProbeResult | null>(null);
+  const [ztripFlight, setZtripFlight] = useState<ZtripFlightProbeResult | null>(null);
+  const [ztripHotel, setZtripHotel] = useState<ZtripHotelProbeResult | null>(null);
   const [pilotBusy, setPilotBusy] = useState<PilotBusyAction>("");
   const [pilotError, setPilotError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -429,14 +542,20 @@ export function App() {
   }
 
   async function refreshPilot() {
-    const [nextPilot, nextQingmaoCandidates, nextSameFlightComparison] = await Promise.all([
+    const [nextPilot, nextQingmaoCandidates, nextSameFlightComparison, nextZtripProbe, nextZtripFlight, nextZtripHotel] = await Promise.all([
       readJson<PilotResult>("/api/pilot/status"),
       readJson<QingmaoCandidateProbeResult>("/api/pilot/qingmao-candidates/status"),
-      readJson<SameFlightComparisonProbeResult>("/api/pilot/same-flight/status")
+      readJson<SameFlightComparisonProbeResult>("/api/pilot/same-flight/status"),
+      readJson<ZtripProbeResult>("/api/pilot/ztrip/status"),
+      readJson<ZtripFlightProbeResult>("/api/pilot/ztrip-flight/status"),
+      readJson<ZtripHotelProbeResult>("/api/pilot/ztrip-hotel/status")
     ]);
     setPilot(nextPilot);
     setQingmaoCandidates(nextQingmaoCandidates);
     setSameFlightComparison(nextSameFlightComparison);
+    setZtripProbe(nextZtripProbe);
+    setZtripFlight(nextZtripFlight);
+    setZtripHotel(nextZtripHotel);
   }
 
   async function collect() {
@@ -448,7 +567,7 @@ export function App() {
       const result = await readJson<BatchResponse>("/api/collect", { method: "POST" });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
-      setCollectionResult({ tone: "success", title: "模拟采集完成", detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和销售长截图。` });
+      setCollectionResult({ tone: "success", title: "模拟采集完成", detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和离线网页包。` });
       await refreshStatus();
     } catch (collectionError) {
       const message = collectionError instanceof Error ? collectionError.message : "采集失败";
@@ -474,7 +593,7 @@ export function App() {
       });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
-      setCollectionResult({ tone: "success", title: "国内真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条国内样本，可以导出 Excel 和销售长截图。` });
+      setCollectionResult({ tone: "success", title: "国内真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条国内样本，可以导出 Excel 和离线网页包。` });
       await refreshStatus();
     } catch (collectionError) {
       const message = collectionError instanceof Error ? collectionError.message : "国内真实采集失败";
@@ -500,7 +619,7 @@ export function App() {
       });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
-      setCollectionResult({ tone: "success", title: "国际真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条国际样本，可以导出 Excel 和销售长截图。` });
+      setCollectionResult({ tone: "success", title: "国际真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条国际样本，可以导出 Excel 和离线网页包。` });
       await refreshStatus();
     } catch (collectionError) {
       const message = collectionError instanceof Error ? collectionError.message : "国际真实采集失败";
@@ -522,7 +641,7 @@ export function App() {
       const result = await readJson<BatchResponse>("/api/collect-real-full", { method: "POST" });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
-      setCollectionResult({ tone: "success", title: "完整真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条三平台同航班样本，可以导出 Excel 和销售长截图。` });
+      setCollectionResult({ tone: "success", title: "完整真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和离线网页包。` });
       await refreshStatus();
     } catch (collectionError) {
       const message = collectionError instanceof Error ? collectionError.message : "完整真实采集失败";
@@ -577,6 +696,31 @@ export function App() {
     }
   }
 
+  async function cleanupBrowserPages() {
+    setPilotBusy("cleanup");
+    setPilotError("");
+
+    try {
+      const result = await readJson<BrowserCleanupResult>("/api/pilot/cleanup-browser-pages", { method: "POST" });
+      if (result.status === "failed") {
+        setPilotError(result.error ?? result.message);
+        setCollectionResult({ tone: "failed", title: "采集窗口清理失败", detail: result.error ?? result.message });
+        return;
+      }
+      setCollectionResult({
+        tone: "success",
+        title: "采集窗口已清理",
+        detail: `关闭 ${result.closedCount} 个采集临时窗口，当前剩余 ${result.afterCount} 个窗口。`
+      });
+    } catch (cleanupError) {
+      const message = cleanupError instanceof Error ? cleanupError.message : "采集窗口清理失败";
+      setPilotError(message);
+      setCollectionResult({ tone: "failed", title: "采集窗口清理失败", detail: message });
+    } finally {
+      setPilotBusy("");
+    }
+  }
+
   async function runQingmaoCandidateProbe() {
     setPilotBusy("qingmao-candidates");
     setPilotError("");
@@ -600,6 +744,48 @@ export function App() {
       setSameFlightComparison(result);
     } catch (probeError) {
       setPilotError(probeError instanceof Error ? probeError.message : "同航班比价失败");
+    } finally {
+      setPilotBusy("");
+    }
+  }
+
+  async function runZtripProbe() {
+    setPilotBusy("ztrip");
+    setPilotError("");
+
+    try {
+      const result = await readJson<ZtripProbeResult>("/api/pilot/ztrip/run", { method: "POST" });
+      setZtripProbe(result);
+    } catch (probeError) {
+      setPilotError(probeError instanceof Error ? probeError.message : "在途商旅验证失败");
+    } finally {
+      setPilotBusy("");
+    }
+  }
+
+  async function runZtripFlightProbe() {
+    setPilotBusy("ztrip-flight");
+    setPilotError("");
+
+    try {
+      const result = await readJson<ZtripFlightProbeResult>("/api/pilot/ztrip-flight/run", { method: "POST" });
+      setZtripFlight(result);
+    } catch (probeError) {
+      setPilotError(probeError instanceof Error ? probeError.message : "在途商旅航班样本采集失败");
+    } finally {
+      setPilotBusy("");
+    }
+  }
+
+  async function runZtripHotelProbe() {
+    setPilotBusy("ztrip-hotel");
+    setPilotError("");
+
+    try {
+      const result = await readJson<ZtripHotelProbeResult>("/api/pilot/ztrip-hotel/run", { method: "POST" });
+      setZtripHotel(result);
+    } catch (probeError) {
+      setPilotError(probeError instanceof Error ? probeError.message : "在途商旅酒店样本采集失败");
     } finally {
       setPilotBusy("");
     }
@@ -641,7 +827,7 @@ export function App() {
         </div>
         <div className="topbar-status">
           <ShieldCheck size={18} />
-          第一版真实采集闭环
+          第二版平台验证
         </div>
       </header>
 
@@ -650,7 +836,7 @@ export function App() {
           <p className="eyebrow">Manual Collection Console</p>
           <h1>航班比价采集台</h1>
           <p>
-            先人工登录三平台，再由系统随机抽取未来 3 天后的航班，生成三平台同航班价格对比、Excel 和销售长截图。
+            先人工登录四个平台，再由系统随机抽取未来 3 天后的航班，生成同航班价格对比、Excel 和离线网页包。
           </p>
         </div>
 
@@ -668,6 +854,10 @@ export function App() {
           <button className="primary-button" type="button" onClick={runAttachedPilotProbe} disabled={operationLocked}>
             <Monitor size={18} className={pilotBusy === "attached" ? "spin" : ""} />
             {pilotBusy === "attached" ? "正在连接窗口" : connection.tone === "connected" ? "已连接，可重新检测" : "连接当前登录窗口"}
+          </button>
+          <button className="ghost-button active-link" type="button" onClick={cleanupBrowserPages} disabled={operationLocked}>
+            <Trash2 size={18} className={pilotBusy === "cleanup" ? "spin" : ""} />
+            {pilotBusy === "cleanup" ? "正在清理" : "清理采集窗口"}
           </button>
           <div className={`connection-card ${connection.tone}`}>
             <div>
@@ -708,7 +898,7 @@ export function App() {
           ) : null}
           <div className="download-row">
             <DownloadButton href={artifacts?.excel ?? null} icon={<FileSpreadsheet size={17} />} label="导出 Excel" />
-            <DownloadButton href={artifacts?.salesSnapshot ?? null} icon={<ImageIcon size={17} />} label="销售长截图" />
+            <DownloadButton href={artifacts?.offlinePackage ?? null} icon={<ImageIcon size={17} />} label="离线网页包" />
           </div>
         </div>
       </section>
@@ -719,7 +909,7 @@ export function App() {
             <div className="pilot-copy">
               <p className="eyebrow"><span className="section-dot" /> Advanced Checks</p>
               <h2>高级验证</h2>
-              <p>这些按钮只用于排查问题：检查登录态、单独读青猫候选池、单条同航班比价，或只跑国内/国际分段采集。</p>
+              <p>这些按钮只用于排查问题：检查登录态、验证在途商旅、采集在途航班和酒店样本、单独读青猫候选池、单条同航班比价，或只跑国内/国际分段采集。</p>
             </div>
             <div className="pilot-route">
               <span>{pilot ? pilotStatusLabel(pilot.status) : "读取中"}</span>
@@ -731,6 +921,18 @@ export function App() {
           <button className="primary-button inline-primary" type="button" onClick={runPilotProbe} disabled={operationLocked}>
             <Radar size={17} className={pilotBusy === "probe" ? "spin" : ""} />
             {pilotBusy === "probe" ? "后台探测中" : "运行后台探测"}
+          </button>
+          <button className="primary-button inline-primary strong-action" type="button" onClick={runZtripProbe} disabled={operationLocked}>
+            <Monitor size={17} className={pilotBusy === "ztrip" ? "spin" : ""} />
+            {pilotBusy === "ztrip" ? "验证中" : "验证在途商旅"}
+          </button>
+          <button className="primary-button inline-primary strong-action" type="button" onClick={runZtripFlightProbe} disabled={operationLocked}>
+            <Plane size={17} className={pilotBusy === "ztrip-flight" ? "spin" : ""} />
+            {pilotBusy === "ztrip-flight" ? "采集中" : "采集在途航班样本"}
+          </button>
+          <button className="primary-button inline-primary strong-action" type="button" onClick={runZtripHotelProbe} disabled={operationLocked}>
+            <Monitor size={17} className={pilotBusy === "ztrip-hotel" ? "spin" : ""} />
+            {pilotBusy === "ztrip-hotel" ? "采集中" : "采集在途酒店样本"}
           </button>
           <button className="primary-button inline-primary strong-action" type="button" onClick={runQingmaoCandidateProbe} disabled={operationLocked}>
             <Plane size={17} className={pilotBusy === "qingmao-candidates" ? "spin" : ""} />
@@ -776,6 +978,212 @@ export function App() {
               ) : null}
             </div>
           ))}
+        </div>
+        <div className={`same-flight-panel ztrip-panel ${ztripProbe?.status ?? "idle"}`}>
+          <div className="candidate-head">
+            <div>
+              <span>{ztripStatusLabel(ztripProbe?.status)}</span>
+              <b>在途商旅单平台验证</b>
+              <small>{ztripProbe?.message ?? "先确认入口、登录态、航班入口、酒店入口是否可访问"}</small>
+            </div>
+            <div className="candidate-counts">
+              <strong>{ztripProbe?.checks.filter((check) => check.outcome === "reachable").length ?? "--"}</strong>
+              <span>可访问项</span>
+            </div>
+            <button
+              className="ghost-button active-link compact-action"
+              type="button"
+              onClick={runZtripProbe}
+              disabled={operationLocked}
+            >
+              <Monitor size={15} className={pilotBusy === "ztrip" ? "spin" : ""} />
+              重新验证
+            </button>
+          </div>
+          {ztripProbe?.error ? (
+            <div className="pilot-error compact" role="alert">
+              <AlertTriangle size={16} />
+              {ztripProbe.error}
+            </div>
+          ) : null}
+          {ztripProbe && ztripProbe.checks.length > 0 ? (
+            <div className="same-flight-quotes">
+              {ztripProbe.checks.map((check) => (
+                <div className={`same-flight-quote ${check.outcome ?? "pending"}`} key={check.target}>
+                  <span>{check.target}</span>
+                  <strong>{pilotOutcomeLabel(check.outcome)}</strong>
+                  <small>{check.note ?? "等待验证"}</small>
+                  {check.error ? <em>{check.error}</em> : null}
+                  <div className="quote-links">
+                    {check.screenshotUrl ? (
+                      <a href={check.screenshotUrl} target="_blank" rel="noreferrer">
+                        <ExternalLink size={14} />
+                        网页截图
+                      </a>
+                    ) : null}
+                    {check.finalUrl ? (
+                      <a href={check.finalUrl} target="_blank" rel="noreferrer">
+                        <ExternalLink size={14} />
+                        平台页面
+                      </a>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <div className={`qingmao-candidate-panel ztrip-panel ${ztripFlight?.status ?? "idle"}`}>
+          <div className="candidate-head">
+            <div>
+              <span>{ztripFlightStatusLabel(ztripFlight?.status)}</span>
+              <b>在途航班样本</b>
+              <small>
+                {ztripFlight
+                  ? `${ztripFlight.route.origin} → ${ztripFlight.route.destination} · ${ztripFlight.route.travelDate}`
+                  : "广州 → 上海 · 未来 3 天后"}
+              </small>
+            </div>
+            <div className="candidate-counts">
+              <strong>{ztripFlight?.totalFlights ?? "--"}</strong>
+              <span>页面航班数</span>
+            </div>
+            <button
+              className="ghost-button active-link compact-action"
+              type="button"
+              onClick={runZtripFlightProbe}
+              disabled={operationLocked}
+            >
+              <Plane size={15} className={pilotBusy === "ztrip-flight" ? "spin" : ""} />
+              重新采集
+            </button>
+          </div>
+          {ztripFlight?.error ? (
+            <div className="pilot-error compact" role="alert">
+              <AlertTriangle size={16} />
+              {ztripFlight.error}
+            </div>
+          ) : null}
+          {ztripFlight?.selectedFlight ? (
+            <div className="same-flight-quotes">
+              <div className="same-flight-quote qingmao available">
+                <span>首条样本</span>
+                <strong>¥{ztripFlight.selectedFlight.price ?? "--"}</strong>
+                <small>
+                  {ztripFlight.selectedFlight.airline}{ztripFlight.selectedFlight.flightNo} · {ztripFlight.selectedFlight.departureTime} → {ztripFlight.selectedFlight.arrivalTime}
+                </small>
+                <div className="quote-links">
+                  {ztripFlight.screenshotUrl ? (
+                    <a href={ztripFlight.screenshotUrl} target="_blank" rel="noreferrer">
+                      <ExternalLink size={14} />
+                      网页截图
+                    </a>
+                  ) : null}
+                  {ztripFlight.finalUrl ? (
+                    <a href={ztripFlight.finalUrl} target="_blank" rel="noreferrer">
+                      <ExternalLink size={14} />
+                      平台页面
+                    </a>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {ztripFlight && ztripFlight.candidates.length > 0 ? (
+            <div className="candidate-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>航班</th>
+                    <th>时间</th>
+                    <th>机场</th>
+                    <th>价格</th>
+                    <th>舱位</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ztripFlight.candidates.slice(0, 6).map((candidate) => (
+                    <tr key={`ztrip-${candidate.flightNo}-${candidate.departureTime}`}>
+                      <td>
+                        <b>{candidate.airline}{candidate.flightNo}</b>
+                        <span>{candidate.aircraft}</span>
+                      </td>
+                      <td>
+                        <b>{candidate.departureTime} → {candidate.arrivalTime}</b>
+                        <span>{formatDuration(candidate.durationMinutes)}</span>
+                      </td>
+                      <td>
+                        <b>{candidate.originAirport}</b>
+                        <span>{candidate.destinationAirport}</span>
+                      </td>
+                      <td className="candidate-price">¥{candidate.price ?? "--"}</td>
+                      <td>
+                        <b>{candidate.discount || candidate.cabin || "待识别"}</b>
+                        <span>{candidate.meal}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+        <div className={`same-flight-panel ztrip-panel ${ztripHotel?.status ?? "idle"}`}>
+          <div className="candidate-head">
+            <div>
+              <span>{ztripHotelStatusLabel(ztripHotel?.status)}</span>
+              <b>在途酒店样本</b>
+              <small>
+                {ztripHotel
+                  ? `${ztripHotel.query.city} · ${ztripHotel.query.checkInDate} 至 ${ztripHotel.query.checkOutDate}`
+                  : "广州 · 明天入住 1 晚"}
+              </small>
+            </div>
+            <div className="candidate-counts">
+              <strong>{ztripHotel?.rates.length ?? "--"}</strong>
+              <span>大床有早餐</span>
+            </div>
+            <button
+              className="ghost-button active-link compact-action"
+              type="button"
+              onClick={runZtripHotelProbe}
+              disabled={operationLocked}
+            >
+              <Monitor size={15} className={pilotBusy === "ztrip-hotel" ? "spin" : ""} />
+              重新采集
+            </button>
+          </div>
+          {ztripHotel?.error ? (
+            <div className="pilot-error compact" role="alert">
+              <AlertTriangle size={16} />
+              {ztripHotel.error}
+            </div>
+          ) : null}
+          {ztripHotel?.selectedRate ? (
+            <div className="same-flight-quotes">
+              <div className="same-flight-quote qingmao available">
+                <span>{ztripHotel.selectedRate.hotelName}</span>
+                <strong>¥{ztripHotel.selectedRate.price ?? "--"}</strong>
+                <small>
+                  {ztripHotel.selectedRate.roomType} · {ztripHotel.selectedRate.bedType} · {ztripHotel.selectedRate.breakfast}
+                </small>
+                <div className="quote-links">
+                  {ztripHotel.screenshotUrl ? (
+                    <a href={ztripHotel.screenshotUrl} target="_blank" rel="noreferrer">
+                      <ExternalLink size={14} />
+                      网页截图
+                    </a>
+                  ) : null}
+                  {ztripHotel.finalUrl ? (
+                    <a href={ztripHotel.finalUrl} target="_blank" rel="noreferrer">
+                      <ExternalLink size={14} />
+                      平台页面
+                    </a>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
         <div className={`qingmao-candidate-panel ${qingmaoCandidates?.status ?? "idle"}`}>
           <div className="candidate-head">
@@ -917,7 +1325,7 @@ export function App() {
           <Monitor size={34} />
           <div>
             <h2>还没有可展示的数据</h2>
-            <p>登录三平台并连接当前窗口后，点击“开始完整真实采集”生成 Excel 和销售长截图。</p>
+            <p>登录四个平台并连接当前窗口后，点击“开始完整真实采集”生成 Excel 和离线网页包。</p>
           </div>
         </section>
       ) : null}
@@ -936,7 +1344,7 @@ export function App() {
               <small>需要在客户现场放大展示</small>
             </div>
             <div className="metric-item">
-              <span>青猫高于竞品最低</span>
+              <span>青猫高于对比口径</span>
               <strong>{view.higherThanLowestCount}</strong>
               <small>弱提示，内部复盘即可</small>
             </div>
@@ -1027,7 +1435,7 @@ export function App() {
                         <b className="gap-badge">
                           {sample.gapLabel}
                         </b>
-                        <span>竞品最低：{sample.lowestPlatform}</span>
+                        <span>最低价平台：{sample.lowestPlatform}</span>
                       </td>
                       <td>
                         <div className={`conclusion-cell ${sample.gapTone}`}>

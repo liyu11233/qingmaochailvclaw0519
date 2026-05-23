@@ -1,6 +1,6 @@
 export type RouteScope = "国内" | "国际";
 
-export type PlatformName = "青猫差旅" | "携程商旅" | "阿里商旅";
+export type PlatformName = "青猫差旅" | "携程商旅" | "阿里商旅" | "在途商旅";
 
 export type QuoteStatus = "可订" | "无同航班" | "未展示" | "不可订" | "采集失败";
 
@@ -21,6 +21,10 @@ export interface PlatformQuote {
   status: QuoteStatus;
   evidencePath: string;
   sourceUrl: string;
+  rawHotelName?: string;
+  rawRoomName?: string;
+  normalizedRoomLabel?: HotelRatePlanLabel;
+  missingReason?: string;
 }
 
 export interface FlightSample {
@@ -39,6 +43,28 @@ export interface FlightSample {
   quotes: PlatformQuote[];
 }
 
+export type HotelGroup = "如家集团" | "锦江集团" | "华住集团" | "东呈集团" | "亚朵集团";
+
+export type HotelRatePlanLabel = "大床无早餐" | "大床有早餐" | "双床无早餐" | "双床有早餐";
+
+export interface HotelRatePlan {
+  label: HotelRatePlanLabel;
+  quotes: PlatformQuote[];
+}
+
+export interface HotelSample {
+  id: string;
+  group: HotelGroup;
+  brand: string;
+  hotelName: string;
+  city: string;
+  checkInDate: string;
+  checkOutDate: string;
+  nights: number;
+  primaryRatePlan: HotelRatePlanLabel;
+  ratePlans: HotelRatePlan[];
+}
+
 export interface CollectionBatch {
   id: string;
   status: "ready" | "failed" | "running";
@@ -47,6 +73,7 @@ export interface CollectionBatch {
   successCount: number;
   failedCount: number;
   samples: FlightSample[];
+  hotels?: HotelSample[];
   failureNotes?: string[];
 }
 
@@ -54,7 +81,18 @@ export interface FlightSummary {
   sampleId: string;
   lowestPlatform: PlatformName | "";
   qingmaoGap: number | null;
+  comparisonBasis: "highestCompetitor" | "averageCompetitor" | "unavailable";
+  comparisonLabel: string;
   availablePlatformCount: number;
   evidenceCount: number;
   conclusion: string;
+}
+
+export interface PriceComparisonSummary {
+  lowestPlatform: PlatformName | "";
+  qingmaoGap: number | null;
+  comparisonBasis: "highestCompetitor" | "averageCompetitor" | "unavailable";
+  comparisonLabel: string;
+  conclusion: string;
+  competitorCount: number;
 }

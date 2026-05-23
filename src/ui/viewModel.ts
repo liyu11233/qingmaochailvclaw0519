@@ -3,7 +3,7 @@ import type { CollectionBatch, FlightSample, PlatformQuote } from "../domain/typ
 
 export interface ArtifactLinks {
   excel: string;
-  salesSnapshot: string;
+  offlinePackage: string;
 }
 
 export interface QuoteView {
@@ -63,13 +63,6 @@ export function formatDuration(minutes: number) {
   return hours > 0 ? `${hours}小时${rest}分` : `${rest}分`;
 }
 
-function formatGap(gap: number | null) {
-  if (gap === null) return "无可比价格";
-  if (gap < 0) return `低${Math.abs(gap)}元`;
-  if (gap === 0) return "持平";
-  return `高${gap}元`;
-}
-
 function gapTone(gap: number | null): SampleView["gapTone"] {
   if (gap === null) return "unknown";
   if (gap < 0) return "advantage";
@@ -102,7 +95,7 @@ export function buildSampleView(sample: FlightSample): SampleView {
     })),
     lowestPlatform: summary.lowestPlatform || "无",
     qingmaoGap: summary.qingmaoGap,
-    gapLabel: formatGap(summary.qingmaoGap),
+    gapLabel: summary.comparisonLabel,
     gapTone: gapTone(summary.qingmaoGap),
     conclusion: summary.conclusion
   };

@@ -7,13 +7,27 @@ import { buildFakeBatch } from "../src/domain/fakeBatch";
 import type { CollectionBatch } from "../src/domain/types";
 import {
   createPlaywrightPilotCollector,
+  type AliHotelMatchProbeResult,
+  type BrowserCleanupResult,
+  type HotelAllRatePlanProbeResult,
+  type HotelCalibrationInput,
+  type HotelCalibrationResult,
+  type HotelGroupMainRateProbeResult,
+  type HotelMainRateProbeResult,
+  type HotelSingleDiagnosisInput,
+  type HotelSingleDiagnosisProbeResult,
+  type HotelRatePlanProbeResult,
   type PilotCollector,
   type PilotResult,
   type QingmaoCandidateProbeResult,
-  type SameFlightComparisonProbeResult
+  type QingmaoHotelCandidateProbeResult,
+  type SameFlightComparisonProbeResult,
+  type ZtripFlightProbeResult,
+  type ZtripHotelProbeResult,
+  type ZtripProbeResult
 } from "./collectors/pilot";
 import { exportBatchWorkbook } from "./exporters/excel";
-import { exportSalesLongScreenshot } from "./exporters/offlinePackage";
+import { exportOfflinePackage } from "./exporters/offlinePackage";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
@@ -21,7 +35,7 @@ const servedOutputsRoot = path.join(projectRoot, "outputs");
 
 interface ArtifactState {
   excel: string;
-  salesSnapshot: string;
+  offlinePackage: string;
 }
 
 interface AppState {
@@ -29,7 +43,18 @@ interface AppState {
   artifacts: ArtifactState | null;
   pilot: PilotResult;
   qingmaoCandidates: QingmaoCandidateProbeResult;
+  qingmaoHotelCandidates: QingmaoHotelCandidateProbeResult;
+  hotelMainRate: HotelMainRateProbeResult;
+  hotelGroupMainRate: HotelGroupMainRateProbeResult;
+  hotelSingleDiagnosis: HotelSingleDiagnosisProbeResult;
+  aliHotelMatch: AliHotelMatchProbeResult;
+  hotelRatePlanProbe: HotelRatePlanProbeResult;
+  hotelAllRatePlan: HotelAllRatePlanProbeResult;
+  hotelCalibration: HotelCalibrationResult;
   sameFlightComparison: SameFlightComparisonProbeResult;
+  ztrip: ZtripProbeResult;
+  ztripFlight: ZtripFlightProbeResult;
+  ztripHotel: ZtripHotelProbeResult;
 }
 
 interface ActiveOperation {
@@ -39,7 +64,7 @@ interface ActiveOperation {
 
 interface ArtifactExporters {
   workbook: typeof exportBatchWorkbook;
-  salesSnapshot: typeof exportSalesLongScreenshot;
+  offlinePackage: typeof exportOfflinePackage;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -51,14 +76,96 @@ function restoreArtifactState(value: unknown): ArtifactState | null {
     return null;
   }
 
-  const salesSnapshot = typeof value.salesSnapshot === "string" ? value.salesSnapshot : typeof value.offlinePackage === "string" ? value.offlinePackage : "";
-  if (!salesSnapshot) {
+  const offlinePackage = typeof value.offlinePackage === "string" ? value.offlinePackage : typeof value.salesSnapshot === "string" ? value.salesSnapshot : "";
+  if (!offlinePackage) {
     return null;
   }
 
   return {
     excel: value.excel,
-    salesSnapshot
+    offlinePackage
+  };
+}
+
+const HOTEL_SINGLE_DIAGNOSIS_RATE_PLANS = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"] as const;
+const HOTEL_CALIBRATION_COMPETITOR_PLATFORMS = ["阿里商旅", "在途商旅", "携程商旅"] as const;
+
+function parseHotelSingleDiagnosisInput(value: unknown): { ok: true; input: HotelSingleDiagnosisInput } | { ok: false; error: string } {
+  if (!isRecord(value)) {
+    return { ok: false, error: "请求体必须是对象" };
+  }
+
+  const city = typeof value.city === "string" ? value.city.trim() : "";
+  const keyword = typeof value.keyword === "string" ? value.keyword.trim() : "";
+  const checkInDate = typeof value.checkInDate === "string" ? value.checkInDate.trim() : "";
+  const checkOutDate = typeof value.checkOutDate === "string" ? value.checkOutDate.trim() : "";
+  const ratePlan = typeof value.ratePlan === "string" ? value.ratePlan.trim() : "";
+
+  if (!city || !keyword || !checkInDate || !checkOutDate || !ratePlan) {
+    return { ok: false, error: "city、keyword、checkInDate、checkOutDate、ratePlan 均为必填" };
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(checkInDate) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOutDate)) {
+    return { ok: false, error: "checkInDate 和 checkOutDate 必须是 YYYY-MM-DD" };
+  }
+  if (!HOTEL_SINGLE_DIAGNOSIS_RATE_PLANS.includes(ratePlan as HotelSingleDiagnosisInput["ratePlan"])) {
+    return { ok: false, error: "ratePlan 不在允许范围内" };
+  }
+
+  return {
+    ok: true,
+    input: {
+      city,
+      keyword,
+      checkInDate,
+      checkOutDate,
+      ratePlan: ratePlan as HotelSingleDiagnosisInput["ratePlan"]
+    }
+  };
+}
+
+function parseHotelCalibrationInput(value: unknown): { ok: true; input: HotelCalibrationInput } | { ok: false; error: string } {
+  if (value === undefined || value === null) {
+    return { ok: true, input: {} };
+  }
+  if (!isRecord(value)) {
+    return { ok: false, error: "请求体必须是对象" };
+  }
+
+  const checkInDate = typeof value.checkInDate === "string" ? value.checkInDate.trim() : undefined;
+  const checkOutDate = typeof value.checkOutDate === "string" ? value.checkOutDate.trim() : undefined;
+  let platforms: HotelCalibrationInput["platforms"] | undefined;
+  if ((checkInDate && !checkOutDate) || (!checkInDate && checkOutDate)) {
+    return { ok: false, error: "checkInDate 和 checkOutDate 必须同时传入" };
+  }
+  if (checkInDate && !/^\d{4}-\d{2}-\d{2}$/.test(checkInDate)) {
+    return { ok: false, error: "checkInDate 必须是 YYYY-MM-DD" };
+  }
+  if (checkOutDate && !/^\d{4}-\d{2}-\d{2}$/.test(checkOutDate)) {
+    return { ok: false, error: "checkOutDate 必须是 YYYY-MM-DD" };
+  }
+  if (value.platforms !== undefined) {
+    if (!Array.isArray(value.platforms) || value.platforms.length === 0) {
+      return { ok: false, error: "platforms 必须是非空数组" };
+    }
+    const normalizedPlatforms = value.platforms
+      .filter((platform): platform is string => typeof platform === "string")
+      .map((platform) => platform.trim());
+    if (normalizedPlatforms.length !== value.platforms.length) {
+      return { ok: false, error: "platforms 只能包含平台名称字符串" };
+    }
+    const invalidPlatform = normalizedPlatforms.find((platform) => !HOTEL_CALIBRATION_COMPETITOR_PLATFORMS.includes(platform as typeof HOTEL_CALIBRATION_COMPETITOR_PLATFORMS[number]));
+    if (invalidPlatform) {
+      return { ok: false, error: `platforms 暂只支持：${HOTEL_CALIBRATION_COMPETITOR_PLATFORMS.join("、")}` };
+    }
+    platforms = Array.from(new Set(normalizedPlatforms)) as HotelCalibrationInput["platforms"];
+  }
+
+  return {
+    ok: true,
+    input: {
+      ...(checkInDate && checkOutDate ? { checkInDate, checkOutDate } : {}),
+      ...(platforms ? { platforms } : {})
+    }
   };
 }
 
@@ -66,7 +173,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
   const app = express();
   const outputDir = options.outputDir ?? path.join(servedOutputsRoot, "current");
   const workbookExporter = options.exporters?.workbook ?? exportBatchWorkbook;
-  const salesSnapshotExporter = options.exporters?.salesSnapshot ?? exportSalesLongScreenshot;
+  const offlinePackageExporter = options.exporters?.offlinePackage ?? exportOfflinePackage;
   const pilotCollector =
     options.pilotCollector ??
     createPlaywrightPilotCollector({
@@ -111,7 +218,18 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     artifacts: persistedState.artifacts,
     pilot: pilotCollector.getStatus(),
     qingmaoCandidates: pilotCollector.getQingmaoCandidateStatus(),
-    sameFlightComparison: pilotCollector.getSameFlightComparisonStatus()
+    qingmaoHotelCandidates: pilotCollector.getQingmaoHotelCandidateStatus(),
+    hotelMainRate: pilotCollector.getHotelMainRateStatus(),
+    hotelGroupMainRate: pilotCollector.getHotelGroupMainRateStatus(),
+    hotelSingleDiagnosis: pilotCollector.getHotelSingleDiagnosisStatus(),
+    aliHotelMatch: pilotCollector.getAliHotelMatchStatus(),
+    hotelRatePlanProbe: pilotCollector.getHotelRatePlanProbeStatus(),
+    hotelAllRatePlan: pilotCollector.getHotelAllRatePlanStatus(),
+    hotelCalibration: pilotCollector.getHotelCalibrationStatus(),
+    sameFlightComparison: pilotCollector.getSameFlightComparisonStatus(),
+    ztrip: pilotCollector.getZtripStatus(),
+    ztripFlight: pilotCollector.getZtripFlightStatus(),
+    ztripHotel: pilotCollector.getZtripHotelStatus()
   };
 
   async function persistCurrentBatchState() {
@@ -123,11 +241,11 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     );
   }
 
-  async function setCurrentBatchArtifacts(batch: CollectionBatch, excelPath: string, salesSnapshotPath: string) {
+  async function setCurrentBatchArtifacts(batch: CollectionBatch, excelPath: string, offlinePackagePath: string) {
     state.batch = batch;
     state.artifacts = {
       excel: toOutputUrl(excelPath),
-      salesSnapshot: toOutputUrl(salesSnapshotPath)
+      offlinePackage: toOutputUrl(offlinePackagePath)
     };
     await persistCurrentBatchState();
 
@@ -192,6 +310,141 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     };
   }
 
+  function decorateQingmaoHotelCandidateResult(result: QingmaoHotelCandidateProbeResult): QingmaoHotelCandidateProbeResult {
+    if (!result.screenshotPath || path.relative(servedOutputsRoot, result.screenshotPath).startsWith("..")) {
+      return result;
+    }
+
+    return {
+      ...result,
+      screenshotUrl: toOutputUrl(result.screenshotPath)
+    };
+  }
+
+  function decorateHotelMainRateResult(result: HotelMainRateProbeResult): HotelMainRateProbeResult {
+    return {
+      ...result,
+      quotes: result.quotes.map((quote) => {
+        if (!quote.screenshotPath || path.relative(servedOutputsRoot, quote.screenshotPath).startsWith("..")) {
+          return quote;
+        }
+
+        return {
+          ...quote,
+          screenshotUrl: toOutputUrl(quote.screenshotPath)
+        };
+      })
+    };
+  }
+
+  function decorateHotelGroupMainRateResult(result: HotelGroupMainRateProbeResult): HotelGroupMainRateProbeResult {
+    return {
+      ...result,
+      samples: result.samples.map((sample) => ({
+        ...sample,
+        quotes: sample.quotes.map((quote) => {
+          if (!quote.screenshotPath || path.relative(servedOutputsRoot, quote.screenshotPath).startsWith("..")) {
+            return quote;
+          }
+
+          return {
+            ...quote,
+            screenshotUrl: toOutputUrl(quote.screenshotPath)
+          };
+        })
+      }))
+    };
+  }
+
+  function decorateHotelSingleDiagnosisResult(result: HotelSingleDiagnosisProbeResult): HotelSingleDiagnosisProbeResult {
+    return {
+      ...result,
+      platforms: result.platforms.map((platform) => {
+        if (!platform.screenshotPath || path.relative(servedOutputsRoot, platform.screenshotPath).startsWith("..")) {
+          return platform;
+        }
+
+        return {
+          ...platform,
+          screenshotUrl: toOutputUrl(platform.screenshotPath)
+        };
+      })
+    };
+  }
+
+  function decorateAliHotelMatchResult(result: AliHotelMatchProbeResult): AliHotelMatchProbeResult {
+    return {
+      ...result,
+      samples: result.samples.map((sample) => ({
+        ...sample,
+        qingmaoQuote: decorateHotelQuote(sample.qingmaoQuote),
+        aliQuote: decorateHotelQuote(sample.aliQuote)
+      }))
+    };
+  }
+
+  function decorateHotelQuote<T extends { screenshotPath?: string; screenshotUrl?: string } | null>(quote: T): T {
+    if (!quote?.screenshotPath || path.relative(servedOutputsRoot, quote.screenshotPath).startsWith("..")) {
+      return quote;
+    }
+
+    return {
+      ...quote,
+      screenshotUrl: toOutputUrl(quote.screenshotPath)
+    };
+  }
+
+  function decorateHotelRatePlanProbeResult(result: HotelRatePlanProbeResult): HotelRatePlanProbeResult {
+    return {
+      ...result,
+      plans: result.plans.map((plan) => ({
+        ...plan,
+        samples: plan.samples.map((sample) => ({
+          ...sample,
+          quotes: sample.quotes.map((quote) => {
+            if (!quote.screenshotPath || path.relative(servedOutputsRoot, quote.screenshotPath).startsWith("..")) {
+              return quote;
+            }
+
+            return {
+              ...quote,
+              screenshotUrl: toOutputUrl(quote.screenshotPath)
+            };
+          })
+        }))
+      }))
+    };
+  }
+
+  function decorateHotelAllRatePlanProbeResult(result: HotelAllRatePlanProbeResult): HotelAllRatePlanProbeResult {
+    return {
+      ...result,
+      samples: result.samples.map((sample) => ({
+        ...sample,
+        quotes: sample.quotes.map((quote) => decorateHotelQuote(quote))
+      }))
+    };
+  }
+
+  function decorateHotelCalibrationResult(result: HotelCalibrationResult): HotelCalibrationResult {
+    return {
+      ...result,
+      samples: result.samples.map((sample) => ({
+        ...sample,
+        platforms: sample.platforms.map((platform) => {
+          if (!platform.screenshotPath || path.relative(servedOutputsRoot, platform.screenshotPath).startsWith("..")) {
+            return platform;
+          }
+
+          return {
+            ...platform,
+            screenshotUrl: toOutputUrl(platform.screenshotPath)
+          };
+        })
+      }))
+    };
+  }
+
   function decorateSameFlightComparisonResult(result: SameFlightComparisonProbeResult): SameFlightComparisonProbeResult {
     return {
       ...result,
@@ -205,6 +458,44 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
           screenshotUrl: toOutputUrl(quote.screenshotPath)
         };
       })
+    };
+  }
+
+  function decorateZtripResult(result: ZtripProbeResult): ZtripProbeResult {
+    return {
+      ...result,
+      checks: result.checks.map((check) => {
+        if (!check.screenshotPath || path.relative(servedOutputsRoot, check.screenshotPath).startsWith("..")) {
+          return check;
+        }
+
+        return {
+          ...check,
+          screenshotUrl: toOutputUrl(check.screenshotPath)
+        };
+      })
+    };
+  }
+
+  function decorateZtripFlightResult(result: ZtripFlightProbeResult): ZtripFlightProbeResult {
+    if (!result.screenshotPath || path.relative(servedOutputsRoot, result.screenshotPath).startsWith("..")) {
+      return result;
+    }
+
+    return {
+      ...result,
+      screenshotUrl: toOutputUrl(result.screenshotPath)
+    };
+  }
+
+  function decorateZtripHotelResult(result: ZtripHotelProbeResult): ZtripHotelProbeResult {
+    if (!result.screenshotPath || path.relative(servedOutputsRoot, result.screenshotPath).startsWith("..")) {
+      return result;
+    }
+
+    return {
+      ...result,
+      screenshotUrl: toOutputUrl(result.screenshotPath)
     };
   }
 
@@ -228,9 +519,9 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     await runExclusiveOperation("模拟采集", res, next, async () => {
       const batch = buildFakeBatch(new Date());
       const excel = await workbookExporter(batch, outputDir);
-      const salesSnapshot = await salesSnapshotExporter(batch, outputDir);
+      const offlinePackage = await offlinePackageExporter(batch, outputDir);
 
-      return setCurrentBatchArtifacts(batch, excel.path, salesSnapshot.path);
+      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
     });
   });
 
@@ -239,9 +530,9 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       const rawLimit = isRecord(req.body) && typeof req.body.limit === "number" ? req.body.limit : undefined;
       const batch = await pilotCollector.runDomesticBatchCollection(rawLimit);
       const excel = await workbookExporter(batch, outputDir);
-      const salesSnapshot = await salesSnapshotExporter(batch, outputDir);
+      const offlinePackage = await offlinePackageExporter(batch, outputDir);
 
-      return setCurrentBatchArtifacts(batch, excel.path, salesSnapshot.path);
+      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
     });
   });
 
@@ -250,9 +541,9 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       const rawLimit = isRecord(req.body) && typeof req.body.limit === "number" ? req.body.limit : undefined;
       const batch = await pilotCollector.runInternationalBatchCollection(rawLimit);
       const excel = await workbookExporter(batch, outputDir);
-      const salesSnapshot = await salesSnapshotExporter(batch, outputDir);
+      const offlinePackage = await offlinePackageExporter(batch, outputDir);
 
-      return setCurrentBatchArtifacts(batch, excel.path, salesSnapshot.path);
+      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
     });
   });
 
@@ -260,9 +551,9 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     await runExclusiveOperation("完整真实采集", res, next, async () => {
       const batch = await pilotCollector.runFullBatchCollection();
       const excel = await workbookExporter(batch, outputDir);
-      const salesSnapshot = await salesSnapshotExporter(batch, outputDir);
+      const offlinePackage = await offlinePackageExporter(batch, outputDir);
 
-      return setCurrentBatchArtifacts(batch, excel.path, salesSnapshot.path);
+      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
     });
   });
 
@@ -304,6 +595,120 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     });
   });
 
+  app.get("/api/pilot/qingmao-hotel-candidates/status", (_req, res) => {
+    state.qingmaoHotelCandidates = pilotCollector.getQingmaoHotelCandidateStatus();
+    res.json(decorateQingmaoHotelCandidateResult(state.qingmaoHotelCandidates));
+  });
+
+  app.post("/api/pilot/qingmao-hotel-candidates/run", async (_req, res, next) => {
+    await runExclusiveOperation("读取青猫酒店候选池", res, next, async () => {
+      state.qingmaoHotelCandidates = await pilotCollector.runQingmaoHotelCandidateProbe();
+      return decorateQingmaoHotelCandidateResult(state.qingmaoHotelCandidates);
+    });
+  });
+
+  app.get("/api/pilot/hotel-main-rate/status", (_req, res) => {
+    state.hotelMainRate = pilotCollector.getHotelMainRateStatus();
+    res.json(decorateHotelMainRateResult(state.hotelMainRate));
+  });
+
+  app.post("/api/pilot/hotel-main-rate/run", async (_req, res, next) => {
+    await runExclusiveOperation("酒店主口径验证", res, next, async () => {
+      state.hotelMainRate = await pilotCollector.runHotelMainRateProbe();
+      return decorateHotelMainRateResult(state.hotelMainRate);
+    });
+  });
+
+  app.get("/api/pilot/hotel-group-main-rate/status", (_req, res) => {
+    state.hotelGroupMainRate = pilotCollector.getHotelGroupMainRateStatus();
+    res.json(decorateHotelGroupMainRateResult(state.hotelGroupMainRate));
+  });
+
+  app.post("/api/pilot/hotel-group-main-rate/run", async (_req, res, next) => {
+    await runExclusiveOperation("酒店集团主口径小样本验证", res, next, async () => {
+      state.hotelGroupMainRate = await pilotCollector.runHotelGroupMainRateProbe();
+      return decorateHotelGroupMainRateResult(state.hotelGroupMainRate);
+    });
+  });
+
+  app.get("/api/pilot/hotel-single-diagnosis/status", (_req, res) => {
+    state.hotelSingleDiagnosis = pilotCollector.getHotelSingleDiagnosisStatus();
+    res.json(decorateHotelSingleDiagnosisResult(state.hotelSingleDiagnosis));
+  });
+
+  app.post("/api/pilot/hotel-single-diagnosis/run", async (req, res, next) => {
+    const parsed = parseHotelSingleDiagnosisInput(req.body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+
+    await runExclusiveOperation("严格单酒店诊断", res, next, async () => {
+      state.hotelSingleDiagnosis = await pilotCollector.runHotelSingleDiagnosisProbe(parsed.input);
+      return decorateHotelSingleDiagnosisResult(state.hotelSingleDiagnosis);
+    });
+  });
+
+  app.get("/api/pilot/ali-hotel-match/status", (_req, res) => {
+    state.aliHotelMatch = pilotCollector.getAliHotelMatchStatus();
+    res.json(decorateAliHotelMatchResult(state.aliHotelMatch));
+  });
+
+  app.post("/api/pilot/ali-hotel-match/run", async (_req, res, next) => {
+    await runExclusiveOperation("阿里酒店同店匹配验证", res, next, async () => {
+      state.aliHotelMatch = await pilotCollector.runAliHotelMatchProbe(3);
+      return decorateAliHotelMatchResult(state.aliHotelMatch);
+    });
+  });
+
+  app.get("/api/pilot/hotel-rate-plan-probe/status", (_req, res) => {
+    state.hotelRatePlanProbe = pilotCollector.getHotelRatePlanProbeStatus();
+    res.json(decorateHotelRatePlanProbeResult(state.hotelRatePlanProbe));
+  });
+
+  app.post("/api/pilot/hotel-rate-plan-probe/run", async (_req, res, next) => {
+    await runExclusiveOperation("酒店主口径难度探针", res, next, async () => {
+      state.hotelRatePlanProbe = await pilotCollector.runHotelRatePlanProbe();
+      return decorateHotelRatePlanProbeResult(state.hotelRatePlanProbe);
+    });
+  });
+
+  app.get("/api/pilot/hotel-all-rate-plans/status", (_req, res) => {
+    state.hotelAllRatePlan = pilotCollector.getHotelAllRatePlanStatus();
+    res.json(decorateHotelAllRatePlanProbeResult(state.hotelAllRatePlan));
+  });
+
+  app.post("/api/pilot/hotel-all-rate-plans/run", async (_req, res, next) => {
+    await runExclusiveOperation("四平台四口径酒店价格采集", res, next, async () => {
+      state.hotelAllRatePlan = await pilotCollector.runHotelAllRatePlanProbe();
+      return decorateHotelAllRatePlanProbeResult(state.hotelAllRatePlan);
+    });
+  });
+
+  app.get("/api/pilot/hotel-calibration/status", (_req, res) => {
+    state.hotelCalibration = pilotCollector.getHotelCalibrationStatus();
+    res.json(decorateHotelCalibrationResult(state.hotelCalibration));
+  });
+
+  app.post("/api/pilot/hotel-calibration/run", async (req, res, next) => {
+    const parsed = parseHotelCalibrationInput(req.body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+
+    await runExclusiveOperation("3 家酒店校准测试", res, next, async () => {
+      state.hotelCalibration = await pilotCollector.runHotelCalibrationProbe(parsed.input);
+      return decorateHotelCalibrationResult(state.hotelCalibration);
+    });
+  });
+
+  app.post("/api/pilot/cleanup-browser-pages", async (_req, res, next) => {
+    await runExclusiveOperation("清理采集临时窗口", res, next, async (): Promise<BrowserCleanupResult> => {
+      return await pilotCollector.cleanupBrowserPages();
+    });
+  });
+
   app.get("/api/pilot/same-flight/status", (_req, res) => {
     state.sameFlightComparison = pilotCollector.getSameFlightComparisonStatus();
     res.json(decorateSameFlightComparisonResult(state.sameFlightComparison));
@@ -313,6 +718,42 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     await runExclusiveOperation("随机同航班比价", res, next, async () => {
       state.sameFlightComparison = await pilotCollector.runSameFlightComparisonProbe();
       return decorateSameFlightComparisonResult(state.sameFlightComparison);
+    });
+  });
+
+  app.get("/api/pilot/ztrip/status", (_req, res) => {
+    state.ztrip = pilotCollector.getZtripStatus();
+    res.json(decorateZtripResult(state.ztrip));
+  });
+
+  app.post("/api/pilot/ztrip/run", async (_req, res, next) => {
+    await runExclusiveOperation("在途商旅验证", res, next, async () => {
+      state.ztrip = await pilotCollector.runZtripProbe();
+      return decorateZtripResult(state.ztrip);
+    });
+  });
+
+  app.get("/api/pilot/ztrip-flight/status", (_req, res) => {
+    state.ztripFlight = pilotCollector.getZtripFlightStatus();
+    res.json(decorateZtripFlightResult(state.ztripFlight));
+  });
+
+  app.post("/api/pilot/ztrip-flight/run", async (_req, res, next) => {
+    await runExclusiveOperation("在途航班样本采集", res, next, async () => {
+      state.ztripFlight = await pilotCollector.runZtripFlightProbe();
+      return decorateZtripFlightResult(state.ztripFlight);
+    });
+  });
+
+  app.get("/api/pilot/ztrip-hotel/status", (_req, res) => {
+    state.ztripHotel = pilotCollector.getZtripHotelStatus();
+    res.json(decorateZtripHotelResult(state.ztripHotel));
+  });
+
+  app.post("/api/pilot/ztrip-hotel/run", async (_req, res, next) => {
+    await runExclusiveOperation("在途酒店样本采集", res, next, async () => {
+      state.ztripHotel = await pilotCollector.runZtripHotelProbe();
+      return decorateZtripHotelResult(state.ztripHotel);
     });
   });
 

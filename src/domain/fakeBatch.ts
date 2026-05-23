@@ -1,4 +1,4 @@
-import type { CollectionBatch, FlightSample, PlatformName, PlatformQuote, RouteConfig } from "./types";
+import type { CollectionBatch, FlightSample, HotelGroup, HotelRatePlan, HotelRatePlanLabel, HotelSample, PlatformName, PlatformQuote, RouteConfig } from "./types";
 
 export const FIXED_ROUTES: RouteConfig[] = [
   { id: "dom-01", scope: "国内", origin: "广州", destination: "上海", directRule: "直飞" },
@@ -42,12 +42,23 @@ export const INTERNATIONAL_FALLBACK_ROUTES: RouteConfig[] = [
 
 const AIRLINES = ["南方航空", "中国国航", "东方航空", "深圳航空", "海南航空", "四川航空"];
 const INTL_AIRLINES = ["泰国国际航空", "越南航空", "亚洲航空", "韩亚航空", "中国国航", "美国联合航空"];
-const PLATFORMS: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅"];
+const PLATFORMS: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"];
 const PLATFORM_VERIFY_URLS: Record<PlatformName, string> = {
   青猫差旅: "",
   携程商旅: "https://ct.ctrip.com/",
-  阿里商旅: "https://www.alibtrip.com/alibtrip"
+  阿里商旅: "https://www.alibtrip.com/alibtrip",
+  在途商旅: "https://www.z-trip.cn/v/vcommon/home"
 };
+
+function platformSlug(platform: PlatformName) {
+  const slugs: Record<PlatformName, string> = {
+    青猫差旅: "qingmao",
+    携程商旅: "ctrip",
+    阿里商旅: "alibtrip",
+    在途商旅: "ztrip"
+  };
+  return slugs[platform];
+}
 
 function formatDate(date: Date) {
   const year = date.getFullYear();
@@ -78,7 +89,8 @@ function buildQuotes(sampleId: string, basePrice: number, index: number): Platfo
   const deltas = [
     index % 4 === 0 ? -35 : index % 4 === 1 ? 0 : index % 4 === 2 ? 42 : 18,
     index % 3 === 0 ? 28 : index % 3 === 1 ? -18 : 55,
-    index % 5 === 0 ? 46 : index % 5 === 1 ? 0 : -22
+    index % 5 === 0 ? 46 : index % 5 === 1 ? 0 : -22,
+    index % 2 === 0 ? 68 : 36
   ];
 
   return PLATFORMS.map((platform, platformIndex) => {
@@ -89,10 +101,74 @@ function buildQuotes(sampleId: string, basePrice: number, index: number): Platfo
       baggageRule: "20kg托运行李，随身行李1件",
       available: true,
       status: "可订",
-      evidencePath: `screenshots/${sampleId}-${platformIndex + 1}.svg`,
+      evidencePath: `evidence/flights/${sampleId}-${platformSlug(platform)}.html`,
       sourceUrl: PLATFORM_VERIFY_URLS[platform]
     };
   });
+}
+
+const HOTEL_GROUPS: Array<{ group: HotelGroup; brands: string[] }> = [
+  { group: "如家集团", brands: ["如家酒店", "莫泰", "YUNIK", "艾扉", "驿居", "璞隐", "扉缦", "和颐至尚"] },
+  { group: "锦江集团", brands: ["锦江之星", "锦江都城", "维也纳", "丽枫", "希岸", "喆啡", "7天酒店", "凯里亚德"] },
+  { group: "华住集团", brands: ["汉庭", "全季", "桔子", "星程", "漫心", "禧玥", "美仑", "海友"] },
+  { group: "东呈集团", brands: ["城市便捷", "宜尚", "柏曼", "精途", "怡程", "璞程", "城市精选", "隐沫"] },
+  { group: "亚朵集团", brands: ["亚朵酒店"] }
+];
+
+const HOTEL_CITIES = ["北京", "广州", "杭州", "上海", "深圳", "武汉", "佛山", "成都", "厦门"];
+const HOTEL_RATE_LABELS: HotelRatePlanLabel[] = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"];
+
+function buildHotelQuotes(hotelId: string, rateLabel: HotelRatePlanLabel, basePrice: number, index: number): PlatformQuote[] {
+  const rateOffset = HOTEL_RATE_LABELS.indexOf(rateLabel) * 18;
+  const deltas = [-12, 16, 28, 8];
+
+  return PLATFORMS.map((platform, platformIndex) => ({
+    platform,
+    price: basePrice + rateOffset + deltas[platformIndex],
+    refundRule: rateLabel.includes("无早餐") ? "不含早餐，以平台页面为准" : "含早餐，以平台页面为准",
+    baggageRule: "酒店房型口径，无行李规则",
+    available: true,
+    status: "可订",
+    evidencePath: `evidence/hotels/${hotelId}-${platformSlug(platform)}-${HOTEL_RATE_LABELS.indexOf(rateLabel) + 1}.html`,
+    sourceUrl: PLATFORM_VERIFY_URLS[platform],
+    rawRoomName: `${platform}${rateLabel}房`,
+    normalizedRoomLabel: rateLabel
+  }));
+}
+
+function buildHotelDemoData(now: Date): HotelSample[] {
+  const checkInDate = formatDate(addDays(now, 1));
+  const checkOutDate = formatDate(addDays(now, 2));
+
+  return HOTEL_GROUPS.flatMap(({ group, brands }, groupIndex) =>
+    Array.from({ length: 8 }, (_, brandIndex) => {
+      const brand = brands[brandIndex % brands.length];
+      const hotelIndex = groupIndex * 8 + brandIndex;
+      const id = `hotel-${String(hotelIndex + 1).padStart(2, "0")}`;
+      const city = HOTEL_CITIES[hotelIndex % HOTEL_CITIES.length];
+      const basePrice = 260 + groupIndex * 22 + brandIndex * 9;
+      const ratePlans: HotelRatePlan[] = HOTEL_RATE_LABELS.map((label) => ({
+        label,
+        quotes: buildHotelQuotes(id, label, basePrice, hotelIndex).map((quote) => ({
+          ...quote,
+          rawHotelName: `${brand}${city}中心店`
+        }))
+      }));
+
+      return {
+        id,
+        group,
+        brand,
+        hotelName: `${brand}${city}中心店`,
+        city,
+        checkInDate,
+        checkOutDate,
+        nights: 1,
+        primaryRatePlan: "大床有早餐",
+        ratePlans
+      };
+    })
+  );
 }
 
 export function buildFakeBatch(now = new Date()): CollectionBatch {
@@ -127,6 +203,7 @@ export function buildFakeBatch(now = new Date()): CollectionBatch {
     sampleCount: samples.length,
     successCount: samples.length,
     failedCount: 0,
-    samples
+    samples,
+    hotels: buildHotelDemoData(now)
   };
 }
