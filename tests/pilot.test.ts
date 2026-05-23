@@ -10,6 +10,8 @@ import {
   collectAliHotelListCardsForMatching,
   confirmAliHotelDetailDoorPlate,
   applyAliHotelDetailDiagnosisToTrace,
+  rankAliHotelDetailCandidateCards,
+  resolveAliHotelDetailCandidateAttempts,
   resolveAliHotelSameHotelAfterFailure,
   formatAliHotelListMatchFailure,
   matchAliHotelListCandidateForDetail,
@@ -1247,6 +1249,106 @@ CNY 260`);
     expect(selection.matchedCard?.index).toBe(1);
     expect(selection.matchedCard?.match.reason).toBe("阿里列表候选：品牌+核心店名，待详情门牌确认");
     expect(selection.matchedCard?.match.sameHotelConfirmed).toBe(false);
+  });
+
+  it("ranks ali same-keyword detail candidates and caps them at the top three", () => {
+    const candidate = {
+      hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "白云区广州大道北1420号",
+      price: 218,
+      rawText: ""
+    };
+    const ranked = rankAliHotelDetailCandidateCards(candidate, "广州", [
+      { index: 0, text: "如家商旅(金标)-广州京溪南方医院地铁站店 广州市天河区燕岭路13号 ￥235起", screenIndex: 0 },
+      { index: 1, text: "如家商旅(金标)-广州京溪南方医院地铁站店 近梅花园地铁站 ￥286起", screenIndex: 0 },
+      { index: 2, text: "如家商旅(金标)-广州京溪南方医院地铁站店 广州市白云区广州大道北1420号 ￥304起", screenIndex: 0 },
+      { index: 3, text: "如家商旅(金标)-广州京溪南方医院地铁站店 近京溪南方医院 ￥299起", screenIndex: 1 }
+    ]);
+
+    expect(ranked).toHaveLength(3);
+    expect(ranked.map((item) => item.cardIndex)).toEqual([2, 1, 3]);
+    expect(ranked.map((item) => item.rank)).toEqual([1, 2, 3]);
+    expect(ranked[0].cardText).toContain("1420号");
+    expect(ranked[0].detailSameHotel).toBeUndefined();
+    expect(ranked[0].failureReason).toBeUndefined();
+  });
+
+  it("continues within the same ali keyword when the first detail candidate has the wrong door plate", () => {
+    const candidate = {
+      hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "白云区广州大道北1420号",
+      price: 218,
+      rawText: ""
+    };
+    const ranked = rankAliHotelDetailCandidateCards(candidate, "广州", [
+      { index: 0, text: "如家商旅(金标)-广州京溪南方医院地铁站店 近梅花园地铁站 ￥286起", screenIndex: 0 },
+      { index: 1, text: "如家商旅(金标)-广州京溪南方医院地铁站店 近京溪南方医院 ￥304起", screenIndex: 0 }
+    ]);
+
+    const outcome = resolveAliHotelDetailCandidateAttempts("广州", candidate, [
+      {
+        ...ranked[0],
+        detailFinalUrl: "https://travel.alibtrip.com/hotel-demeter#/detail/first",
+        detailText: "酒店详情 如家商旅(金标)-广州京溪南方医院地铁站店 广州市天河区燕岭路13号"
+      },
+      {
+        ...ranked[1],
+        detailFinalUrl: "https://travel.alibtrip.com/hotel-demeter#/detail/second",
+        detailText: "酒店详情 如家商旅(金标)-广州京溪南方医院地铁站店 广州市白云区广州大道北1420号"
+      }
+    ]);
+
+    expect(outcome.matched).toBe(true);
+    expect(outcome.matchedCandidate).toMatchObject({
+      rank: 2,
+      detailFinalUrl: "https://travel.alibtrip.com/hotel-demeter#/detail/second",
+      detailDoorNumber: "1420号",
+      detailSameHotel: true,
+      failureReason: ""
+    });
+    expect(outcome.attempts[0]).toMatchObject({
+      rank: 1,
+      detailDoorNumber: "13号",
+      detailSameHotel: false,
+      failureReason: "阿里详情门牌不匹配：期望 1420号，实际 13号"
+    });
+  });
+
+  it("fails an ali keyword only after the top three detail candidates all miss the door plate", () => {
+    const candidate = {
+      hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "白云区广州大道北1420号",
+      price: 218,
+      rawText: ""
+    };
+    const ranked = rankAliHotelDetailCandidateCards(candidate, "广州", [
+      { index: 0, text: "如家商旅(金标)-广州京溪南方医院地铁站店 近梅花园地铁站 ￥286起", screenIndex: 0 },
+      { index: 1, text: "如家商旅(金标)-广州京溪南方医院地铁站店 近京溪南方医院 ￥304起", screenIndex: 0 },
+      { index: 2, text: "如家商旅(金标)-广州京溪南方医院地铁站店 近同和 ￥299起", screenIndex: 0 },
+      { index: 3, text: "如家商旅(金标)-广州京溪南方医院地铁站店 近白云山 ￥288起", screenIndex: 0 }
+    ]);
+
+    const outcome = resolveAliHotelDetailCandidateAttempts("广州", candidate, ranked.map((item, index) => ({
+      ...item,
+      detailFinalUrl: `https://travel.alibtrip.com/hotel-demeter#/detail/${index + 1}`,
+      detailText: `酒店详情 如家商旅(金标)-广州京溪南方医院地铁站店 广州市天河区燕岭路${13 + index}号`
+    })));
+
+    expect(outcome.matched).toBe(false);
+    expect(outcome.attempts).toHaveLength(3);
+    expect(outcome.attempts.map((item) => item.rank)).toEqual([1, 2, 3]);
+    expect(outcome.failureReason).toContain("阿里同关键词前 3 个详情候选均未匹配");
+    expect(outcome.failureReason).toContain("第1候选");
+    expect(outcome.failureReason).toContain("第3候选");
   });
 
   it("collects ali cards across scroll screens before matching", async () => {
