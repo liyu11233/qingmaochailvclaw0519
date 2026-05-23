@@ -7,6 +7,7 @@ import {
   buildCtripHotelCoreKeywords,
   buildStrictCtripHotelSearchUrl,
   buildAliHotelSearchKeywords,
+  buildAliHotelSearchKeywordPlan,
   collectAliHotelListCardsForMatching,
   confirmAliHotelDetailDoorPlate,
   applyAliHotelDetailDiagnosisToTrace,
@@ -1376,6 +1377,195 @@ CNY 260`);
     expect(result.matched).toBe(true);
     expect(result.matchedCard?.index).toBe(4);
     expect(result.cardCount).toBe(2);
+  });
+
+  it("uses ali brand fallback keywords only after normal keywords miss", () => {
+    const query = { city: "广州", keyword: "亚朵", checkInDate: "2026-05-24", checkOutDate: "2026-05-25", nights: 1 };
+    const candidate = {
+      hotelName: "广州塔琶洲会展亚朵S酒店",
+      level: "高档型",
+      score: "4.8",
+      area: "",
+      address: "海珠区新港东路277号20层",
+      price: 671,
+      rawText: ""
+    };
+
+    const plan = buildAliHotelSearchKeywordPlan(query, candidate);
+
+    expect(plan.slice(0, 2).map((item) => item.keyword)).toEqual(["广州塔琶洲会展亚朵S酒店", "新港东路277号"]);
+    expect(plan.find((item) => item.keyword === "亚朵酒店")).toMatchObject({
+      mode: "brand-fallback",
+      maxScreens: 20,
+      maxCards: 120,
+      maxDurationMs: 90_000
+    });
+    expect(plan.findIndex((item) => item.keyword === "亚朵酒店")).toBeGreaterThan(plan.findIndex((item) => item.keyword === "新港东路277号"));
+  });
+
+  it("collects ali brand fallback cards deeply until the target appears around the sixtieth card", async () => {
+    const candidate = {
+      hotelName: "广州塔琶洲会展亚朵S酒店",
+      level: "高档型",
+      score: "4.8",
+      area: "",
+      address: "海珠区新港东路277号20层",
+      price: 671,
+      rawText: ""
+    };
+    let evaluateCalls = 0;
+    const page = {
+      evaluate: async (pageFunction: string) => {
+        if (pageFunction.includes("scrollBy")) return true;
+        const start = evaluateCalls++ * 10;
+        return Array.from({ length: 10 }, (_, offset) => {
+          const index = start + offset;
+          return {
+            index,
+            text: index === 59
+              ? "广州塔琶洲会展亚朵S酒店 高档4.8超棒 近琶洲会展 可开专票￥671起"
+              : `广州亚朵候选${index}号酒店 高档4.7 可开专票￥${500 + index}起`
+          };
+        });
+      },
+      waitForTimeout: async () => undefined
+    };
+
+    const result = await collectAliHotelListCardsForMatching(page, candidate, "广州", {
+      maxScreens: 8,
+      maxCards: 120,
+      waitMs: 0
+    });
+
+    expect(result.matched).toBe(true);
+    expect(result.matchedCard?.text).toContain("广州塔琶洲会展亚朵S酒店");
+    expect(result.cardCount).toBe(60);
+    expect(result.screensRead).toBe(6);
+    expect(result.foundExactNameCard).toBe(true);
+  });
+
+  it("stops ali normal keyword collection immediately when a detail candidate is found", async () => {
+    const candidate = {
+      hotelName: "全季酒店(广州上下九步行街陈家祠店)",
+      level: "高档型",
+      score: "4.7",
+      area: "",
+      address: "荔湾区康王中路484号",
+      price: 454,
+      rawText: ""
+    };
+    let readCalls = 0;
+    const page = {
+      evaluate: async (pageFunction: string) => {
+        if (pageFunction.includes("scrollBy")) return true;
+        readCalls += 1;
+        return [{ index: 0, text: "全季广州上下九步行街陈家祠酒店 高档4.7 广州市荔湾区康王中路484号 ￥418起" }];
+      },
+      waitForTimeout: async () => undefined
+    };
+
+    const result = await collectAliHotelListCardsForMatching(page, candidate, "广州", {
+      maxScreens: 20,
+      maxCards: 120,
+      waitMs: 0
+    });
+
+    expect(result.matched).toBe(true);
+    expect(result.screensRead).toBe(1);
+    expect(readCalls).toBe(1);
+  });
+
+  it("builds ali brand fallback keyword pairs for non-atour brands too", () => {
+    const query = { city: "广州", keyword: "全季", checkInDate: "2026-05-24", checkOutDate: "2026-05-25", nights: 1 };
+    const wholeSeason = {
+      hotelName: "全季酒店(广州上下九步行街陈家祠店)",
+      level: "高档型",
+      score: "4.7",
+      area: "",
+      address: "荔湾区康王中路484号",
+      price: 454,
+      rawText: ""
+    };
+    const vienna = {
+      hotelName: "维也纳酒店(广州火车站小北地铁站店)",
+      level: "舒适型",
+      score: "4.6",
+      area: "",
+      address: "越秀区童心路8号",
+      price: 301,
+      rawText: ""
+    };
+
+    expect(buildAliHotelSearchKeywordPlan(query, wholeSeason).filter((item) => item.mode === "brand-fallback").map((item) => item.keyword)).toEqual([
+      "全季酒店",
+      "全季"
+    ]);
+    expect(buildAliHotelSearchKeywordPlan({ ...query, keyword: "维也纳" }, vienna).filter((item) => item.mode === "brand-fallback").map((item) => item.keyword)).toEqual([
+      "维也纳酒店",
+      "维也纳"
+    ]);
+  });
+
+  it("does not confirm ali brand fallback target until the detail door plate matches", () => {
+    const candidate = {
+      hotelName: "广州塔琶洲会展亚朵S酒店",
+      level: "高档型",
+      score: "4.8",
+      area: "",
+      address: "海珠区新港东路277号20层",
+      price: 671,
+      rawText: ""
+    };
+    const ranked = rankAliHotelDetailCandidateCards(candidate, "广州", [
+      { index: 59, text: "广州塔琶洲会展亚朵S酒店 高档4.8超棒 近琶洲会展 可开专票￥671起", screenIndex: 5 }
+    ]);
+
+    expect(ranked).toHaveLength(1);
+    expect(
+      resolveAliHotelDetailCandidateAttempts("广州", candidate, [{
+        ...ranked[0],
+        detailText: "广州塔琶洲会展亚朵S酒店 广州市海珠区新港东路289号"
+      }])
+    ).toMatchObject({
+      matched: false,
+      attempts: [{ detailDoorNumber: "289号", detailSameHotel: false }]
+    });
+    expect(
+      resolveAliHotelDetailCandidateAttempts("广州", candidate, [{
+        ...ranked[0],
+        detailText: "广州塔琶洲会展亚朵S酒店 广州市海珠区新港东路277号20层"
+      }])
+    ).toMatchObject({
+      matched: true,
+      matchedCandidate: { detailDoorNumber: "277号", detailSameHotel: true }
+    });
+  });
+
+  it("reports ali brand fallback scroll exhaustion clearly", async () => {
+    const candidate = {
+      hotelName: "广州塔琶洲会展亚朵S酒店",
+      level: "高档型",
+      score: "4.8",
+      area: "",
+      address: "海珠区新港东路277号20层",
+      price: 671,
+      rawText: ""
+    };
+    const page = {
+      evaluate: async () => [{ index: 0, text: "广州珠江新城亚朵酒店 高档4.8 可开专票￥520起" }],
+      waitForTimeout: async () => undefined
+    };
+
+    const result = await collectAliHotelListCardsForMatching(page, candidate, "广州", {
+      maxScreens: 20,
+      maxCards: 120,
+      waitMs: 0
+    });
+
+    expect(result.matched).toBe(false);
+    expect(result.screensRead).toBe(20);
+    expect(formatAliHotelListMatchFailure(candidate, result)).toContain("滚动 20 屏");
+    expect(formatAliHotelListMatchFailure(candidate, result)).toContain("未找到酒店名一致的阿里候选");
   });
 
   it("returns explicit ali selector diagnostics when no cards are found", async () => {

@@ -135,6 +135,14 @@ describe("management API", () => {
         updatedAt: null,
         message: "等待严格单酒店诊断"
       })),
+      getAliHotelSingleVerifyStatus: vi.fn(() => ({
+        status: "idle",
+        input: null,
+        selectedCandidate: null,
+        result: null,
+        updatedAt: null,
+        message: "等待指定酒店阿里-only复验"
+      })),
       getAliHotelMatchStatus: vi.fn(() => ({
         status: "idle",
         samples: [],
@@ -428,6 +436,41 @@ describe("management API", () => {
         ],
         updatedAt: "2026-05-18T10:04:00.000Z",
         message: "严格单酒店诊断完成"
+      })),
+      runAliHotelSingleVerifyProbe: vi.fn(async (input) => ({
+        status: "completed",
+        input,
+        selectedCandidate: {
+          hotelName: input.hotelName,
+          level: "",
+          score: "",
+          area: input.city,
+          address: input.address,
+          price: null,
+          rawText: `${input.hotelName} ${input.address}`
+        },
+        result: {
+          platform: "阿里商旅",
+          status: "completed",
+          sameHotel: true,
+          mainRatePrice: 388,
+          otherRates: {
+            大床无早餐: null,
+            双床有早餐: null,
+            双床无早餐: null
+          },
+          failureType: null,
+          failureReason: "",
+          matchBasis: "阿里详情页城市和门牌号一致",
+          sourceAddress: input.address,
+          finalUrl: "https://travel.alibtrip.com/hotel-detail",
+          screenshotPath: path.resolve("outputs/current/pilot/ali-hotel-single/test-run/alibtrip.png"),
+          pageTextSummary: "大床有早餐 ¥388"
+        },
+        artifactDir: path.resolve("outputs/current/pilot/ali-hotel-single/test-run"),
+        diagnosisPath: path.resolve("outputs/current/pilot/ali-hotel-single/test-run/alibtrip-list-diagnosis.json"),
+        updatedAt: "2026-05-18T10:04:10.000Z",
+        message: "阿里-only复验完成"
       })),
       runAliHotelMatchProbe: vi.fn(),
       runHotelRatePlanProbe: vi.fn(async () => ({
@@ -970,6 +1013,35 @@ describe("management API", () => {
     });
     expect(pilotCollector.runHotelSingleDiagnosisProbe).toHaveBeenCalledWith(singleDiagnosisInput);
 
+    const aliSingleStatus = await request(app).get("/api/pilot/ali-hotel-single/status").expect(200);
+    expect(aliSingleStatus.body.status).toBe("idle");
+
+    const aliSingleInput = {
+      city: "广州",
+      hotelName: "广州塔琶洲会展亚朵S酒店",
+      address: "海珠区新港东路277号20层",
+      checkInDate: "2026-05-24",
+      checkOutDate: "2026-05-25",
+      ratePlan: "大床有早餐"
+    };
+    const aliSingle = await request(app).post("/api/pilot/ali-hotel-single/run").send(aliSingleInput).expect(200);
+    expect(aliSingle.body).toMatchObject({
+      status: "completed",
+      input: aliSingleInput,
+      selectedCandidate: {
+        hotelName: "广州塔琶洲会展亚朵S酒店",
+        address: "海珠区新港东路277号20层"
+      },
+      result: {
+        platform: "阿里商旅",
+        status: "completed",
+        sameHotel: true,
+        mainRatePrice: 388,
+        screenshotUrl: "/outputs/current/pilot/ali-hotel-single/test-run/alibtrip.png"
+      }
+    });
+    expect(pilotCollector.runAliHotelSingleVerifyProbe).toHaveBeenCalledWith(aliSingleInput);
+
     const ratePlanStatus = await request(app).get("/api/pilot/hotel-rate-plan-probe/status").expect(200);
     expect(ratePlanStatus.body.status).toBe("idle");
 
@@ -1212,6 +1284,14 @@ describe("management API", () => {
         updatedAt: null,
         message: "等待严格单酒店诊断"
       })),
+      getAliHotelSingleVerifyStatus: vi.fn(() => ({
+        status: "idle",
+        input: null,
+        selectedCandidate: null,
+        result: null,
+        updatedAt: null,
+        message: "等待指定酒店阿里-only复验"
+      })),
       getAliHotelMatchStatus: vi.fn(() => ({
         status: "idle",
         samples: [],
@@ -1284,6 +1364,7 @@ describe("management API", () => {
       runHotelMainRateProbe: vi.fn(),
       runHotelGroupMainRateProbe: vi.fn(),
       runHotelSingleDiagnosisProbe: vi.fn(),
+      runAliHotelSingleVerifyProbe: vi.fn(),
       runAliHotelMatchProbe: vi.fn(),
       runHotelRatePlanProbe: vi.fn(),
       runHotelAllRatePlanProbe: vi.fn(),

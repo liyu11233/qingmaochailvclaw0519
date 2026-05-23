@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { buildFakeBatch } from "../src/domain/fakeBatch";
 import type { CollectionBatch } from "../src/domain/types";
 import {
+  type AliHotelSingleVerifyInput,
+  type AliHotelSingleVerifyResult,
   createPlaywrightPilotCollector,
   type AliHotelMatchProbeResult,
   type BrowserCleanupResult,
@@ -47,6 +49,7 @@ interface AppState {
   hotelMainRate: HotelMainRateProbeResult;
   hotelGroupMainRate: HotelGroupMainRateProbeResult;
   hotelSingleDiagnosis: HotelSingleDiagnosisProbeResult;
+  aliHotelSingleVerify: AliHotelSingleVerifyResult;
   aliHotelMatch: AliHotelMatchProbeResult;
   hotelRatePlanProbe: HotelRatePlanProbeResult;
   hotelAllRatePlan: HotelAllRatePlanProbeResult;
@@ -119,6 +122,41 @@ function parseHotelSingleDiagnosisInput(value: unknown): { ok: true; input: Hote
       checkInDate,
       checkOutDate,
       ratePlan: ratePlan as HotelSingleDiagnosisInput["ratePlan"]
+    }
+  };
+}
+
+function parseAliHotelSingleVerifyInput(value: unknown): { ok: true; input: AliHotelSingleVerifyInput } | { ok: false; error: string } {
+  if (!isRecord(value)) {
+    return { ok: false, error: "请求体必须是对象" };
+  }
+
+  const city = typeof value.city === "string" ? value.city.trim() : "";
+  const hotelName = typeof value.hotelName === "string" ? value.hotelName.trim() : "";
+  const address = typeof value.address === "string" ? value.address.trim() : "";
+  const checkInDate = typeof value.checkInDate === "string" ? value.checkInDate.trim() : "";
+  const checkOutDate = typeof value.checkOutDate === "string" ? value.checkOutDate.trim() : "";
+  const ratePlan = typeof value.ratePlan === "string" ? value.ratePlan.trim() : "";
+
+  if (!city || !hotelName || !address || !checkInDate || !checkOutDate || !ratePlan) {
+    return { ok: false, error: "city、hotelName、address、checkInDate、checkOutDate、ratePlan 均为必填" };
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(checkInDate) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOutDate)) {
+    return { ok: false, error: "checkInDate 和 checkOutDate 必须是 YYYY-MM-DD" };
+  }
+  if (ratePlan !== "大床有早餐") {
+    return { ok: false, error: "阿里-only单酒店复验当前只支持 ratePlan=大床有早餐" };
+  }
+
+  return {
+    ok: true,
+    input: {
+      city,
+      hotelName,
+      address,
+      checkInDate,
+      checkOutDate,
+      ratePlan
     }
   };
 }
@@ -222,6 +260,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     hotelMainRate: pilotCollector.getHotelMainRateStatus(),
     hotelGroupMainRate: pilotCollector.getHotelGroupMainRateStatus(),
     hotelSingleDiagnosis: pilotCollector.getHotelSingleDiagnosisStatus(),
+    aliHotelSingleVerify: pilotCollector.getAliHotelSingleVerifyStatus(),
     aliHotelMatch: pilotCollector.getAliHotelMatchStatus(),
     hotelRatePlanProbe: pilotCollector.getHotelRatePlanProbeStatus(),
     hotelAllRatePlan: pilotCollector.getHotelAllRatePlanStatus(),
@@ -369,6 +408,21 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
           screenshotUrl: toOutputUrl(platform.screenshotPath)
         };
       })
+    };
+  }
+
+  function decorateAliHotelSingleVerifyResult(result: AliHotelSingleVerifyResult): AliHotelSingleVerifyResult {
+    const platformResult = result.result;
+    if (!platformResult?.screenshotPath || path.relative(servedOutputsRoot, platformResult.screenshotPath).startsWith("..")) {
+      return result;
+    }
+
+    return {
+      ...result,
+      result: {
+        ...platformResult,
+        screenshotUrl: toOutputUrl(platformResult.screenshotPath)
+      }
     };
   }
 
@@ -646,6 +700,24 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     await runExclusiveOperation("严格单酒店诊断", res, next, async () => {
       state.hotelSingleDiagnosis = await pilotCollector.runHotelSingleDiagnosisProbe(parsed.input);
       return decorateHotelSingleDiagnosisResult(state.hotelSingleDiagnosis);
+    });
+  });
+
+  app.get("/api/pilot/ali-hotel-single/status", (_req, res) => {
+    state.aliHotelSingleVerify = pilotCollector.getAliHotelSingleVerifyStatus();
+    res.json(decorateAliHotelSingleVerifyResult(state.aliHotelSingleVerify));
+  });
+
+  app.post("/api/pilot/ali-hotel-single/run", async (req, res, next) => {
+    const parsed = parseAliHotelSingleVerifyInput(req.body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+
+    await runExclusiveOperation("指定酒店阿里-only复验", res, next, async () => {
+      state.aliHotelSingleVerify = await pilotCollector.runAliHotelSingleVerifyProbe(parsed.input);
+      return decorateAliHotelSingleVerifyResult(state.aliHotelSingleVerify);
     });
   });
 

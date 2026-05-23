@@ -311,6 +311,27 @@ export interface HotelSingleDiagnosisProbeResult {
   error?: string;
 }
 
+export interface AliHotelSingleVerifyInput {
+  city: string;
+  hotelName: string;
+  address: string;
+  checkInDate: string;
+  checkOutDate: string;
+  ratePlan: "大床有早餐";
+}
+
+export interface AliHotelSingleVerifyResult {
+  status: HotelSingleDiagnosisStatus;
+  input: AliHotelSingleVerifyInput | null;
+  selectedCandidate: QingmaoHotelCandidate | null;
+  result: HotelCalibrationPlatformResult | null;
+  artifactDir?: string;
+  diagnosisPath?: string;
+  updatedAt: string | null;
+  message: string;
+  error?: string;
+}
+
 export interface AliHotelMatchProbeSample {
   query: QingmaoHotelCandidateQuery;
   selectedCandidate: QingmaoHotelCandidate | null;
@@ -451,6 +472,7 @@ export interface PilotCollector {
   getHotelMainRateStatus(): HotelMainRateProbeResult;
   getHotelGroupMainRateStatus(): HotelGroupMainRateProbeResult;
   getHotelSingleDiagnosisStatus(): HotelSingleDiagnosisProbeResult;
+  getAliHotelSingleVerifyStatus(): AliHotelSingleVerifyResult;
   getAliHotelMatchStatus(): AliHotelMatchProbeResult;
   getHotelRatePlanProbeStatus(): HotelRatePlanProbeResult;
   getHotelAllRatePlanStatus(): HotelAllRatePlanProbeResult;
@@ -467,6 +489,7 @@ export interface PilotCollector {
   runHotelMainRateProbe(): Promise<HotelMainRateProbeResult>;
   runHotelGroupMainRateProbe(): Promise<HotelGroupMainRateProbeResult>;
   runHotelSingleDiagnosisProbe(input: HotelSingleDiagnosisInput): Promise<HotelSingleDiagnosisProbeResult>;
+  runAliHotelSingleVerifyProbe(input: AliHotelSingleVerifyInput): Promise<AliHotelSingleVerifyResult>;
   runAliHotelMatchProbe(limit?: number): Promise<AliHotelMatchProbeResult>;
   runHotelRatePlanProbe(): Promise<HotelRatePlanProbeResult>;
   runHotelAllRatePlanProbe(): Promise<HotelAllRatePlanProbeResult>;
@@ -846,6 +869,17 @@ function buildInitialHotelSingleDiagnosisResult(): HotelSingleDiagnosisProbeResu
     platforms: [],
     updatedAt: null,
     message: "等待严格单酒店诊断"
+  };
+}
+
+function buildInitialAliHotelSingleVerifyResult(): AliHotelSingleVerifyResult {
+  return {
+    status: "idle",
+    input: null,
+    selectedCandidate: null,
+    result: null,
+    updatedAt: null,
+    message: "等待指定酒店阿里-only复验"
   };
 }
 
@@ -1273,7 +1307,15 @@ export function normalizeHotelSearchKeywords(hotelName: string) {
 function extractHotelRoadKeyword(address: string) {
   const doorPlate = extractHotelDoorPlate(address);
   if (!doorPlate) return null;
-  return doorPlate.replace(/\d+(?:[-－]\d+)?号(?:之?\d+)?$/, "");
+  return doorPlate.replace(/\d+(?:[-－]\d+)?号.*$/, "");
+}
+
+function extractHotelRoadDoorKeyword(address: string) {
+  const doorPlate = extractHotelDoorPlate(address);
+  const doorNumber = extractHotelDoorNumber(address);
+  const roadKeyword = extractHotelRoadKeyword(address);
+  if (roadKeyword && doorNumber) return `${roadKeyword}${doorNumber}`;
+  return doorPlate;
 }
 
 export function buildCtripHotelCoreKeywords(hotelName: string) {
@@ -1307,21 +1349,69 @@ export function buildCtripHotelSearchKeywords(candidate: QingmaoHotelCandidate) 
   ].filter((keyword): keyword is string => Boolean(keyword && keyword.trim()))));
 }
 
+function detectAliHotelBrandKeyword(value: string) {
+  if (/如家商旅/.test(value)) return "如家商旅";
+  if (/亚朵/.test(value)) return "亚朵";
+  if (/全季/.test(value)) return "全季";
+  if (/维也纳/.test(value)) return "维也纳";
+  if (/城市便捷/.test(value)) return "城市便捷";
+  if (/如家/.test(value)) return "如家";
+  return "";
+}
+
 export function buildAliHotelSearchKeywords(_query: QingmaoHotelCandidateQuery, candidate: QingmaoHotelCandidate) {
-  const doorPlate = extractHotelDoorPlate(candidate.address);
+  const doorPlate = extractHotelRoadDoorKeyword(candidate.address);
+  const doorNumber = extractHotelDoorNumber(candidate.address);
   const roadKeyword = extractHotelRoadKeyword(candidate.address);
   const normalizedNameKeywords = normalizeHotelSearchKeywords(candidate.hotelName);
-  const brandName = /如家/.test(candidate.hotelName) ? "如家" : "";
+  const brandName = /如家/.test(candidate.hotelName) ? "如家" : detectAliHotelBrandKeyword(candidate.hotelName);
   const brandRoadKeyword = brandName && roadKeyword ? `${brandName}${roadKeyword}` : "";
   const brandDoorPlateKeyword = brandName && doorPlate ? `${brandName}${doorPlate}` : "";
+  const brandDoorNumberKeyword = brandName && doorNumber ? `${brandName}${doorNumber}` : "";
   return Array.from(new Set([
     candidate.hotelName,
     doorPlate,
     brandRoadKeyword,
     brandDoorPlateKeyword,
+    brandDoorNumberKeyword,
     roadKeyword,
     ...normalizedNameKeywords
   ].filter((keyword): keyword is string => Boolean(keyword && keyword.trim()))));
+}
+
+export interface AliHotelSearchKeywordPlanItem {
+  keyword: string;
+  mode: "normal" | "brand-fallback";
+  maxScreens: number;
+  maxCards: number;
+  maxDurationMs: number;
+}
+
+function buildAliHotelBrandFallbackKeywords(query: QingmaoHotelCandidateQuery, candidate: QingmaoHotelCandidate) {
+  const brandName = detectAliHotelBrandKeyword(candidate.hotelName) || query.keyword.trim();
+  if (!brandName) return [];
+  const keywords = brandName === "亚朵" ? ["亚朵酒店", "亚朵"] : [`${brandName}酒店`, brandName];
+  return Array.from(new Set(keywords.filter(Boolean)));
+}
+
+export function buildAliHotelSearchKeywordPlan(query: QingmaoHotelCandidateQuery, candidate: QingmaoHotelCandidate): AliHotelSearchKeywordPlanItem[] {
+  const normalKeywords = buildAliHotelSearchKeywords(query, candidate);
+  const normalItems = normalKeywords.map((keyword) => ({
+    keyword,
+    mode: "normal" as const,
+    maxScreens: 8,
+    maxCards: 80,
+    maxDurationMs: 45_000
+  }));
+  const fallbackItems = buildAliHotelBrandFallbackKeywords(query, candidate)
+    .map((keyword) => ({
+      keyword,
+      mode: "brand-fallback" as const,
+      maxScreens: 20,
+      maxCards: 120,
+      maxDurationMs: 90_000
+    }));
+  return [...normalItems, ...fallbackItems];
 }
 
 export function matchAliHotelListCandidateText(candidate: QingmaoHotelCandidate, text: string, queryCity = "") {
@@ -1357,18 +1447,20 @@ export function matchAliHotelListCandidateText(candidate: QingmaoHotelCandidate,
 export function matchAliHotelListCandidateForDetail(candidate: QingmaoHotelCandidate, text: string, queryCity = "") {
   const parsed = parseAliHotelListCardText(text);
   const normalizedCard = normalizeAddressForMatch(text);
+  const normalizedCardName = normalizeHotelNameForMatch(parsed.hotelName || text);
   const normalizedCandidateName = normalizeAddressForMatch(candidate.hotelName);
-  const brandMatched = /如家商旅/.test(normalizedCandidateName)
-    ? /如家商旅/.test(normalizedCard)
-    : normalizedCandidateName.slice(0, 2) ? normalizedCard.includes(normalizedCandidateName.slice(0, 2)) : false;
+  const brandKeyword = detectAliHotelBrandKeyword(candidate.hotelName);
+  const brandMatched = brandKeyword ? normalizedCard.includes(brandKeyword) : normalizedCandidateName.slice(0, 2) ? normalizedCard.includes(normalizedCandidateName.slice(0, 2)) : false;
   const city = queryCity.replace(/市$/, "");
   const cityMatched = !city || normalizedCard.includes(city) || candidate.hotelName.includes(queryCity);
+  const exactNameMatched = scoreHotelNameMatch(candidate.hotelName, parsed.hotelName || text) >= Math.min(8, normalizeHotelNameForMatch(candidate.hotelName).length);
   const coreKeywords = buildCtripHotelCoreKeywords(candidate.hotelName)
     .map((keyword) => normalizeAddressForMatch(keyword))
     .filter((keyword) => keyword.length >= 2 && !/如家商旅|酒店|广州/.test(keyword));
   const roadKeyword = extractHotelRoadKeyword(candidate.address);
   const normalizedRoadKeyword = roadKeyword ? normalizeAddressForMatch(roadKeyword) : "";
-  const coreNameMatched = coreKeywords.some((keyword) => normalizedCard.includes(keyword))
+  const coreNameMatched = exactNameMatched
+    || coreKeywords.some((keyword) => normalizedCardName.includes(keyword) || normalizedCard.includes(keyword))
     || Boolean(normalizedRoadKeyword && normalizedCard.includes(normalizedRoadKeyword));
   const strictMatch = matchHotelByBrandCoreCityDoorNumber(candidate, text, queryCity);
   const matched = brandMatched && coreNameMatched && cityMatched;
@@ -1388,6 +1480,7 @@ export function matchAliHotelListCandidateForDetail(candidate: QingmaoHotelCandi
     price: parsed.price,
     brandMatched,
     coreNameMatched,
+    exactNameMatched,
     cityMatched,
     rawText: text
   };
@@ -1488,18 +1581,18 @@ export function matchHotelByBrandCoreCityDoorNumber(candidate: QingmaoHotelCandi
   const normalizedCard = normalizeAddressForMatch(cardText);
   const normalizedCandidateName = normalizeAddressForMatch(candidate.hotelName);
   const normalizedCardName = normalizeAddressForMatch(parsed.hotelName || cardText);
-  const brandMatched = /如家商旅/.test(normalizedCandidateName)
-    ? /如家商旅/.test(normalizedCard)
-    : normalizedCandidateName.slice(0, 2) ? normalizedCard.includes(normalizedCandidateName.slice(0, 2)) : false;
+  const brandKeyword = detectAliHotelBrandKeyword(candidate.hotelName);
+  const brandMatched = brandKeyword ? normalizedCard.includes(brandKeyword) : normalizedCandidateName.slice(0, 2) ? normalizedCard.includes(normalizedCandidateName.slice(0, 2)) : false;
   const city = queryCity.replace(/市$/, "");
   const cityMatched = !city || normalizedCard.includes(city);
   const candidateDoorNumber = extractHotelDoorNumber(candidate.address);
   const cardDoorNumber = parsed.doorNumber;
   const doorNumberMatched = Boolean(candidateDoorNumber && cardDoorNumber && candidateDoorNumber === cardDoorNumber);
+  const exactNameMatched = scoreHotelNameMatch(candidate.hotelName, parsed.hotelName || cardText) >= Math.min(8, normalizeHotelNameForMatch(candidate.hotelName).length);
   const coreKeywords = buildCtripHotelCoreKeywords(candidate.hotelName)
     .map((keyword) => normalizeAddressForMatch(keyword))
     .filter((keyword) => keyword.length >= 4 && !/如家商旅|酒店|广州/.test(keyword));
-  const coreNameMatched = coreKeywords.some((keyword) => normalizedCardName.includes(keyword) || normalizedCard.includes(keyword));
+  const coreNameMatched = exactNameMatched || coreKeywords.some((keyword) => normalizedCardName.includes(keyword) || normalizedCard.includes(keyword));
 
   let reason = "not-matched";
   if (!cardDoorNumber) reason = "candidate-card-missing-door-number";
@@ -1522,6 +1615,7 @@ export function matchHotelByBrandCoreCityDoorNumber(candidate: QingmaoHotelCandi
     coreNameMatched,
     cityMatched,
     doorNumberMatched,
+    exactNameMatched,
     rawText: cardText
   };
 }
@@ -1610,6 +1704,10 @@ export interface AliHotelListMatchedCard extends AliHotelListCardText {
 export interface AliHotelListMatchSelection {
   selector: string;
   cardCount: number;
+  screensRead?: number;
+  maxScreens?: number;
+  maxCards?: number;
+  foundExactNameCard?: boolean;
   cards: AliHotelListMatchedCard[];
   detailCandidates: AliHotelDetailCandidateTrace[];
   matched: boolean;
@@ -1636,6 +1734,8 @@ export interface AliHotelDetailCandidateTrace {
 
 export interface AliHotelKeywordTrace extends AliHotelListMatchSelection {
   keyword: string;
+  keywordMode?: AliHotelSearchKeywordPlanItem["mode"];
+  brandFallback?: boolean;
   finalUrl: string;
   listScreenshotPath?: string;
   detailScreenshotPath?: string;
@@ -1658,6 +1758,7 @@ export interface AliHotelCardReadPage {
 function scoreAliHotelDetailCandidate(candidate: QingmaoHotelCandidate, match: ReturnType<typeof matchAliHotelListCandidateForDetail>) {
   const expectedDoorNumber = extractHotelDoorNumber(candidate.address);
   let score = 0;
+  if (match.exactNameMatched) score += 100;
   if (match.brandMatched) score += 30;
   if (match.coreNameMatched) score += 40;
   if (match.cityMatched) score += 10;
@@ -1760,6 +1861,7 @@ export function selectAliHotelListMatchFromCards(
   const selection: AliHotelListMatchSelection = {
     selector: ALI_HOTEL_LIST_CARD_SELECTOR,
     cardCount: matchedCards.length,
+    foundExactNameCard: matchedCards.some((card) => card.match.exactNameMatched),
     cards: matchedCards,
     detailCandidates,
     matched: Boolean(matchedCard),
@@ -1772,11 +1874,14 @@ export function selectAliHotelListMatchFromCards(
 
 export function formatAliHotelListMatchFailure(candidate: QingmaoHotelCandidate, selection: AliHotelListMatchSelection) {
   const candidateDoorNumber = extractHotelDoorNumber(candidate.address);
+  const scrollSummary = selection.screensRead
+    ? `滚动 ${selection.screensRead} 屏，收集 ${selection.cardCount} 张唯一卡片，`
+    : "";
   const hasCoreMatch = (card: AliHotelListMatchedCard) => {
     return Boolean(card.match.coreNameMatched);
   };
   if (selection.cardCount === 0) {
-    return `阿里列表卡片 selector 0 张：${selection.selector}`;
+    return `${scrollSummary}阿里列表卡片 selector 0 张：${selection.selector}`;
   }
 
   const cardsWithDoor = selection.cards.filter((card) => Boolean(card.match.doorNumber));
@@ -1787,15 +1892,16 @@ export function formatAliHotelListMatchFailure(candidate: QingmaoHotelCandidate,
   const cardsWithCoreNoDoor = cardsWithCore.filter((card) => card.match.doorNumber !== candidateDoorNumber);
 
   if (cardsWithTargetDoor.length > 0 && cardsWithTargetDoor.every((card) => !hasCoreMatch(card))) {
-    return `阿里列表读取了 ${selection.cardCount} 张卡片，有目标门牌但核心店名不匹配：${candidateDoorNumber}`;
+    return `${scrollSummary}阿里列表读取了 ${selection.cardCount} 张卡片，有目标门牌但核心店名不匹配：${candidateDoorNumber}`;
   }
   if (cardsWithCore.length > 0 && cardsWithCoreNoDoor.length > 0) {
-    return `阿里列表读取了 ${selection.cardCount} 张卡片，有品牌+核心店名候选但未进入详情确认：目标 ${candidateDoorNumber ?? "未知"}`;
+    return `${scrollSummary}阿里列表读取了 ${selection.cardCount} 张卡片，有品牌+核心店名候选但未进入详情确认：目标 ${candidateDoorNumber ?? "未知"}`;
   }
   if (cardsWithDoor.length > 0) {
-    return `阿里列表读取了 ${selection.cardCount} 张卡片，但没有目标门牌：${candidateDoorNumber ?? "未知"}`;
+    return `${scrollSummary}阿里列表读取了 ${selection.cardCount} 张卡片，但没有目标门牌：${candidateDoorNumber ?? "未知"}`;
   }
-  return `阿里列表未找到品牌+核心店名候选：已读取 ${selection.cardCount} 张卡片，目标 ${candidateDoorNumber ?? "未知"}`;
+  const exactNameFailure = selection.foundExactNameCard === false ? "未找到酒店名一致的阿里候选，" : "";
+  return `${scrollSummary}${exactNameFailure}阿里列表未找到品牌+核心店名候选：已读取 ${selection.cardCount} 张卡片，目标 ${candidateDoorNumber ?? "未知"}`;
 }
 
 function dedupeAliHotelCards(cards: AliHotelListCardText[]) {
@@ -1837,11 +1943,15 @@ export async function collectAliHotelListCardsForMatching(
   page: AliHotelCardReadPage,
   candidate: QingmaoHotelCandidate,
   queryCity: string,
-  options: { maxScreens?: number; waitMs?: number } = {}
+  options: { maxScreens?: number; maxCards?: number; maxDurationMs?: number; waitMs?: number } = {}
 ) {
   const maxScreens = options.maxScreens ?? 8;
+  const maxCards = options.maxCards ?? Number.MAX_SAFE_INTEGER;
+  const maxDurationMs = options.maxDurationMs ?? Number.MAX_SAFE_INTEGER;
   const waitMs = options.waitMs ?? 800;
   const collectedCards: AliHotelListCardText[] = [];
+  const startedAt = Date.now();
+  let screensRead = 0;
 
   for (let screenIndex = 0; screenIndex < maxScreens; screenIndex += 1) {
     if (screenIndex === 0) {
@@ -1858,10 +1968,27 @@ export async function collectAliHotelListCardsForMatching(
       await page.waitForTimeout(waitMs);
       collectedCards.push(...await readVisibleAliHotelCards(page, screenIndex));
     }
-
+    screensRead = screenIndex + 1;
+    const uniqueCards = dedupeAliHotelCards(collectedCards).slice(0, maxCards);
+    const selection = selectAliHotelListMatchFromCards(candidate, queryCity, uniqueCards);
+    selection.screensRead = screensRead;
+    selection.maxScreens = maxScreens;
+    selection.maxCards = maxCards === Number.MAX_SAFE_INTEGER ? undefined : maxCards;
+    selection.foundExactNameCard = selection.cards.some((card) => card.match.exactNameMatched);
+    selection.failureReason = selection.matched ? "" : formatAliHotelListMatchFailure(candidate, selection);
+    if (selection.matched || uniqueCards.length >= maxCards || Date.now() - startedAt >= maxDurationMs) {
+      return selection;
+    }
   }
 
-  return selectAliHotelListMatchFromCards(candidate, queryCity, dedupeAliHotelCards(collectedCards));
+  const uniqueCards = dedupeAliHotelCards(collectedCards).slice(0, maxCards);
+  const selection = selectAliHotelListMatchFromCards(candidate, queryCity, uniqueCards);
+  selection.screensRead = screensRead;
+  selection.maxScreens = maxScreens;
+  selection.maxCards = maxCards === Number.MAX_SAFE_INTEGER ? undefined : maxCards;
+  selection.foundExactNameCard = selection.cards.some((card) => card.match.exactNameMatched);
+  selection.failureReason = selection.matched ? "" : formatAliHotelListMatchFailure(candidate, selection);
+  return selection;
 }
 
 export function isHotelCandidateRelevantForQuery(candidate: QingmaoHotelCandidate, query: QingmaoHotelCandidateQuery) {
@@ -3468,13 +3595,14 @@ async function clickMatchingAliHotelCard(
   page: BrowserPage,
   query: QingmaoHotelCandidateQuery,
   candidate: QingmaoHotelCandidate,
-  trace?: { keyword: string; traces: AliHotelKeywordTrace[]; artifactDir?: string }
+  trace?: { keyword: string; keywordMode?: AliHotelSearchKeywordPlanItem["mode"]; traces: AliHotelKeywordTrace[]; artifactDir?: string },
+  collectOptions: { maxScreens?: number; maxCards?: number; maxDurationMs?: number } = {}
 ) {
   const seenDetailPages = new Set(
     context.pages()
       .filter((candidatePage) => candidatePage.url().includes("hotel-demeter") && candidatePage.url().includes("#/detail"))
   );
-  const selection = await collectAliHotelListCardsForMatching(page, candidate, query.city);
+  const selection = await collectAliHotelListCardsForMatching(page, candidate, query.city, collectOptions);
   const keywordIndex = trace ? trace.traces.length + 1 : 0;
   const listScreenshotPath = aliHotelKeywordScreenshotPath(trace?.artifactDir, keywordIndex, "list");
   if (listScreenshotPath) {
@@ -3483,6 +3611,8 @@ async function clickMatchingAliHotelCard(
   const keywordTrace: AliHotelKeywordTrace | null = trace ? {
     ...selection,
     keyword: trace.keyword,
+    keywordMode: trace.keywordMode,
+    brandFallback: trace.keywordMode === "brand-fallback",
     finalUrl: page.url(),
     listScreenshotPath: listScreenshotPath || undefined,
     selectedAsCandidate: selection.detailCandidates.length > 0,
@@ -3611,10 +3741,10 @@ async function searchAliHotelMainRateQuote(
     let lastError = "";
     let detailPage: BrowserPage | null = null;
     let bodyText = "";
-    for (const keyword of buildAliHotelSearchKeywords(query, candidate)) {
+    for (const keywordPlan of buildAliHotelSearchKeywordPlan(query, candidate)) {
       try {
-        await openAliHotelList(context, page, query, keyword);
-        const aliSelection = await clickMatchingAliHotelCard(context, page, query, candidate);
+        await openAliHotelList(context, page, query, keywordPlan.keyword);
+        const aliSelection = await clickMatchingAliHotelCard(context, page, query, candidate, undefined, keywordPlan);
         detailPage = aliSelection.detailPage;
         bodyText = await waitForAliHotelDetailRooms(detailPage);
         const match = confirmAliHotelDetailDoorPlate(query.city, candidate, bodyText);
@@ -3749,6 +3879,28 @@ function hotelSingleDiagnosisQueryFromInput(input: HotelSingleDiagnosisInput): Q
     checkInDate: input.checkInDate,
     checkOutDate: input.checkOutDate,
     nights
+  };
+}
+
+function aliHotelSingleVerifyQueryFromInput(input: AliHotelSingleVerifyInput): QingmaoHotelCandidateQuery {
+  return hotelSingleDiagnosisQueryFromInput({
+    city: input.city,
+    keyword: input.hotelName,
+    checkInDate: input.checkInDate,
+    checkOutDate: input.checkOutDate,
+    ratePlan: input.ratePlan
+  });
+}
+
+function aliHotelSingleVerifyCandidateFromInput(input: AliHotelSingleVerifyInput): QingmaoHotelCandidate {
+  return {
+    hotelName: input.hotelName,
+    level: "",
+    score: "",
+    area: input.city,
+    address: input.address,
+    price: null,
+    rawText: `${input.hotelName} ${input.address}`
   };
 }
 
@@ -4137,11 +4289,11 @@ async function diagnoseAliSingleHotel(
     await page.goto("https://travel.alibtrip.com/index.html#/hotel", { waitUntil: "domcontentloaded", timeout: 45_000 });
     await page.waitForTimeout(3_000);
     let lastError = "";
-    for (const keyword of buildAliHotelSearchKeywords(query, candidate)) {
+    for (const keywordPlan of buildAliHotelSearchKeywordPlan(query, candidate)) {
       try {
-        await openAliHotelList(context, page, query, keyword);
+        await openAliHotelList(context, page, query, keywordPlan.keyword);
         onUpdate(platform, { step: "matching-hotel", sourceDoorPlate, matchBasis: "按同城市同门牌号校验阿里详情页" });
-        const aliSelection = await clickMatchingAliHotelCard(context, page, query, candidate);
+        const aliSelection = await clickMatchingAliHotelCard(context, page, query, candidate, undefined, keywordPlan);
         detailPage = aliSelection.detailPage;
         bodyText = await waitForAliHotelDetailRooms(detailPage);
         const match = confirmAliHotelDetailDoorPlate(query.city, candidate, bodyText);
@@ -4387,14 +4539,15 @@ async function diagnoseAliHotelCalibration(
   try {
     await page.goto("https://travel.alibtrip.com/index.html#/hotel", { waitUntil: "domcontentloaded", timeout: 45_000 });
     await page.waitForTimeout(3_000);
-    for (const keyword of buildAliHotelSearchKeywords(query, candidate)) {
+    for (const keywordPlan of buildAliHotelSearchKeywordPlan(query, candidate)) {
       try {
-        await openAliHotelList(context, page, query, keyword);
+        await openAliHotelList(context, page, query, keywordPlan.keyword);
         const aliSelection = await clickMatchingAliHotelCard(context, page, query, candidate, {
-          keyword,
+          keyword: keywordPlan.keyword,
+          keywordMode: keywordPlan.mode,
           traces: aliKeywordTraces,
           artifactDir
-        });
+        }, keywordPlan);
         detailPage = aliSelection.detailPage;
         bodyText = await waitForAliHotelDetailRooms(detailPage);
         const match = confirmAliHotelDetailDoorPlate(query.city, candidate, bodyText);
@@ -5008,6 +5161,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
   let latestHotelMainRate: HotelMainRateProbeResult = buildInitialHotelMainRateProbeResult(now());
   let latestHotelGroupMainRate: HotelGroupMainRateProbeResult = buildInitialHotelGroupMainRateProbeResult();
   let latestHotelSingleDiagnosis: HotelSingleDiagnosisProbeResult = buildInitialHotelSingleDiagnosisResult();
+  let latestAliHotelSingleVerify: AliHotelSingleVerifyResult = buildInitialAliHotelSingleVerifyResult();
   let latestAliHotelMatch: AliHotelMatchProbeResult = buildInitialAliHotelMatchProbeResult();
   let latestHotelRatePlanProbe: HotelRatePlanProbeResult = buildInitialHotelRatePlanProbeResult();
   let latestHotelAllRatePlan: HotelAllRatePlanProbeResult = buildInitialHotelAllRatePlanProbeResult(now());
@@ -5039,6 +5193,10 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
 
     getHotelSingleDiagnosisStatus() {
       return latestHotelSingleDiagnosis;
+    },
+
+    getAliHotelSingleVerifyStatus() {
+      return latestAliHotelSingleVerify;
     },
 
     getAliHotelMatchStatus() {
@@ -5719,6 +5877,68 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
           const context = browser.contexts()[0];
           if (context && pagesBeforeRun) {
             await closeCreatedBrowserPages(context, pagesBeforeRun, qingmaoPage ? new Set([qingmaoPage]) : new Set()).catch(() => undefined);
+          }
+        }
+        await browser?.disconnect?.();
+      }
+    },
+
+    async runAliHotelSingleVerifyProbe(input: AliHotelSingleVerifyInput) {
+      const query = aliHotelSingleVerifyQueryFromInput(input);
+      const candidate = aliHotelSingleVerifyCandidateFromInput(input);
+      const runId = `ali-hotel-single-${formatBatchTimestamp(now())}`;
+      const artifactDir = path.join(options.artifactDir, "ali-hotel-single", runId);
+      const diagnosisPath = path.join(artifactDir, "alibtrip-list-diagnosis.json");
+      latestAliHotelSingleVerify = {
+        status: "running",
+        input,
+        selectedCandidate: candidate,
+        result: null,
+        artifactDir,
+        diagnosisPath,
+        updatedAt: new Date().toISOString(),
+        message: `正在阿里-only复验：${input.city}/${input.hotelName}/${input.ratePlan}`
+      };
+
+      let browser: BrowserConnection | null = null;
+      let pagesBeforeRun: Set<BrowserPage> | null = null;
+
+      try {
+        await fsp.mkdir(artifactDir, { recursive: true });
+        const chromium = await loadChromium();
+        browser = await chromium.connectOverCDP(`http://127.0.0.1:${remoteDebuggingPort}`);
+        const context = browser.contexts()[0];
+        if (!context) {
+          throw new Error("未找到可附着的 Chrome 浏览器上下文");
+        }
+
+        pagesBeforeRun = snapshotBrowserPages(context);
+        const result = await diagnoseAliHotelCalibration(context, artifactDir, query, candidate);
+        latestAliHotelSingleVerify = {
+          status: "completed",
+          input,
+          selectedCandidate: candidate,
+          result,
+          artifactDir,
+          diagnosisPath,
+          updatedAt: new Date().toISOString(),
+          message: `阿里-only复验完成：${input.hotelName}`
+        };
+        return latestAliHotelSingleVerify;
+      } catch (error) {
+        latestAliHotelSingleVerify = {
+          ...latestAliHotelSingleVerify,
+          status: "failed",
+          updatedAt: new Date().toISOString(),
+          message: "阿里-only复验失败",
+          error: errorMessage(error)
+        };
+        return latestAliHotelSingleVerify;
+      } finally {
+        if (browser) {
+          const context = browser.contexts()[0];
+          if (context && pagesBeforeRun) {
+            await closeCreatedBrowserPages(context, pagesBeforeRun).catch(() => undefined);
           }
         }
         await browser?.disconnect?.();
