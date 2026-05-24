@@ -4,6 +4,11 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { summarizeFlight, summarizeQuoteSet } from "../../src/domain/comparison";
+import {
+  HOTEL_DISPLAY_RATE_PLAN_PRIORITY,
+  resolveHotelDisplayDecision,
+  resolveHotelPrimaryRatePlan
+} from "../../src/domain/hotelRatePlans";
 import type { CollectionBatch, HotelGroup, HotelSample, PlatformName, PlatformQuote } from "../../src/domain/types";
 
 const zipExec = promisify(execFile);
@@ -48,6 +53,10 @@ function formatPrice(quote: PlatformQuote | undefined) {
   return typeof quote.price === "number" ? `¥${quote.price.toLocaleString("zh-CN")}` : quote.status;
 }
 
+function formatHotelPrice(quote: PlatformQuote | undefined) {
+  return quote && typeof quote.price === "number" ? `¥${quote.price.toLocaleString("zh-CN")}` : "暂无";
+}
+
 function formatDuration(minutes: number) {
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
@@ -59,7 +68,11 @@ function quoteByPlatform(quotes: PlatformQuote[], platform: PlatformName) {
 }
 
 function primaryRatePlan(hotel: HotelSample) {
-  return hotel.ratePlans.find((ratePlan) => ratePlan.label === hotel.primaryRatePlan) ?? hotel.ratePlans[0];
+  return resolveHotelPrimaryRatePlan(hotel) ?? hotel.ratePlans[0];
+}
+
+function hotelSalesDisplayEligible(hotel: HotelSample) {
+  return resolveHotelDisplayDecision(hotel.ratePlans).salesDisplayEligible;
 }
 
 function gapClass(gap: number | null) {
@@ -146,7 +159,7 @@ function renderHomeHotelRatePreview(hotel: HotelSample) {
     ${previewPlans
       .map((ratePlan) => `<div class="rate-grid-row">
         <span>${escapeHtml(ratePlan.label)}</span>
-        ${PLATFORMS.map((platform) => `<strong class="${PLATFORM_CLASS[platform]}">${escapeHtml(formatPrice(quoteByPlatform(ratePlan.quotes, platform)))}</strong>`).join("")}
+        ${PLATFORMS.map((platform) => `<strong class="${PLATFORM_CLASS[platform]}">${escapeHtml(formatHotelPrice(quoteByPlatform(ratePlan.quotes, platform)))}</strong>`).join("")}
       </div>`)
       .join("")}
     <div class="rate-grid-row more"><span>更多口径</span><strong>...</strong><strong>...</strong><strong>...</strong><strong>...</strong></div>
@@ -155,7 +168,7 @@ function renderHomeHotelRatePreview(hotel: HotelSample) {
 
 function renderIndex(batch: CollectionBatch) {
   const displayTime = formatDisplayTime(batch.generatedAt);
-  const hotels = batch.hotels ?? [];
+  const hotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
   const flightAdvantageSamples = batch.samples.filter((sample) => {
     const summary = summarizeFlight(sample);
     return summary.qingmaoGap !== null && summary.qingmaoGap < 0;
@@ -342,7 +355,7 @@ function renderCompactRatePlan(ratePlan: HotelSample["ratePlans"][number]) {
     <strong>${escapeHtml(ratePlan.label)}</strong>
     ${PLATFORMS.map((platform) => {
       const quote = quoteByPlatform(ratePlan.quotes, platform);
-      return `<span class="${PLATFORM_CLASS[platform]}">${escapeHtml(platform)} <b>${escapeHtml(formatPrice(quote))}</b></span>`;
+      return `<span class="${PLATFORM_CLASS[platform]}">${escapeHtml(platform)} <b>${escapeHtml(formatHotelPrice(quote))}</b></span>`;
     }).join("")}
   </div>`;
 }
@@ -362,9 +375,9 @@ function renderHotelPlanView(hotel: HotelSample, activeLabel: string) {
   const summary = summarizeQuoteSet(primary.quotes);
   const secondaryPlans = hotel.ratePlans.filter((ratePlan) => ratePlan.label !== primary.label);
   const primaryQuotes = PLATFORMS.map((platform) => quoteByPlatform(primary.quotes, platform));
-  const isDefault = primary.label === hotel.primaryRatePlan;
+  const isDefault = primary.label === primaryRatePlan(hotel).label;
 
-  return `<div class="hotel-plan-view ${isDefault ? "active" : ""}" data-plan="${escapeHtml(primary.label)}">
+  return `<div class="hotel-plan-view${isDefault ? " active" : ""}" data-plan="${escapeHtml(primary.label)}" data-default="${isDefault ? "true" : "false"}">
       <header class="hotel-title-row">
         <div>
           <h2>${escapeHtml(hotel.hotelName)}</h2>
@@ -377,7 +390,7 @@ function renderHotelPlanView(hotel: HotelSample, activeLabel: string) {
         ${primaryQuotes
           .map((quote) => `<div class="hotel-platform-price ${quote ? PLATFORM_CLASS[quote.platform] : ""}">
             <span>${escapeHtml(quote?.platform ?? "平台")}</span>
-            <strong>${escapeHtml(formatPrice(quote))}</strong>
+            <strong>${escapeHtml(formatHotelPrice(quote))}</strong>
           </div>`)
           .join("")}
       </div>
@@ -387,14 +400,14 @@ function renderHotelPlanView(hotel: HotelSample, activeLabel: string) {
 
 function renderHotels(batch: CollectionBatch) {
   const displayTime = formatDisplayTime(batch.generatedAt);
-  const hotels = batch.hotels ?? [];
+  const hotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
   const groups = GROUP_ORDER.filter((group) => hotels.some((hotel) => hotel.group === group));
   const allSummary = renderHotelSummary(hotels);
   const defaultGroup = groups[0];
   const defaultHotels = hotels.filter((hotel) => hotel.group === defaultGroup);
   const checkIn = hotels[0]?.checkInDate ?? "";
   const checkOut = hotels[0]?.checkOutDate ?? "";
-  const rateLabels = hotels[0]?.ratePlans.map((ratePlan) => ratePlan.label) ?? [];
+  const rateLabels = HOTEL_DISPLAY_RATE_PLAN_PRIORITY.filter((label) => hotels.some((hotel) => hotel.ratePlans.some((ratePlan) => ratePlan.label === label)));
   const tabs = groups
     .map((group, index) => `<button type="button" class="${index === 0 ? "active" : ""}" data-group="${escapeHtml(group)}">${escapeHtml(GROUP_LABEL[group])}</button>`)
     .join("");
@@ -425,7 +438,8 @@ ${sharedHead("酒店价格对比")}
         <span>同一酒店 · 同一日期 · 同一床型早餐口径</span>
         <div class="rate-selector" aria-label="选择主对比口径">
           <b>主对比口径</b>
-          ${rateLabels.map((label, index) => `<button type="button" class="${index === 0 ? "active" : ""}" data-plan="${escapeHtml(label)}">${escapeHtml(label)}</button>`).join("")}
+          <button type="button" class="active" data-plan="__default">推荐口径</button>
+          ${rateLabels.map((label) => `<button type="button" data-plan="${escapeHtml(label)}">${escapeHtml(label)}</button>`).join("")}
         </div>
       </div>
     </section>
@@ -454,14 +468,17 @@ ${sharedHead("酒店价格对比")}
     });
     const rateButtons = Array.from(document.querySelectorAll('.rate-selector button'));
     const planViews = Array.from(document.querySelectorAll('.hotel-plan-view'));
-    rateButtons.forEach(button => {
-      button.addEventListener('click', () => {
-        rateButtons.forEach(item => item.classList.remove('active'));
-        button.classList.add('active');
-        const target = button.dataset.plan;
-        planViews.forEach(view => view.classList.toggle('active', view.dataset.plan === target));
-      });
-    });
+	    rateButtons.forEach(button => {
+	      button.addEventListener('click', () => {
+	        rateButtons.forEach(item => item.classList.remove('active'));
+	        button.classList.add('active');
+	        const target = button.dataset.plan;
+	        planViews.forEach(view => {
+	          const useDefault = target === '__default';
+	          view.classList.toggle('active', useDefault ? view.dataset.default === 'true' : view.dataset.plan === target);
+	        });
+	      });
+	    });
   </script>
 </body>
 </html>`;

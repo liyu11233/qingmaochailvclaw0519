@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildFakeBatch } from "../src/domain/fakeBatch";
 import { exportBatchWorkbook } from "../server/exporters/excel";
 import { exportOfflinePackage } from "../server/exporters/offlinePackage";
+import type { HotelRatePlan, PlatformName, PlatformQuote } from "../src/domain/types";
 
 const ONE_PIXEL_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
@@ -14,6 +15,31 @@ const ONE_PIXEL_PNG = Buffer.from(
 );
 
 let outputDir: string;
+
+const hotelPlatforms: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"];
+
+function hotelQuote(platform: PlatformName, price: number | null): PlatformQuote {
+  return {
+    platform,
+    price,
+    refundRule: "",
+    baggageRule: "",
+    available: typeof price === "number",
+    status: typeof price === "number" ? "可订" : "未展示",
+    evidencePath: `evidence/${platform}.html`,
+    sourceUrl: "https://example.com",
+    rawHotelName: `${platform}测试酒店`,
+    rawRoomName: `${platform}测试房型`,
+    missingReason: typeof price === "number" ? undefined : "该口径暂无价格"
+  };
+}
+
+function hotelRatePlan(label: HotelRatePlan["label"], prices: Array<number | null>): HotelRatePlan {
+  return {
+    label,
+    quotes: hotelPlatforms.map((platform, index) => hotelQuote(platform, prices[index]))
+  };
+}
 
 beforeEach(async () => {
   outputDir = await mkdtemp(path.join(tmpdir(), "qingmao-export-"));
@@ -70,7 +96,7 @@ describe("export artifacts", () => {
     expect(flightHeaderValues).not.toContain("竞品最低价平台");
     expect(flightHeaderValues).toContain("网页截图索引");
     expect(hotelSummaryHeaderValues).toContain("网页截图索引");
-    expect(hotelDetailHeaderValues).toContain("是否主口径");
+    expect(hotelDetailHeaderValues).toContain("是否推荐口径");
     expect(hotelDetailHeaderValues).toContain("青猫原始房型名");
     expect(hotelDetailHeaderValues).toContain("携程原始房型名");
     expect(hotelDetailHeaderValues).toContain("阿里原始房型名");
@@ -175,4 +201,39 @@ describe("export artifacts", () => {
     expect(existsSync(path.join(result.directory, "assets", "flight-photo.jpg"))).toBe(true);
     expect(existsSync(path.join(result.directory, "assets", "hotel-photo.jpg"))).toBe(true);
   });
+
+  it("uses each hotel's most complete comparable rate plan as the default sales display", async () => {
+    const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
+    batch.samples = batch.samples.slice(0, 1);
+    batch.sampleCount = 1;
+    batch.successCount = 1;
+    batch.hotels = batch.hotels?.slice(0, 2);
+    batch.hotels![0] = {
+      ...batch.hotels![0],
+      primaryRatePlan: "大床有早餐",
+      ratePlans: [
+        hotelRatePlan("大床无早餐", [300, 310, 320, 305]),
+        hotelRatePlan("大床有早餐", [330, 340, 350, null]),
+        hotelRatePlan("双床无早餐", [280, null, null, null]),
+        hotelRatePlan("双床有早餐", [360, 370, 380, 365])
+      ]
+    };
+
+    const workbookResult = await exportBatchWorkbook(batch, outputDir);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(workbookResult.path);
+    const hotelSummarySheet = workbook.getWorksheet("酒店汇总页");
+    const hotelDetailSheet = workbook.getWorksheet("酒店集团明细页");
+
+    expect(hotelSummarySheet?.getRow(5).getCell(8).value).toBe("大床无早餐");
+    expect(hotelDetailSheet?.getRow(5).values).toContain("大床无早餐");
+    expect(hotelDetailSheet?.getRow(5).values).toContain("是");
+
+    const packageResult = await exportOfflinePackage(batch, outputDir);
+    const hotelHtml = await readFile(path.join(packageResult.directory, "hotels", "index.html"), "utf8");
+
+    expect(hotelHtml).toContain('data-plan="__default"');
+    expect(hotelHtml).toContain('class="hotel-plan-view active" data-plan="大床无早餐" data-default="true"');
+    expect(hotelHtml).toContain("<strong>暂无</strong>");
+  }, 15_000);
 });

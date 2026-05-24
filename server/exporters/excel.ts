@@ -2,6 +2,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
 import { summarizeFlight, summarizeQuoteSet } from "../../src/domain/comparison";
+import {
+  resolveHotelDisplayDecision,
+  resolveHotelPrimaryRatePlan
+} from "../../src/domain/hotelRatePlans";
 import type {
   CollectionBatch,
   FlightSample,
@@ -47,14 +51,15 @@ function lowestAvailablePlatform(quotes: PlatformQuote[]) {
 }
 
 function primaryRatePlan(hotel: HotelSample) {
-  return hotel.ratePlans.find((ratePlan) => ratePlan.label === hotel.primaryRatePlan) ?? hotel.ratePlans[0];
+  return resolveHotelPrimaryRatePlan(hotel) ?? hotel.ratePlans[0];
 }
 
 function orderedRatePlans(hotel: HotelSample) {
+  const primary = primaryRatePlan(hotel);
   return [
-    ...hotel.ratePlans.filter((ratePlan) => ratePlan.label === hotel.primaryRatePlan),
+    ...hotel.ratePlans.filter((ratePlan) => ratePlan.label === primary?.label),
     ...hotel.ratePlans
-      .filter((ratePlan) => ratePlan.label !== hotel.primaryRatePlan)
+      .filter((ratePlan) => ratePlan.label !== primary?.label)
       .sort((a, b) => RATE_PLAN_ORDER.indexOf(a.label) - RATE_PLAN_ORDER.indexOf(b.label))
   ];
 }
@@ -189,6 +194,14 @@ function missingReason(quotes: PlatformQuote[]) {
   return reasons.join("；");
 }
 
+function hotelSalesDisplayEligible(hotel: HotelSample) {
+  return resolveHotelDisplayDecision(hotel.ratePlans).salesDisplayEligible;
+}
+
+function hotelSalesDisplayReason(hotel: HotelSample) {
+  return resolveHotelDisplayDecision(hotel.ratePlans).salesDisplayReason;
+}
+
 function addOverviewSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const sheet = workbook.addWorksheet("总览页", { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
   addTitle(sheet, "青猫差旅价格对比总览", `数据时间：${formatDateTime(batch.generatedAt)}。批次：${batch.id}`, 8);
@@ -203,10 +216,10 @@ function addOverviewSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const summaryRows = [
     ["项目", "结果", "说明"],
     ["航班样本", batch.samples.length, "国内和国际航班四平台价格"],
-    ["酒店样本", hotelSamples.length, "五个集团，每家酒店主口径和其他口径"],
+    ["酒店样本", hotelSamples.length, "五个集团，每家酒店推荐口径和其他口径"],
     ["酒店口径行", hotelRateRows, "每家酒店最多 4 个房型早餐口径"],
     ["航班青猫低价", countByGap(flightSummaries, (gap) => gap < 0), "青猫低于对比口径"],
-    ["酒店青猫低价", countByGap(hotelPrimarySummaries, (gap) => gap < 0), "按酒店主口径统计"],
+    ["酒店青猫低价", countByGap(hotelPrimarySummaries, (gap) => gap < 0), "按酒店推荐口径统计"],
     ["失败记录", batch.failureNotes?.length ?? 0, "候选放弃、平台缺失和批次异常"]
   ];
 
@@ -231,7 +244,7 @@ function addOverviewSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   styleHeader(guideHeader);
   [
     ["航班汇总页", "客户复核同一航班四平台价格和青猫差额"],
-    ["酒店汇总页", "按酒店主口径查看四平台对比"],
+    ["酒店汇总页", "按酒店推荐口径查看四平台对比"],
     ["酒店集团明细页", "保留每家酒店 4 个口径、原始房型名和归一口径"],
     ["航班网页截图索引页", "定位航班平台网页截图或网页快照"],
     ["酒店网页截图索引页", "定位酒店平台网页截图或网页快照"],
@@ -324,7 +337,7 @@ function addFlightSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
 
 function addHotelSummarySheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const sheet = workbook.addWorksheet("酒店汇总页", { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
-  addTableShell(sheet, "酒店主口径价格对比", `数据时间：${formatDateTime(batch.generatedAt)}。每家酒店以当前验证口径作为销售主展示，默认主口径待完整率验证后确定。`, 17, [
+  addTableShell(sheet, "酒店默认展示口径价格对比", `数据时间：${formatDateTime(batch.generatedAt)}。每家酒店默认展示当前最完整、最可比的口径；至少 1 个口径四平台完整才进入销售主展示。`, 17, [
     "序号",
     "集团",
     "品牌",
@@ -332,7 +345,7 @@ function addHotelSummarySheet(workbook: ExcelJS.Workbook, batch: CollectionBatch
     "酒店",
     "入住日期",
     "退房日期",
-    "主口径",
+    "推荐口径",
     "青猫差旅",
     "携程商旅",
     "阿里商旅",
@@ -344,11 +357,15 @@ function addHotelSummarySheet(workbook: ExcelJS.Workbook, batch: CollectionBatch
     "缺失原因"
   ]);
 
-  for (const [index, hotel] of (batch.hotels ?? []).entries()) {
+  const displayHotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
+
+  for (const [index, hotel] of displayHotels.entries()) {
     const ratePlan = primaryRatePlan(hotel);
     const summary = summarizeQuoteSet(ratePlan.quotes);
     const rowNumber = sheet.rowCount + 1;
-    const evidenceIds = PLATFORMS.map((platform) => hotelEvidenceId(index, 0, platform));
+    const sourceHotelIndex = (batch.hotels ?? []).indexOf(hotel);
+    const ratePlanIndex = RATE_PLAN_ORDER.indexOf(ratePlan.label);
+    const evidenceIds = PLATFORMS.map((platform) => hotelEvidenceId(sourceHotelIndex, ratePlanIndex, platform));
     const row = sheet.addRow([
       index + 1,
       hotel.group,
@@ -401,7 +418,7 @@ function addHotelSummarySheet(workbook: ExcelJS.Workbook, batch: CollectionBatch
 
 function addHotelGroupDetailSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const sheet = workbook.addWorksheet("酒店集团明细页", { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
-  addTableShell(sheet, "酒店集团与房型口径明细", `数据时间：${formatDateTime(batch.generatedAt)}。保留每家酒店 4 个口径、平台原始房型名和归一口径。`, 27, [
+  addTableShell(sheet, "酒店集团与房型口径明细", `数据时间：${formatDateTime(batch.generatedAt)}。销售明细只展示至少 1 个口径四平台完整的酒店，并保留每家酒店 4 个口径。`, 27, [
     "序号",
     "集团",
     "品牌",
@@ -412,7 +429,7 @@ function addHotelGroupDetailSheet(workbook: ExcelJS.Workbook, batch: CollectionB
     "退房日期",
     "间夜",
     "归一口径",
-    "是否主口径",
+    "是否推荐口径",
     "青猫原始房型名",
     "携程原始房型名",
     "阿里原始房型名",
@@ -432,7 +449,11 @@ function addHotelGroupDetailSheet(workbook: ExcelJS.Workbook, batch: CollectionB
   ]);
 
   let rowIndex = 0;
-  for (const [hotelIndex, hotel] of (batch.hotels ?? []).entries()) {
+  const displayHotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
+
+  for (const hotel of displayHotels) {
+    const hotelIndex = (batch.hotels ?? []).indexOf(hotel);
+    const primary = primaryRatePlan(hotel);
     for (const ratePlan of orderedRatePlans(hotel)) {
       const ratePlanIndex = RATE_PLAN_ORDER.indexOf(ratePlan.label);
       const summary = summarizeQuoteSet(ratePlan.quotes);
@@ -452,7 +473,7 @@ function addHotelGroupDetailSheet(workbook: ExcelJS.Workbook, batch: CollectionB
         hotel.checkOutDate,
         hotel.nights,
         ratePlan.label,
-        ratePlan.label === hotel.primaryRatePlan ? "是" : "否",
+        ratePlan.label === primary.label ? "是" : "否",
         rawRoomName(ratePlan, qingmao),
         rawRoomName(ratePlan, ctrip),
         rawRoomName(ratePlan, alib),
@@ -476,7 +497,7 @@ function addHotelGroupDetailSheet(workbook: ExcelJS.Workbook, batch: CollectionB
       styleBodyRow(row, rowIndex);
       stylePlatformPriceCells(row, ratePlan.quotes, { 青猫差旅: 16, 携程商旅: 17, 阿里商旅: 18, 在途商旅: 19 });
       styleGapCell(row.getCell(21), summary.qingmaoGap);
-      if (ratePlan.label === hotel.primaryRatePlan) {
+      if (ratePlan.label === primary.label) {
         row.height = 36;
         row.getCell(10).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8F7F0" } };
         row.getCell(10).font = { bold: true, color: { argb: `FF${BRAND_TEAL}` } };
@@ -723,6 +744,9 @@ function addFailureSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   });
 
   (batch.hotels ?? []).forEach((hotel) => {
+    if (!hotelSalesDisplayEligible(hotel)) {
+      records.push(["酒店", hotel.hotelName, "", "全部口径", "不进销售主展示", hotelSalesDisplayReason(hotel), "", ""]);
+    }
     orderedRatePlans(hotel).forEach((ratePlan) => {
       ratePlan.quotes
         .filter((quote) => !quote.available || typeof quote.price !== "number")

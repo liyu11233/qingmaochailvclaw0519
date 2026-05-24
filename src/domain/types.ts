@@ -50,6 +50,9 @@ export type HotelRatePlanLabel = "大床无早餐" | "大床有早餐" | "双床
 export interface HotelRatePlan {
   label: HotelRatePlanLabel;
   quotes: PlatformQuote[];
+  isFourPlatformComplete?: boolean;
+  pricedPlatformCount?: number;
+  missingPlatforms?: PlatformName[];
 }
 
 export interface HotelSample {
@@ -62,6 +65,11 @@ export interface HotelSample {
   checkOutDate: string;
   nights: number;
   primaryRatePlan: HotelRatePlanLabel;
+  defaultRatePlan?: HotelRatePlanLabel | null;
+  defaultRatePlanReason?: string;
+  salesDisplayEligible?: boolean;
+  salesDisplayReason?: string;
+  completeRatePlanCount?: number;
   ratePlans: HotelRatePlan[];
 }
 

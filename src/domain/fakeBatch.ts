@@ -1,4 +1,5 @@
 import type { CollectionBatch, FlightSample, HotelGroup, HotelRatePlan, HotelRatePlanLabel, HotelSample, PlatformName, PlatformQuote, RouteConfig } from "./types";
+import { enrichHotelSampleDisplayDecision } from "./hotelRatePlans";
 
 export const FIXED_ROUTES: RouteConfig[] = [
   { id: "dom-01", scope: "国内", origin: "广州", destination: "上海", directRule: "直飞" },
@@ -155,7 +156,7 @@ function buildHotelDemoData(now: Date): HotelSample[] {
         }))
       }));
 
-      return {
+      return enrichHotelSampleDisplayDecision({
         id,
         group,
         brand,
@@ -166,7 +167,7 @@ function buildHotelDemoData(now: Date): HotelSample[] {
         nights: 1,
         primaryRatePlan: "大床有早餐",
         ratePlans
-      };
+      });
     })
   );
 }

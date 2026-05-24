@@ -28,6 +28,7 @@ type HotelRatePlanProbeStatus = "idle" | "running" | "partial" | "completed" | "
 type HotelCalibrationStatus = "idle" | "running" | "partial" | "completed" | "failed";
 type HotelRatePlanLabel = "大床无早餐" | "大床有早餐" | "双床无早餐" | "双床有早餐";
 const HOTEL_RATE_PLAN_LABELS: HotelRatePlanLabel[] = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"];
+const HOTEL_DISPLAY_RATE_PLAN_PRIORITY: HotelRatePlanLabel[] = ["大床有早餐", "大床无早餐", "双床有早餐", "双床无早餐"];
 const HOTEL_VALIDATION_RATE_PLAN = readHotelValidationRatePlan();
 const HOTEL_CALIBRATION_LIMIT = 3;
 const HOTEL_CALIBRATION_MAIN_RATE_PLAN = "大床有早餐";
@@ -694,6 +695,7 @@ export interface HotelCalibrationInput {
 }
 
 export type HotelCalibrationOtherRates = Record<"大床无早餐" | "双床有早餐" | "双床无早餐", number | null>;
+export type HotelCalibrationRatePrices = Record<HotelRatePlanLabel, number | null>;
 
 export interface HotelCalibrationPlatformResult {
   platform: PlatformName;
@@ -705,6 +707,7 @@ export interface HotelCalibrationPlatformResult {
   hasMainRate: boolean;
   mainRatePrice: number | null;
   otherRates: HotelCalibrationOtherRates;
+  ratePrices?: HotelCalibrationRatePrices;
   durationMs: number;
   failureType: HotelCalibrationFailureType | null;
   failureReason: string;
@@ -1056,13 +1059,36 @@ export function resolveHotelCalibrationPlatformOrder(input: HotelCalibrationInpu
 }
 
 export function isHotelCalibrationSampleComplete(platforms: HotelCalibrationPlatformResult[], expectedPlatformOrder: PlatformName[]) {
-  return expectedPlatformOrder.every((expectedPlatform) =>
-    platforms.some((platform) =>
-      platform.platform === expectedPlatform
-      && platform.sameHotel === true
-      && platform.hasMainRate
+  return selectHotelCalibrationDefaultRatePlan(platforms, expectedPlatformOrder) !== null;
+}
+
+function emptyHotelCalibrationRatePrices(): HotelCalibrationRatePrices {
+  return {
+    大床无早餐: null,
+    大床有早餐: null,
+    双床无早餐: null,
+    双床有早餐: null
+  };
+}
+
+export function selectHotelCalibrationDefaultRatePlan(platforms: HotelCalibrationPlatformResult[], expectedPlatformOrder: PlatformName[]) {
+  const completePlans = HOTEL_RATE_PLAN_LABELS.filter((ratePlan) =>
+    expectedPlatformOrder.every((expectedPlatform) =>
+      platforms.some((platform) =>
+        platform.platform === expectedPlatform
+        && platform.sameHotel === true
+        && typeof hotelCalibrationRatePrice(platform, ratePlan) === "number"
+      )
     )
   );
+
+  return HOTEL_DISPLAY_RATE_PLAN_PRIORITY.find((ratePlan) => completePlans.includes(ratePlan)) ?? null;
+}
+
+function hotelCalibrationRatePrice(platform: HotelCalibrationPlatformResult, ratePlan: HotelRatePlanLabel) {
+  if (platform.ratePrices) return platform.ratePrices[ratePlan];
+  if (ratePlan === HOTEL_CALIBRATION_MAIN_RATE_PLAN) return platform.mainRatePrice;
+  return platform.otherRates[ratePlan as keyof HotelCalibrationOtherRates] ?? null;
 }
 
 interface HotelGroupPilotQueryConfig {
@@ -6075,13 +6101,18 @@ export function readHotelCalibrationRatesFromText(platform: PlatformName, rawTex
       .filter((quote) => quote.status === "available" && typeof quote.price === "number")
       .sort((left, right) => (left.price ?? Number.MAX_SAFE_INTEGER) - (right.price ?? Number.MAX_SAFE_INTEGER))[0]?.price ?? null;
   };
+  const ratePrices = HOTEL_RATE_PLAN_LABELS.reduce((prices, ratePlan) => ({
+    ...prices,
+    [ratePlan]: priceFor(ratePlan)
+  }), emptyHotelCalibrationRatePrices());
 
   return {
-    mainRatePrice: priceFor(HOTEL_CALIBRATION_MAIN_RATE_PLAN),
+    mainRatePrice: ratePrices[HOTEL_CALIBRATION_MAIN_RATE_PLAN],
     otherRates: HOTEL_CALIBRATION_OTHER_RATE_PLANS.reduce((rates, ratePlan) => ({
       ...rates,
-      [ratePlan]: priceFor(ratePlan)
-    }), emptyHotelCalibrationOtherRates())
+      [ratePlan]: ratePrices[ratePlan]
+    }), emptyHotelCalibrationOtherRates()),
+    ratePrices
   };
 }
 
@@ -6101,7 +6132,9 @@ function buildHotelCalibrationPlatformResult(input: {
   failureType?: HotelCalibrationFailureType | null;
 }): HotelCalibrationPlatformResult {
   const targetDoorPlate = extractHotelDoorPlate(input.rawText);
-  const rates = input.sameHotel === false ? { mainRatePrice: null, otherRates: emptyHotelCalibrationOtherRates() } : readHotelCalibrationRatesFromText(input.platform, input.rawText);
+  const rates = input.sameHotel === false
+    ? { mainRatePrice: null, otherRates: emptyHotelCalibrationOtherRates(), ratePrices: emptyHotelCalibrationRatePrices() }
+    : readHotelCalibrationRatesFromText(input.platform, input.rawText);
   const failureReason = input.failureReason ?? "";
   const failureType = input.failureType === undefined && failureReason
     ? classifyHotelCalibrationFailureType(failureReason, input.platform)
@@ -6117,6 +6150,7 @@ function buildHotelCalibrationPlatformResult(input: {
     hasMainRate: typeof rates.mainRatePrice === "number",
     mainRatePrice: rates.mainRatePrice,
     otherRates: rates.otherRates,
+    ratePrices: rates.ratePrices,
     durationMs: Date.now() - input.startedAt,
     failureType,
     failureReason,
@@ -9469,7 +9503,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
             lockedCandidate = qingmaoDiagnosis.candidate;
             platforms.push(qingmaoDiagnosis.result);
 
-            if (qingmaoDiagnosis.hasMainRate) {
+            if (qingmaoDiagnosis.result.sameHotel === true) {
               if (competitorPlatforms.includes("阿里商旅")) {
                 platforms.push(await diagnoseAliHotelCalibration(context, sampleArtifactDir, query, lockedCandidate));
               }
@@ -9497,11 +9531,12 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
             await closeCreatedBrowserPages(context, pagesBeforeSample, new Set([qingmaoPage]));
           }
 
-          const complete = isHotelCalibrationSampleComplete(platforms, platformOrder);
-          const hasAnyMainRate = platforms.some((platform) => platform.hasMainRate);
+          const defaultRatePlan = selectHotelCalibrationDefaultRatePlan(platforms, platformOrder);
+          const complete = defaultRatePlan !== null;
+          const hasAnyPrice = platforms.some((platform) => HOTEL_RATE_PLAN_LABELS.some((ratePlan) => typeof hotelCalibrationRatePrice(platform, ratePlan) === "number"));
           samples.push({
             index: index + 1,
-            status: complete ? "completed" : hasAnyMainRate ? "partial" : "failed",
+            status: complete ? "completed" : hasAnyPrice ? "partial" : "failed",
             sourceHotel: {
               hotelName: lockedCandidate.hotelName,
               city: query.city,
@@ -9511,8 +9546,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
             },
             platforms,
             message: complete
-              ? `${lockedCandidate.hotelName} 四平台主口径均已读取`
-              : `${lockedCandidate.hotelName} 校准完成，存在平台缺失或失败`
+              ? `${lockedCandidate.hotelName} ${defaultRatePlan}四平台均有价格`
+              : `${lockedCandidate.hotelName} 校准完成，4 个口径均未形成四平台完整价格`
           });
 
           latestHotelCalibration = {

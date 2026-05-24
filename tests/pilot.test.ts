@@ -60,6 +60,7 @@ import {
   readHotelCalibrationRatesFromText,
   resolveHotelCalibrationPlatformOrder,
   isHotelCalibrationSampleComplete,
+  selectHotelCalibrationDefaultRatePlan,
   resolveHotelSmallBatchBudgetStop,
   resolveHotelSmallBatchOverallBudgetStop,
   getHotelSmallBatchGroupSearchKeywords,
@@ -86,6 +87,47 @@ import {
 } from "../server/collectors/pilot";
 
 describe("pilot collector", () => {
+  function calibrationPlatform(platform: "青猫差旅" | "携程商旅" | "阿里商旅" | "在途商旅", prices: Record<string, number | null>) {
+    return {
+      platform,
+      sameHotel: true,
+      matchBasis: "同城市 + 同门牌号",
+      platformHotelName: `${platform}测试酒店`,
+      platformAddress: "广州市测试路1号",
+      platformDoorPlate: "1号",
+      hasMainRate: typeof prices["大床有早餐"] === "number",
+      mainRatePrice: prices["大床有早餐"],
+      otherRates: {
+        大床无早餐: prices["大床无早餐"] ?? null,
+        双床有早餐: prices["双床有早餐"] ?? null,
+        双床无早餐: prices["双床无早餐"] ?? null
+      },
+      ratePrices: {
+        大床无早餐: prices["大床无早餐"] ?? null,
+        大床有早餐: prices["大床有早餐"] ?? null,
+        双床无早餐: prices["双床无早餐"] ?? null,
+        双床有早餐: prices["双床有早餐"] ?? null
+      },
+      durationMs: 1,
+      failureType: null,
+      failureReason: "",
+      finalUrl: "https://example.com",
+      pageTextSummary: "测试酒店"
+    };
+  }
+
+  it("treats hotel calibration as complete when any one rate plan has four platform prices", () => {
+    const platforms = [
+      calibrationPlatform("青猫差旅", { 大床有早餐: 320, 大床无早餐: 300, 双床有早餐: 350, 双床无早餐: null }),
+      calibrationPlatform("携程商旅", { 大床有早餐: 330, 大床无早餐: 310, 双床有早餐: 360, 双床无早餐: null }),
+      calibrationPlatform("阿里商旅", { 大床有早餐: 340, 大床无早餐: 320, 双床有早餐: 370, 双床无早餐: null }),
+      calibrationPlatform("在途商旅", { 大床有早餐: null, 大床无早餐: 305, 双床有早餐: 365, 双床无早餐: null })
+    ];
+
+    expect(isHotelCalibrationSampleComplete(platforms, ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"])).toBe(true);
+    expect(selectHotelCalibrationDefaultRatePlan(platforms, ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"])).toBe("大床无早餐");
+  });
+
   it("treats login urls as requiring login even when the visible text is sparse", () => {
     expect(classifyProbeOutcome("下载移动端 联系客服", "https://travel.alibtrip.com/index.html#/login")).toBe("login-required");
     expect(classifyProbeOutcome("欢迎使用携程商旅 密码登录 验证码登录", "https://ct.ctrip.com/login")).toBe("login-required");
@@ -922,6 +964,12 @@ CNY 260`);
         大床无早餐: 210,
         双床有早餐: 260,
         双床无早餐: null
+      },
+      ratePrices: {
+        大床无早餐: 210,
+        大床有早餐: 240,
+        双床无早餐: null,
+        双床有早餐: 260
       }
     });
   });
