@@ -14,6 +14,8 @@ import {
   type HotelAllRatePlanProbeResult,
   type HotelCalibrationInput,
   type HotelCalibrationResult,
+  type HotelScaleValidationInput,
+  type HotelScaleValidationResult,
   type HotelGroupMainRateProbeResult,
   type HotelSmallBatchProbeResult,
   type HotelMainRateProbeResult,
@@ -50,6 +52,7 @@ interface AppState {
   hotelMainRate: HotelMainRateProbeResult;
   hotelGroupMainRate: HotelGroupMainRateProbeResult;
   hotelSmallBatch: HotelSmallBatchProbeResult;
+  hotelScaleValidation: HotelScaleValidationResult;
   hotelSingleDiagnosis: HotelSingleDiagnosisProbeResult;
   aliHotelSingleVerify: AliHotelSingleVerifyResult;
   aliHotelMatch: AliHotelMatchProbeResult;
@@ -209,6 +212,47 @@ function parseHotelCalibrationInput(value: unknown): { ok: true; input: HotelCal
   };
 }
 
+function parseDateOnly(value: string) {
+  const parsed = new Date(`${value}T00:00:00`);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function parseHotelScaleValidationInput(value: unknown): { ok: true; input: HotelScaleValidationInput } | { ok: false; error: string } {
+  if (value === undefined || value === null || (isRecord(value) && Object.keys(value).length === 0)) {
+    return { ok: true, input: {} };
+  }
+  if (!isRecord(value)) {
+    return { ok: false, error: "请求体必须是对象" };
+  }
+
+  const checkInDate = typeof value.checkInDate === "string" ? value.checkInDate.trim() : undefined;
+  const checkOutDate = typeof value.checkOutDate === "string" ? value.checkOutDate.trim() : undefined;
+
+  if ((checkInDate && !checkOutDate) || (!checkInDate && checkOutDate)) {
+    return { ok: false, error: "checkInDate 和 checkOutDate 必须同时传入" };
+  }
+  if (!checkInDate && !checkOutDate) {
+    return { ok: true, input: {} };
+  }
+  if (!checkInDate || !checkOutDate || !/^\d{4}-\d{2}-\d{2}$/.test(checkInDate) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOutDate)) {
+    return { ok: false, error: "checkInDate 和 checkOutDate 必须是 YYYY-MM-DD" };
+  }
+
+  const checkIn = parseDateOnly(checkInDate);
+  const checkOut = parseDateOnly(checkOutDate);
+  if (!checkIn || !checkOut || checkOut.getTime() <= checkIn.getTime()) {
+    return { ok: false, error: "checkOutDate 必须晚于 checkInDate" };
+  }
+
+  return {
+    ok: true,
+    input: {
+      checkInDate,
+      checkOutDate
+    }
+  };
+}
+
 export function createApp(options: { outputDir?: string; pilotCollector?: PilotCollector; exporters?: Partial<ArtifactExporters> } = {}) {
   const app = express();
   const outputDir = options.outputDir ?? path.join(servedOutputsRoot, "current");
@@ -262,6 +306,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     hotelMainRate: pilotCollector.getHotelMainRateStatus(),
     hotelGroupMainRate: pilotCollector.getHotelGroupMainRateStatus(),
     hotelSmallBatch: pilotCollector.getHotelSmallBatchStatus(),
+    hotelScaleValidation: pilotCollector.getHotelScaleValidationStatus(),
     hotelSingleDiagnosis: pilotCollector.getHotelSingleDiagnosisStatus(),
     aliHotelSingleVerify: pilotCollector.getAliHotelSingleVerifyStatus(),
     aliHotelMatch: pilotCollector.getAliHotelMatchStatus(),
@@ -415,6 +460,19 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
               screenshotUrl: toOutputUrl(quote.screenshotPath)
             };
           })
+        }))
+      }))
+    };
+  }
+
+  function decorateHotelScaleValidationResult(result: HotelScaleValidationResult): HotelScaleValidationResult {
+    return {
+      ...result,
+      groups: result.groups.map((group) => ({
+        ...group,
+        samples: group.samples.map((sample) => ({
+          ...sample,
+          quotes: sample.quotes?.map((quote) => decorateHotelQuote(quote)) ?? []
         }))
       }))
     };
@@ -719,6 +777,24 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     await runExclusiveOperation("10 家酒店小放量", res, next, async () => {
       state.hotelSmallBatch = await pilotCollector.runHotelSmallBatchProbe();
       return decorateHotelSmallBatchResult(state.hotelSmallBatch);
+    });
+  });
+
+  app.get("/api/pilot/hotel-scale-validation/status", (_req, res) => {
+    state.hotelScaleValidation = pilotCollector.getHotelScaleValidationStatus();
+    res.json(decorateHotelScaleValidationResult(state.hotelScaleValidation));
+  });
+
+  app.post("/api/pilot/hotel-scale-validation/run", async (req, res, next) => {
+    const parsed = parseHotelScaleValidationInput(req.body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+
+    await runExclusiveOperation("40 家酒店放量验证 / 准生产诊断跑", res, next, async () => {
+      state.hotelScaleValidation = await pilotCollector.runHotelScaleValidationProbe(parsed.input);
+      return decorateHotelScaleValidationResult(state.hotelScaleValidation);
     });
   });
 

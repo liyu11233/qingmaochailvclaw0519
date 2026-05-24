@@ -38,6 +38,7 @@ import {
   extractCtripHotelIdWithSourceFromUrl,
   extractSameFlightQuoteFromText,
   extractHotelDoorNumber,
+  extractExcludedHotelRateRowsFromText,
   hasCompleteSameFlightQuotes,
   classifyHotelCalibrationFailureType,
   extractHotelDoorPlate,
@@ -61,6 +62,15 @@ import {
   getHotelSmallBatchGroupSearchKeywords,
   shouldSkipHotelSmallBatchCandidate,
   summarizeHotelSmallBatchGroups,
+  aggregateHotelScaleValidationTimings,
+  buildHotelScaleValidationInput,
+  buildInitialHotelScaleValidationResult,
+  evaluateHotelScaleValidationEvidence,
+  getHotelScaleValidationGroupSearchKeywords,
+  isHotelRateLineExcludedByBedAssignment,
+  resolveHotelScaleValidationBudgetStop,
+  resolveHotelScaleValidationOverallBudgetStop,
+  summarizeHotelScaleValidationGroups,
   parseZtripFlightCandidatesText,
   parseZtripHotelRatesText,
   parseZtripHotelRatesTextForRatePlan,
@@ -283,7 +293,7 @@ CNY398
     });
   });
 
-  it("keeps ztrip random bed assignment rates when the room title names a bed type", () => {
+  it("skips ztrip random bed assignment rates even when the room title names a bed type", () => {
     const rates = parseZtripHotelRatesText(`如家商旅酒店
 亲子大床房
 2份早餐 | 到店随机分配床型
@@ -294,10 +304,10 @@ CNY 240
 CNY 306`);
 
     expect(rates[0]).toMatchObject({
-      roomType: "亲子大床房",
+      roomType: "商务大床房A",
       breakfast: "有早餐",
       bedType: "大床",
-      price: 240
+      price: 306
     });
   });
 
@@ -345,13 +355,7 @@ CNY 271
 2份早餐
 CNY 280`, "双床有早餐");
 
-    expect(rates).toHaveLength(1);
-    expect(rates[0]).toMatchObject({
-      roomType: "亲子双床房",
-      breakfast: "有早餐",
-      bedType: "双床",
-      price: 477
-    });
+    expect(rates).toHaveLength(0);
   });
 
   it("does not force ztrip big-bed rooms into twin-bed rate plans", () => {
@@ -826,7 +830,7 @@ CNY 255`, "双床有早餐");
     });
   });
 
-  it("keeps random bed assignment text when the same rate block confirms the bed type", () => {
+  it("skips random bed assignment text even when the same rate block confirms the bed type", () => {
     const qingmaoRates = parseQingmaoHotelMainRatesText(`如家商旅酒店
 安心睡0压大床房
 到店随机分配床型
@@ -851,9 +855,9 @@ CNY 255`, "双床有早餐");
 280
 在线付`, "大床有早餐");
 
-    expect(qingmaoRates[0]).toMatchObject({ roomType: "安心睡0压大床房", price: 280 });
-    expect(ctripRates[0]).toMatchObject({ roomType: "安心睡0压大床房", price: 280 });
-    expect(aliRates[0]).toMatchObject({ roomType: "安心睡0压大床房", price: 280 });
+    expect(qingmaoRates).toHaveLength(0);
+    expect(ctripRates).toHaveLength(0);
+    expect(aliRates).toHaveLength(0);
   });
 
   it("does not force a random-bed rate into a bed type when no bed signal exists", () => {
@@ -1712,6 +1716,211 @@ CNY 260`);
       platform: "在途商旅",
       status: "pending"
     });
+  });
+
+  it("builds hotel scale validation dates from explicit dates or next-day default", () => {
+    const defaultInput = buildHotelScaleValidationInput(new Date(2026, 4, 24, 10), {});
+    expect(defaultInput).toEqual({
+      checkInDate: "2026-05-25",
+      checkOutDate: "2026-05-26",
+      nights: 1
+    });
+
+    expect(buildHotelScaleValidationInput(new Date(2026, 4, 24, 10), {
+      checkInDate: "2026-06-02",
+      checkOutDate: "2026-06-04"
+    })).toEqual({
+      checkInDate: "2026-06-02",
+      checkOutDate: "2026-06-04",
+      nights: 2
+    });
+  });
+
+  it("initializes 40-hotel scale validation across 5 groups and the 9-city pool", () => {
+    const result = buildInitialHotelScaleValidationResult(new Date(2026, 4, 24, 10), {
+      checkInDate: "2026-06-02",
+      checkOutDate: "2026-06-03"
+    });
+
+    expect(result).toMatchObject({
+      status: "idle",
+      mode: "scale-validation",
+      targetTotal: 40,
+      targetPerGroup: 8,
+      mainRatePlan: "大床有早餐",
+      checkInDate: "2026-06-02",
+      checkOutDate: "2026-06-03",
+      nights: 1,
+      budget: {
+        totalMs: 120 * 60 * 1000,
+        perGroupMs: 25 * 60 * 1000,
+        maxAttemptsPerGroup: 24
+      },
+      platformOrder: ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"],
+      cityPool: ["北京", "广州", "杭州", "上海", "深圳", "武汉", "佛山", "成都", "厦门"]
+    });
+    expect(result.groups).toHaveLength(5);
+    expect(result.groups.every((group) => group.targetCount === 8)).toBe(true);
+    expect(getHotelScaleValidationGroupSearchKeywords("东呈")).toContain("宜尚");
+  });
+
+  it("stops hotel scale validation on group and overall budgets", () => {
+    expect(resolveHotelScaleValidationBudgetStop({
+      maxAttempts: 0,
+      budgetMs: 25 * 60 * 1000,
+      startedAtMs: 1_000,
+      nowMs: 1_000
+    })).toBe("达到本集团候选尝试上限");
+    expect(resolveHotelScaleValidationBudgetStop({
+      maxAttempts: 1,
+      budgetMs: 25 * 60 * 1000,
+      startedAtMs: 1_000,
+      nowMs: 1_000 + 25 * 60 * 1000
+    })).toBe("达到本集团时间预算");
+    expect(resolveHotelScaleValidationOverallBudgetStop(1_000, 1_000 + 120 * 60 * 1000)).toBe("达到40家放量验证整体时间预算");
+  });
+
+  it("keeps excluded random-bed hotel rate raw text for diagnosis", () => {
+    expect(isHotelRateLineExcludedByBedAssignment("安心睡安睡大床房 到店随机分配床型 2份早餐 CNY 189")).toEqual({
+      excluded: true,
+      reason: "到店随机分配床型"
+    });
+    expect(isHotelRateLineExcludedByBedAssignment("高级大床房 房型待定 1份早餐 ￥320")).toEqual({
+      excluded: true,
+      reason: "房型待定"
+    });
+    expect(isHotelRateLineExcludedByBedAssignment("高级大床房 1张1.8米大床 2份早餐 ￥320")).toEqual({
+      excluded: false,
+      reason: ""
+    });
+    expect(parseCtripHotelMainRatesText("测试酒店\n高级大床房\n到店安排\n2份早餐\n¥320", "大床有早餐")).toHaveLength(0);
+    expect(extractExcludedHotelRateRowsFromText("携程商旅", "测试酒店\n高级大床房\n到店安排\n2份早餐\n¥320")).toEqual([
+      {
+        platform: "携程商旅",
+        reason: "到店安排",
+        rawText: "测试酒店 高级大床房 到店安排 2份早餐 ¥320"
+      }
+    ]);
+  });
+
+  it("marks incomplete failed evidence separately from evidence save failures", () => {
+    expect(evaluateHotelScaleValidationEvidence({
+      status: "failed",
+      currentPlatform: "阿里商旅",
+      currentStep: "read-main-rate",
+      failureType: "competitor_no_main_rate",
+      failureReason: "阿里无大床有早餐",
+      finalUrl: "https://travel.alibtrip.com/hotel-demeter#/detail",
+      screenshotPath: "",
+      diagnosisPath: "/tmp/alibtrip-list-diagnosis.json",
+      resultPath: "/tmp/result.json",
+      pageTextSummary: "酒店详情 大床 早餐",
+      pathRecords: [],
+      aliEvidence: {
+        listScreenshotPath: "/tmp/list.png",
+        candidateScreenshotPath: "/tmp/card.png",
+        failureScreenshotPath: "/tmp/failure.png"
+      }
+    })).toMatchObject({
+      evidenceStatus: "evidence_missing",
+      evidenceIssues: expect.arrayContaining(["screenshotPath 缺失", "pathRecords 缺失"])
+    });
+
+    expect(evaluateHotelScaleValidationEvidence({
+      status: "failed",
+      currentPlatform: "携程商旅",
+      currentStep: "save-failure-screenshot",
+      failureType: "unknown_technical_failure",
+      failureReason: "截图和 HTML 快照均保存失败",
+      finalUrl: "https://ct.ctrip.com/hotel",
+      screenshotPath: "",
+      diagnosisPath: "/tmp/result.json",
+      resultPath: "/tmp/result.json",
+      pageTextSummary: "携程酒店详情",
+      pathRecords: [{
+        platform: "携程商旅",
+        step: "save-failure-screenshot",
+        status: "failed",
+        startedAt: "2026-05-24T10:00:00.000Z",
+        endedAt: "2026-05-24T10:00:01.000Z",
+        durationMs: 1000,
+        finalUrl: "https://ct.ctrip.com/hotel",
+        failureType: "unknown_technical_failure",
+        failureReason: "截图和 HTML 快照均保存失败"
+      }],
+      evidenceSaveFailed: true
+    })).toMatchObject({
+      evidenceStatus: "evidence_save_failed"
+    });
+  });
+
+  it("summarizes 40-hotel scale validation evidence and timing stats", () => {
+    const query = { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 };
+    const pathRecords = [
+      { platform: "青猫差旅" as const, step: "qingmao-candidate-search", status: "completed" as const, startedAt: "2026-05-24T10:00:00.000Z", endedAt: "2026-05-24T10:00:02.000Z", durationMs: 2000, finalUrl: "https://booking.tmctrip.com/TravelBooking", screenshotPath: "/tmp/qingmao.png" },
+      { platform: "阿里商旅" as const, step: "read-main-rate", status: "completed" as const, startedAt: "2026-05-24T10:00:02.000Z", endedAt: "2026-05-24T10:00:07.000Z", durationMs: 5000, finalUrl: "https://travel.alibtrip.com/hotel-demeter#/detail", screenshotPath: "/tmp/ali.png", diagnosisPath: "/tmp/alibtrip.json" },
+      { platform: "在途商旅" as const, step: "read-main-rate", status: "timeout" as const, startedAt: "2026-05-24T10:00:07.000Z", endedAt: "2026-05-24T10:00:17.000Z", durationMs: 10000, finalUrl: "https://www.z-trip.cn/v/pg/hotel/hotelList", screenshotPath: "/tmp/ztrip.png", failureType: "page_load_timeout" as const, failureReason: "在途超时" }
+    ];
+    const groups = [
+      {
+        group: "首旅如家" as const,
+        targetCount: 8,
+        attemptedCount: 8,
+        completedCount: 7,
+        partialCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+        timeoutCount: 1,
+        unattemptedCount: 0,
+        timeoutBudget: false,
+        samples: [
+          { status: "completed" as const, query, pathRecords, evidenceStatus: "complete" as const },
+          { status: "timeout" as const, query, pathRecords, evidenceStatus: "evidence_missing" as const, evidenceIssues: ["pageTextSummary 缺失"], currentPlatform: "在途商旅" as const, currentStep: "read-main-rate", failureType: "page_load_timeout" as const, failureReason: "在途超时", finalUrl: "https://www.z-trip.cn", screenshotPath: "/tmp/ztrip.png", diagnosisPath: "/tmp/result.json", pageTextSummary: "" }
+        ]
+      },
+      {
+        group: "华住" as const,
+        targetCount: 8,
+        attemptedCount: 8,
+        completedCount: 8,
+        partialCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+        timeoutCount: 0,
+        unattemptedCount: 0,
+        timeoutBudget: false,
+        samples: []
+      }
+    ];
+
+    const summary = summarizeHotelScaleValidationGroups(groups);
+    expect(summary).toMatchObject({
+      completedCount: 15,
+      timeoutCount: 1,
+      targetTotal: 16,
+      evidenceCompleteCount: 1,
+      evidenceMissingCount: 1,
+      evidenceCompleteRate: 0.5,
+      status: "partial"
+    });
+
+    const timings = aggregateHotelScaleValidationTimings(groups.flatMap((group) => group.samples));
+    expect(timings.platforms.find((item) => item.platform === "阿里商旅")).toMatchObject({
+      count: 2,
+      totalMs: 10000,
+      averageMs: 5000,
+      p95Ms: 5000
+    });
+    expect(timings.steps.find((item) => item.step === "read-main-rate")).toMatchObject({
+      count: 4,
+      totalMs: 30000,
+      averageMs: 7500
+    });
+    expect(timings.slowestSteps[0]).toMatchObject({
+      platform: "在途商旅",
+      durationMs: 10000
+    });
+    expect(timings.timeoutSamples).toHaveLength(1);
   });
 
   it("selects the matching ali card even when it is not the first card", () => {

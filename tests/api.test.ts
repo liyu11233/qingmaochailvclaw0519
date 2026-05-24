@@ -148,6 +148,43 @@ describe("management API", () => {
         updatedAt: null,
         message: "等待执行 10 家酒店小放量"
       })),
+      getHotelScaleValidationStatus: vi.fn(() => ({
+        status: "idle",
+        mode: "scale-validation",
+        targetTotal: 40,
+        targetPerGroup: 8,
+        mainRatePlan: "大床有早餐",
+        checkInDate: "2026-05-25",
+        checkOutDate: "2026-05-26",
+        nights: 1,
+        budget: {
+          totalMs: 120 * 60 * 1000,
+          perGroupMs: 25 * 60 * 1000,
+          maxAttemptsPerGroup: 24
+        },
+        platformOrder: ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"],
+        cityPool: ["北京", "广州", "杭州", "上海", "深圳", "武汉", "佛山", "成都", "厦门"],
+        groups: [],
+        completedCount: 0,
+        failedCount: 0,
+        partialCount: 0,
+        skippedCount: 0,
+        timeoutCount: 0,
+        unattemptedCount: 40,
+        evidenceCompleteCount: 0,
+        evidenceMissingCount: 0,
+        evidenceSaveFailedCount: 0,
+        evidenceCompleteRate: 0,
+        timeoutBudget: false,
+        timing: {
+          platforms: [],
+          steps: [],
+          slowestSteps: [],
+          timeoutSamples: []
+        },
+        updatedAt: null,
+        message: "等待执行 40 家酒店放量验证 / 准生产诊断跑"
+      })),
       getHotelSingleDiagnosisStatus: vi.fn(() => ({
         status: "idle",
         input: null,
@@ -676,6 +713,44 @@ describe("management API", () => {
         updatedAt: "2026-05-18T10:04:20.000Z",
         message: "10 家酒店小放量完成：完整 9/10，失败 1/10"
       })),
+      runHotelScaleValidationProbe: vi.fn(async (input: { checkInDate?: string; checkOutDate?: string } = {}) => ({
+        status: "partial",
+        mode: "scale-validation",
+        targetTotal: 40,
+        targetPerGroup: 8,
+        mainRatePlan: "大床有早餐",
+        checkInDate: input.checkInDate ?? "2026-05-25",
+        checkOutDate: input.checkOutDate ?? "2026-05-26",
+        nights: input.checkInDate && input.checkOutDate ? 2 : 1,
+        budget: {
+          totalMs: 120 * 60 * 1000,
+          perGroupMs: 25 * 60 * 1000,
+          maxAttemptsPerGroup: 24
+        },
+        platformOrder: ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"],
+        cityPool: ["北京", "广州", "杭州", "上海", "深圳", "武汉", "佛山", "成都", "厦门"],
+        groups: [],
+        completedCount: 39,
+        failedCount: 1,
+        partialCount: 0,
+        skippedCount: 0,
+        timeoutCount: 0,
+        unattemptedCount: 0,
+        evidenceCompleteCount: 39,
+        evidenceMissingCount: 1,
+        evidenceSaveFailedCount: 0,
+        evidenceCompleteRate: 0.975,
+        timeoutBudget: false,
+        summaryPath: "/tmp/hotel-scale-validation/summary.json",
+        timing: {
+          platforms: [{ platform: "阿里商旅", count: 40, totalMs: 400000, averageMs: 10000, p95Ms: 18000 }],
+          steps: [{ step: "read-main-rate", count: 120, totalMs: 900000, averageMs: 7500, p95Ms: 15000 }],
+          slowestSteps: [],
+          timeoutSamples: []
+        },
+        updatedAt: "2026-05-18T10:05:20.000Z",
+        message: "40 家酒店放量验证 / 准生产诊断跑返回 partial：完整 39/40"
+      })),
       cleanupBrowserPages: vi.fn(async () => ({
         status: "completed",
         beforeCount: 86,
@@ -1106,6 +1181,46 @@ describe("management API", () => {
     });
     expect(pilotCollector.runHotelSmallBatchProbe).toHaveBeenCalledTimes(1);
 
+    const hotelScaleValidationStatus = await request(app).get("/api/pilot/hotel-scale-validation/status").expect(200);
+    expect(hotelScaleValidationStatus.body).toMatchObject({
+      status: "idle",
+      mode: "scale-validation",
+      targetTotal: 40,
+      targetPerGroup: 8,
+      checkInDate: "2026-05-25",
+      checkOutDate: "2026-05-26",
+      nights: 1,
+      budget: {
+        totalMs: 120 * 60 * 1000,
+        perGroupMs: 25 * 60 * 1000,
+        maxAttemptsPerGroup: 24
+      }
+    });
+
+    const defaultScaleValidation = await request(app).post("/api/pilot/hotel-scale-validation/run").expect(200);
+    expect(defaultScaleValidation.body).toMatchObject({
+      checkInDate: "2026-05-25",
+      checkOutDate: "2026-05-26",
+      nights: 1
+    });
+    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenCalledWith({});
+
+    const explicitScaleInput = { checkInDate: "2026-06-02", checkOutDate: "2026-06-04" };
+    const hotelScaleValidation = await request(app).post("/api/pilot/hotel-scale-validation/run").send(explicitScaleInput).expect(200);
+    expect(hotelScaleValidation.body).toMatchObject({
+      status: "partial",
+      mode: "scale-validation",
+      checkInDate: "2026-06-02",
+      checkOutDate: "2026-06-04",
+      nights: 2,
+      completedCount: 39,
+      evidenceCompleteRate: 0.975
+    });
+    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(explicitScaleInput);
+
+    await request(app).post("/api/pilot/hotel-scale-validation/run").send({ checkInDate: "2026-06-02" }).expect(400);
+    await request(app).post("/api/pilot/hotel-scale-validation/run").send({ checkInDate: "2026-06-04", checkOutDate: "2026-06-02" }).expect(400);
+
     const singleDiagnosisStatus = await request(app).get("/api/pilot/hotel-single-diagnosis/status").expect(200);
     expect(singleDiagnosisStatus.body.status).toBe("idle");
 
@@ -1480,6 +1595,43 @@ describe("management API", () => {
         groups: [],
         updatedAt: null,
         message: "等待执行 10 家酒店小放量"
+      })),
+      getHotelScaleValidationStatus: vi.fn(() => ({
+        status: "idle",
+        mode: "scale-validation",
+        targetTotal: 40,
+        targetPerGroup: 8,
+        mainRatePlan: "大床有早餐",
+        checkInDate: "2026-05-25",
+        checkOutDate: "2026-05-26",
+        nights: 1,
+        budget: {
+          totalMs: 120 * 60 * 1000,
+          perGroupMs: 25 * 60 * 1000,
+          maxAttemptsPerGroup: 24
+        },
+        platformOrder: ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"],
+        cityPool: ["北京", "广州", "杭州", "上海", "深圳", "武汉", "佛山", "成都", "厦门"],
+        groups: [],
+        completedCount: 0,
+        failedCount: 0,
+        partialCount: 0,
+        skippedCount: 0,
+        timeoutCount: 0,
+        unattemptedCount: 40,
+        evidenceCompleteCount: 0,
+        evidenceMissingCount: 0,
+        evidenceSaveFailedCount: 0,
+        evidenceCompleteRate: 0,
+        timeoutBudget: false,
+        timing: {
+          platforms: [],
+          steps: [],
+          slowestSteps: [],
+          timeoutSamples: []
+        },
+        updatedAt: null,
+        message: "等待执行 40 家酒店放量验证 / 准生产诊断跑"
       })),
       getSameFlightComparisonStatus: vi.fn(() => ({
         status: "idle",
