@@ -15,6 +15,7 @@ import {
   type HotelCalibrationInput,
   type HotelCalibrationResult,
   type HotelGroupMainRateProbeResult,
+  type HotelSmallBatchProbeResult,
   type HotelMainRateProbeResult,
   type HotelSingleDiagnosisInput,
   type HotelSingleDiagnosisProbeResult,
@@ -48,6 +49,7 @@ interface AppState {
   qingmaoHotelCandidates: QingmaoHotelCandidateProbeResult;
   hotelMainRate: HotelMainRateProbeResult;
   hotelGroupMainRate: HotelGroupMainRateProbeResult;
+  hotelSmallBatch: HotelSmallBatchProbeResult;
   hotelSingleDiagnosis: HotelSingleDiagnosisProbeResult;
   aliHotelSingleVerify: AliHotelSingleVerifyResult;
   aliHotelMatch: AliHotelMatchProbeResult;
@@ -259,6 +261,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     qingmaoHotelCandidates: pilotCollector.getQingmaoHotelCandidateStatus(),
     hotelMainRate: pilotCollector.getHotelMainRateStatus(),
     hotelGroupMainRate: pilotCollector.getHotelGroupMainRateStatus(),
+    hotelSmallBatch: pilotCollector.getHotelSmallBatchStatus(),
     hotelSingleDiagnosis: pilotCollector.getHotelSingleDiagnosisStatus(),
     aliHotelSingleVerify: pilotCollector.getAliHotelSingleVerifyStatus(),
     aliHotelMatch: pilotCollector.getAliHotelMatchStatus(),
@@ -391,6 +394,28 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
             screenshotUrl: toOutputUrl(quote.screenshotPath)
           };
         })
+      }))
+    };
+  }
+
+  function decorateHotelSmallBatchResult(result: HotelSmallBatchProbeResult): HotelSmallBatchProbeResult {
+    return {
+      ...result,
+      groups: result.groups.map((group) => ({
+        ...group,
+        samples: group.samples.map((sample) => ({
+          ...sample,
+          quotes: sample.quotes.map((quote) => {
+            if (!quote.screenshotPath || path.relative(servedOutputsRoot, quote.screenshotPath).startsWith("..")) {
+              return quote;
+            }
+
+            return {
+              ...quote,
+              screenshotUrl: toOutputUrl(quote.screenshotPath)
+            };
+          })
+        }))
       }))
     };
   }
@@ -682,6 +707,18 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     await runExclusiveOperation("酒店集团主口径小样本验证", res, next, async () => {
       state.hotelGroupMainRate = await pilotCollector.runHotelGroupMainRateProbe();
       return decorateHotelGroupMainRateResult(state.hotelGroupMainRate);
+    });
+  });
+
+  app.get("/api/pilot/hotel-small-batch/status", (_req, res) => {
+    state.hotelSmallBatch = pilotCollector.getHotelSmallBatchStatus();
+    res.json(decorateHotelSmallBatchResult(state.hotelSmallBatch));
+  });
+
+  app.post("/api/pilot/hotel-small-batch/run", async (_req, res, next) => {
+    await runExclusiveOperation("10 家酒店小放量", res, next, async () => {
+      state.hotelSmallBatch = await pilotCollector.runHotelSmallBatchProbe();
+      return decorateHotelSmallBatchResult(state.hotelSmallBatch);
     });
   });
 

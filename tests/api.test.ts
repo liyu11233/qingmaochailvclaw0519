@@ -127,6 +127,27 @@ describe("management API", () => {
         updatedAt: null,
         message: "等待验证每个集团 1 家酒店主口径"
       })),
+      getHotelSmallBatchStatus: vi.fn(() => ({
+        status: "idle",
+        city: "广州",
+        targetTotal: 10,
+        targetPerGroup: 2,
+        mainRatePlan: "大床有早餐",
+        completedCount: 0,
+        failedCount: 0,
+        partialCount: 0,
+        skippedCount: 0,
+        unattemptedCount: 10,
+        timeoutBudget: false,
+        budget: {
+          totalMs: 90 * 60 * 1000,
+          perGroupMs: 18 * 60 * 1000,
+          maxAttemptsPerGroup: 6
+        },
+        groups: [],
+        updatedAt: null,
+        message: "等待执行 10 家酒店小放量"
+      })),
       getHotelSingleDiagnosisStatus: vi.fn(() => ({
         status: "idle",
         input: null,
@@ -566,6 +587,95 @@ describe("management API", () => {
         updatedAt: "2026-05-18T10:04:10.000Z",
         message: "3 家酒店校准测试完成：完整 1/3"
       })),
+      runHotelSmallBatchProbe: vi.fn(async () => ({
+        status: "partial",
+        city: "广州",
+        targetTotal: 10,
+        targetPerGroup: 2,
+        mainRatePlan: "大床有早餐",
+        completedCount: 9,
+        failedCount: 1,
+        partialCount: 1,
+        skippedCount: 0,
+        unattemptedCount: 0,
+        timeoutBudget: false,
+        budget: {
+          totalMs: 90 * 60 * 1000,
+          perGroupMs: 18 * 60 * 1000,
+          maxAttemptsPerGroup: 6
+        },
+        groups: ["首旅如家", "华住", "锦江", "东呈", "亚朵"].map((group, groupIndex) => ({
+          group,
+          query: { city: "广州", keyword: group === "亚朵" ? "亚朵" : group === "东呈" ? "城市便捷" : group === "锦江" ? "维也纳" : group === "华住" ? "全季" : "如家商旅", checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 },
+          targetCount: 2,
+          maxAttempts: 6,
+          budgetMs: 18 * 60 * 1000,
+          attemptedCount: 2,
+          completedCount: groupIndex === 4 ? 1 : 2,
+          partialCount: groupIndex === 4 ? 1 : 0,
+          failedCount: 0,
+          skippedCount: 0,
+          unattemptedCount: 0,
+          timeoutBudget: false,
+          samples: Array.from({ length: 2 }, (_, sampleIndex) => {
+            const completed = !(groupIndex === 4 && sampleIndex === 1);
+            return {
+              group,
+              groupIndex: groupIndex + 1,
+              sampleIndex: sampleIndex + 1,
+              query: { city: "广州", keyword: group === "亚朵" ? "亚朵" : group === "东呈" ? "城市便捷" : group === "锦江" ? "维也纳" : group === "华住" ? "全季" : "如家商旅", checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 },
+              status: completed ? "completed" : "partial",
+              selectedCandidate: completed ? {
+                hotelName: `${group}新增酒店${sampleIndex + 1}`,
+                level: "舒适",
+                score: "4.8",
+                area: "广州",
+                address: `广州市测试路${groupIndex}${sampleIndex}号`,
+                price: 260 + groupIndex + sampleIndex,
+                rawText: `${group}新增酒店${sampleIndex + 1}`
+              } : null,
+              quotes: completed ? ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"].map((platform, platformIndex) => ({
+                platform,
+                status: "available",
+                price: 260 + groupIndex + sampleIndex + platformIndex,
+                hotelName: `${group}新增酒店${sampleIndex + 1}`,
+                roomType: "大床房",
+                ratePlan: "大床有早餐",
+                durationMs: 1000 + platformIndex,
+                screenshotPath: path.resolve(`outputs/current/pilot/hotel-small-batch/${group}/hotel-${sampleIndex + 1}-${platformIndex + 1}.png`),
+                finalUrl: "https://example.com/hotel"
+              })) : [
+                {
+                  platform: "青猫差旅",
+                  status: "available",
+                  price: 300,
+                  hotelName: `${group}新增酒店${sampleIndex + 1}`,
+                  roomType: "大床房",
+                  ratePlan: "大床有早餐",
+                  durationMs: 1000,
+                  screenshotPath: path.resolve(`outputs/current/pilot/hotel-small-batch/${group}/hotel-${sampleIndex + 1}-qingmao.png`),
+                  finalUrl: "https://example.com/qingmao"
+                },
+                {
+                  platform: "阿里商旅",
+                  status: "failed",
+                  price: null,
+                  hotelName: `${group}新增酒店${sampleIndex + 1}`,
+                  roomType: "",
+                  ratePlan: "大床有早餐",
+                  durationMs: 2000,
+                  error: "未找到符合条件的新增候选"
+                }
+              ],
+              message: completed ? `${group}新增酒店${sampleIndex + 1} 四平台主口径均已读取` : "亚朵第 2 家酒店小放量失败",
+              failureReason: completed ? undefined : "未找到符合条件的新增候选",
+              failurePlatform: completed ? undefined : "阿里商旅"
+            };
+          })
+        })),
+        updatedAt: "2026-05-18T10:04:20.000Z",
+        message: "10 家酒店小放量完成：完整 9/10，失败 1/10"
+      })),
       cleanupBrowserPages: vi.fn(async () => ({
         status: "completed",
         beforeCount: 86,
@@ -970,6 +1080,32 @@ describe("management API", () => {
     });
     expect(pilotCollector.runHotelGroupMainRateProbe).toHaveBeenCalledTimes(1);
 
+    const hotelSmallBatchStatus = await request(app).get("/api/pilot/hotel-small-batch/status").expect(200);
+    expect(hotelSmallBatchStatus.body).toMatchObject({
+      status: "idle",
+      targetTotal: 10,
+      targetPerGroup: 2,
+      mainRatePlan: "大床有早餐"
+    });
+
+    const hotelSmallBatch = await request(app).post("/api/pilot/hotel-small-batch/run").expect(200);
+    expect(hotelSmallBatch.body).toMatchObject({
+      status: "partial",
+      city: "广州",
+      targetTotal: 10,
+      targetPerGroup: 2,
+      completedCount: 9,
+      failedCount: 1
+    });
+    expect(hotelSmallBatch.body.groups).toHaveLength(5);
+    expect(hotelSmallBatch.body.groups.every((group: { samples: unknown[] }) => group.samples.length === 2)).toBe(true);
+    expect(hotelSmallBatch.body.groups[0].samples[0].quotes.find((quote: { platform: string }) => quote.platform === "青猫差旅")).toMatchObject({
+      screenshotUrl: "/outputs/current/pilot/hotel-small-batch/%E9%A6%96%E6%97%85%E5%A6%82%E5%AE%B6/hotel-1-1.png",
+      finalUrl: "https://example.com/hotel",
+      durationMs: 1000
+    });
+    expect(pilotCollector.runHotelSmallBatchProbe).toHaveBeenCalledTimes(1);
+
     const singleDiagnosisStatus = await request(app).get("/api/pilot/hotel-single-diagnosis/status").expect(200);
     expect(singleDiagnosisStatus.body.status).toBe("idle");
 
@@ -1324,6 +1460,27 @@ describe("management API", () => {
         updatedAt: null,
         message: "等待执行 3 家酒店校准测试"
       })),
+      getHotelSmallBatchStatus: vi.fn(() => ({
+        status: "idle",
+        city: "广州",
+        targetTotal: 10,
+        targetPerGroup: 2,
+        mainRatePlan: "大床有早餐",
+        completedCount: 0,
+        failedCount: 0,
+        partialCount: 0,
+        skippedCount: 0,
+        unattemptedCount: 10,
+        timeoutBudget: false,
+        budget: {
+          totalMs: 90 * 60 * 1000,
+          perGroupMs: 18 * 60 * 1000,
+          maxAttemptsPerGroup: 6
+        },
+        groups: [],
+        updatedAt: null,
+        message: "等待执行 10 家酒店小放量"
+      })),
       getSameFlightComparisonStatus: vi.fn(() => ({
         status: "idle",
         route: { scope: "国内", origin: "广州", destination: "上海", travelDate: "2026-05-21" },
@@ -1369,6 +1526,7 @@ describe("management API", () => {
       runHotelRatePlanProbe: vi.fn(),
       runHotelAllRatePlanProbe: vi.fn(),
       runHotelCalibrationProbe: vi.fn(),
+      runHotelSmallBatchProbe: vi.fn(),
       cleanupBrowserPages: vi.fn(),
       runSameFlightComparisonProbe: vi.fn(),
       runZtripProbe: vi.fn(),

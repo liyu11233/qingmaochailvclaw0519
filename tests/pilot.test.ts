@@ -1,16 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   classifyProbeOutcome,
   classifyZtripProbeOutcome,
   classifyZtripProductEntries,
+  collectHotelMainRateCompetitorQuotes,
   buildCtripHotelSearchKeywords,
   buildCtripHotelCoreKeywords,
   buildStrictCtripHotelSearchUrl,
   buildAliHotelSearchKeywords,
   buildAliHotelSearchKeywordPlan,
+  buildAliHotelPathRecord,
+  appendAliHotelPathRecord,
   collectAliHotelListCardsForMatching,
   confirmAliHotelDetailDoorPlate,
+  waitForAliHotelDetailIdentityText,
   applyAliHotelDetailDiagnosisToTrace,
+  buildFailedAliHotelMainRateQuote,
   rankAliHotelDetailCandidateCards,
   resolveAliHotelDetailCandidateAttempts,
   resolveAliHotelSameHotelAfterFailure,
@@ -43,6 +48,7 @@ import {
   parseAliHotelMainRatesText,
   parseCtripHotelMainRatesText,
   parseDurationMinutes,
+  mergeQingmaoHotelCandidatesFromTexts,
   parseQingmaoHotelCandidatesText,
   parseQingmaoHotelMainRatesText,
   parseQingmaoFlightCandidateText,
@@ -50,6 +56,11 @@ import {
   readHotelCalibrationRatesFromText,
   resolveHotelCalibrationPlatformOrder,
   isHotelCalibrationSampleComplete,
+  resolveHotelSmallBatchBudgetStop,
+  resolveHotelSmallBatchOverallBudgetStop,
+  getHotelSmallBatchGroupSearchKeywords,
+  shouldSkipHotelSmallBatchCandidate,
+  summarizeHotelSmallBatchGroups,
   parseZtripFlightCandidatesText,
   parseZtripHotelRatesText,
   parseZtripHotelRatesTextForRatePlan,
@@ -1145,6 +1156,127 @@ CNY 260`);
     });
   });
 
+  it("accepts ali detail door numbers when the visible detail address omits the city name", () => {
+    const vienna = {
+      hotelName: "维也纳酒店(广州惠福西上下九店)",
+      level: "舒适型",
+      score: "4.5",
+      area: "",
+      address: "越秀区惠福西路38号",
+      price: 214,
+      rawText: ""
+    };
+    const cityComfort = {
+      hotelName: "城市便捷酒店(广州白云山店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "白云区大金钟路63号",
+      price: 300,
+      rawText: ""
+    };
+
+    expect(confirmAliHotelDetailDoorPlate("广州", vienna, "酒店详情 维也纳酒店(广州惠福西上下九店) 越秀区惠福西路38号 查看地图")).toMatchObject({
+      sameHotel: true,
+      detailDoorNumber: "38号",
+      failureReason: ""
+    });
+    expect(confirmAliHotelDetailDoorPlate("广州", cityComfort, "酒店详情 城市便捷酒店(广州白云山店) 白云区大金钟路63号 查看地图")).toMatchObject({
+      sameHotel: true,
+      detailDoorNumber: "63号",
+      failureReason: ""
+    });
+  });
+
+  it("waits for ali detail address instead of returning on title-only detail text", async () => {
+    const candidate = {
+      hotelName: "维也纳酒店(广州惠福西上下九店)",
+      level: "舒适型",
+      score: "4.5",
+      area: "",
+      address: "越秀区惠福西路38号",
+      price: 214,
+      rawText: ""
+    };
+    const textSnapshots = [
+      "酒店详情 维也纳酒店(广州惠福西上下九店) 预订 大床房",
+      "酒店详情 维也纳酒店(广州惠福西上下九店) 预订 大床房",
+      "酒店详情 维也纳酒店(广州惠福西上下九店) 惠福西路38号 查看地图 预订"
+    ];
+    const innerText = vi.fn(async () => textSnapshots.shift() ?? textSnapshots[textSnapshots.length - 1] ?? "");
+    const page = {
+      waitForTimeout: vi.fn(async () => undefined),
+      evaluate: vi.fn(async () => undefined),
+      locator: vi.fn(() => ({
+        innerText
+      }))
+    };
+
+    const detailText = await waitForAliHotelDetailIdentityText(
+      page as never,
+      { city: "广州", keyword: "维也纳", checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 },
+      candidate,
+      "酒店详情 维也纳酒店(广州惠福西上下九店) 预订"
+    );
+
+    expect(detailText).toContain("惠福西路38号");
+    expect(innerText).toHaveBeenCalledTimes(3);
+  });
+
+  it("scrolls ali detail page to hotel intro when the first screen has no door number", async () => {
+    const candidate = {
+      hotelName: "如家商旅酒店(广州白云国际机场T2航站楼店)",
+      level: "舒适型",
+      score: "4.8",
+      area: "",
+      address: "花都区空港大道10号之六3栋二至十层",
+      price: 216,
+      rawText: ""
+    };
+    const textSnapshots = [
+      "酒店详情 如家商旅-广州白云国际机场店 广东省广州市花都区花东镇如家商旅酒店 新白云国际机场商圈 预订 大床房",
+      "酒店详情 如家商旅-广州白云国际机场店 广东省广州市花都区花东镇如家商旅酒店 新白云国际机场商圈 预订 大床房",
+      "酒店介绍 如家商旅酒店（广州白云国际机场店）位于广州市花都区空港大道10号，是距离白云国际机场较近的酒店之一"
+    ];
+    const innerText = vi.fn(async () => textSnapshots.shift() ?? textSnapshots[textSnapshots.length - 1] ?? "");
+    const page = {
+      waitForTimeout: vi.fn(async () => undefined),
+      evaluate: vi.fn(async () => undefined),
+      locator: vi.fn(() => ({
+        innerText
+      }))
+    };
+
+    const detailText = await waitForAliHotelDetailIdentityText(
+      page as never,
+      { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 },
+      candidate,
+      "酒店详情 如家商旅-广州白云国际机场店 广东省广州市花都区花东镇如家商旅酒店 新白云国际机场商圈 预订"
+    );
+
+    expect(detailText).toContain("空港大道10号");
+    expect(page.evaluate).toHaveBeenCalled();
+  });
+
+  it("does not treat long ali page identifiers as hotel door numbers", () => {
+    const atour = {
+      hotelName: "广州黄埔保盈大道地铁站亚朵酒店",
+      level: "高档型",
+      score: "4.9",
+      area: "",
+      address: "黄埔区保盈大道4号",
+      price: 791,
+      rawText: ""
+    };
+
+    expect(extractHotelDoorNumber("营业执照编号 33011002016404号")).toBeNull();
+    expect(confirmAliHotelDetailDoorPlate("广州", atour, "酒店详情 广州黄埔保盈大道地铁站亚朵酒店 营业执照编号 33011002016404号")).toMatchObject({
+      sameHotel: false,
+      detailDoorNumber: null,
+      failureReason: "阿里详情页未提取到地址"
+    });
+  });
+
   it("records ali detail address and door confirmation into keyword trace", () => {
     const candidate = {
       hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
@@ -1165,7 +1297,8 @@ CNY 260`);
       selectedAsCandidate: true,
       clickedDetail: true,
       listScreenshotPath: "/tmp/alibtrip-keyword-01-list.png",
-      detailScreenshotPath: "/tmp/alibtrip-keyword-01-detail.png"
+      detailScreenshotPath: "/tmp/alibtrip-keyword-01-detail.png",
+      pathRecords: []
     };
     const detail = confirmAliHotelDetailDoorPlate("广州", candidate, "酒店详情 如家商旅(金标)-广州京溪南方医院地铁站店 广州市白云区广州大道北1420号");
 
@@ -1179,6 +1312,68 @@ CNY 260`);
       listScreenshotPath: "/tmp/alibtrip-keyword-01-list.png",
       detailScreenshotPath: "/tmp/alibtrip-keyword-01-detail.png"
     });
+  });
+
+  it("builds ali path records with timing, selected candidate, and evidence fields", () => {
+    const record = buildAliHotelPathRecord({
+      step: "click-candidate",
+      status: "completed",
+      startedAtMs: 1_000,
+      endedAtMs: 1_750,
+      keyword: "维也纳 惠福西路",
+      keywordMode: "normal",
+      finalUrl: "https://travel.alibtrip.com/hotel-demeter#/list",
+      screenshotPath: "/tmp/alibtrip-keyword-01-selected-card-01.png",
+      diagnosisPath: "/tmp/alibtrip-list-diagnosis.json",
+      candidateRank: 1,
+      candidateCardIndex: 3,
+      candidateCardText: "维也纳酒店(广州惠福西上下九店) 惠福西路38号 ￥214起",
+      selectedCandidate: true
+    });
+
+    expect(record).toMatchObject({
+      step: "click-candidate",
+      status: "completed",
+      startedAt: "1970-01-01T00:00:01.000Z",
+      endedAt: "1970-01-01T00:00:01.750Z",
+      durationMs: 750,
+      keyword: "维也纳 惠福西路",
+      keywordMode: "normal",
+      finalUrl: "https://travel.alibtrip.com/hotel-demeter#/list",
+      screenshotPath: "/tmp/alibtrip-keyword-01-selected-card-01.png",
+      diagnosisPath: "/tmp/alibtrip-list-diagnosis.json",
+      candidateRank: 1,
+      candidateCardIndex: 3,
+      selectedCandidate: true
+    });
+  });
+
+  it("appends ali failure path records with final url, screenshot, and diagnosis path", () => {
+    const records = [] as ReturnType<typeof buildAliHotelPathRecord>[];
+    appendAliHotelPathRecord(records, {
+      step: "wait-detail-page",
+      status: "failed",
+      startedAtMs: 2_000,
+      endedAtMs: 3_200,
+      finalUrl: "https://travel.alibtrip.com/hotel-demeter#/list",
+      screenshotPath: "/tmp/alibtrip-keyword-01-failure-01.png",
+      diagnosisPath: "/tmp/alibtrip-list-diagnosis.json",
+      failureReason: "阿里商旅点击第1候选后详情页加载超时",
+      candidateRank: 1
+    });
+
+    expect(records).toEqual([
+      expect.objectContaining({
+        step: "wait-detail-page",
+        status: "failed",
+        durationMs: 1_200,
+        finalUrl: "https://travel.alibtrip.com/hotel-demeter#/list",
+        screenshotPath: "/tmp/alibtrip-keyword-01-failure-01.png",
+        diagnosisPath: "/tmp/alibtrip-list-diagnosis.json",
+        failureReason: "阿里商旅点击第1候选后详情页加载超时",
+        candidateRank: 1
+      })
+    ]);
   });
 
   it("forces ali sameHotel false when detail door confirmation fails", () => {
@@ -1231,6 +1426,294 @@ CNY 260`);
     ).toBe(true);
   });
 
+  it("filters hotel small-batch candidates before platform collection", () => {
+    const query = { city: "广州", keyword: "亚朵", checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 };
+    const baseCandidate = {
+      hotelName: "广州塔琶洲会展亚朵S酒店",
+      level: "高档",
+      score: "4.8",
+      area: "海珠区",
+      address: "广州市海珠区新港东路277号",
+      price: 671,
+      rawText: "广州塔琶洲会展亚朵S酒店 ￥671起"
+    };
+    expect(shouldSkipHotelSmallBatchCandidate(baseCandidate, query, new Set(), new Set())).toBeNull();
+    const previousAnchors = [
+      { hotelName: "如家商旅酒店(广州永庆坊荔湾湖公园店)", keyword: "如家商旅" },
+      { hotelName: "全季酒店(广州上下九步行街陈家祠店)", keyword: "全季" },
+      { hotelName: "维也纳酒店(广州火车站小北地铁站店)", keyword: "维也纳" },
+      { hotelName: "城市便捷酒店(珠江夜游广州塔中大码头中山大学店)", keyword: "城市便捷" },
+      { hotelName: "广州塔琶洲会展亚朵S酒店", keyword: "亚朵" }
+    ];
+    for (const anchor of previousAnchors) {
+      expect(shouldSkipHotelSmallBatchCandidate(
+        { ...baseCandidate, hotelName: anchor.hotelName, rawText: anchor.hotelName },
+        { ...query, keyword: anchor.keyword }
+      )).toBe("上一轮5集团锚点酒店");
+    }
+    expect(shouldSkipHotelSmallBatchCandidate({ ...baseCandidate, hotelName: "广州珠江太古仓亚朵S酒店" }, query, new Set(), new Set())).toBeNull();
+    expect(shouldSkipHotelSmallBatchCandidate({ ...baseCandidate, address: "广州市海珠区新港东路" }, query, new Set(), new Set())).toBe("未提取到门牌号");
+    expect(shouldSkipHotelSmallBatchCandidate({ ...baseCandidate, price: null }, query, new Set(), new Set())).toBe("候选起价为空");
+    expect(shouldSkipHotelSmallBatchCandidate({ ...baseCandidate, hotelName: "广州琶洲会展漫途酒店" }, query, new Set(), new Set())).toBe("不属于亚朵候选");
+    expect(shouldSkipHotelSmallBatchCandidate(baseCandidate, query, new Set(["广州塔琶洲会展亚朵S酒店"]), new Set())).toBe("本轮小放量重复酒店");
+  });
+
+  it("expands Dongcheng small-batch searches beyond City Comfort only", () => {
+    expect(getHotelSmallBatchGroupSearchKeywords("东呈")).toEqual(["城市便捷", "宜尚", "柏曼", "怡程"]);
+    expect(getHotelSmallBatchGroupSearchKeywords("华住")).toEqual(["全季", "汉庭", "桔子", "美居", "海友", "你好", "星程"]);
+    expect(getHotelSmallBatchGroupSearchKeywords("锦江")).toEqual(["维也纳"]);
+  });
+
+  it("keeps expanded Dongcheng brand candidates eligible for small-batch filtering", () => {
+    const common = {
+      level: "舒适型",
+      score: "4.7",
+      area: "广州",
+      address: "广州市天河区体育西路88号",
+      price: 300,
+      rawText: ""
+    };
+    for (const [keyword, hotelName] of [
+      ["宜尚", "宜尚酒店(广州体育西路地铁站店)"],
+      ["柏曼", "柏曼酒店(广州北京路步行街店)"],
+      ["怡程", "怡程酒店(广州珠江新城店)"]
+    ] as const) {
+      expect(shouldSkipHotelSmallBatchCandidate(
+        { ...common, hotelName },
+        { city: "广州", keyword, checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 },
+        new Set(),
+        new Set()
+      )).toBeNull();
+    }
+  });
+
+  it("merges Qingmao hotel candidates from multiple scrolled screens and removes duplicates", () => {
+    const firstScreen = `
+全季酒店(广州天河火车东站店)
+舒适型
+4.9
+距市中心10公里
+广州市天河区林和西路1号
+￥
+428
+查看详情
+全季酒店(广州金融城临江大道店)
+舒适型
+4.8
+距市中心12公里
+广州市天河区临江大道787号
+￥
+446
+查看详情
+`;
+    const secondScreen = `
+全季酒店(广州金融城临江大道店)
+舒适型
+4.8
+距市中心12公里
+广州市天河区临江大道787号
+￥
+446
+查看详情
+汉庭酒店(广州北京路步行街店)
+舒适型
+4.7
+距市中心3公里
+广州市越秀区北京路88号
+￥
+301
+查看详情
+`;
+
+    expect(mergeQingmaoHotelCandidatesFromTexts([firstScreen, secondScreen]).map((candidate) => candidate.hotelName)).toEqual([
+      "全季酒店(广州天河火车东站店)",
+      "全季酒店(广州金融城临江大道店)",
+      "汉庭酒店(广州北京路步行街店)"
+    ]);
+  });
+
+  it("summarizes hotel small-batch completion and failures", () => {
+    const query = { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 };
+    const groups = [
+      {
+        group: "首旅如家" as const,
+        query,
+        targetCount: 2,
+        maxAttempts: 6,
+        budgetMs: 18 * 60 * 1000,
+        attemptedCount: 2,
+        completedCount: 1,
+        partialCount: 0,
+        failedCount: 1,
+        skippedCount: 0,
+        unattemptedCount: 0,
+        timeoutBudget: false,
+        samples: [
+          { group: "首旅如家" as const, groupIndex: 1, sampleIndex: 1, query, status: "completed" as const, selectedCandidate: null, quotes: [], message: "ok" },
+          { group: "首旅如家" as const, groupIndex: 1, sampleIndex: 2, query, status: "failed" as const, selectedCandidate: null, quotes: [], message: "failed", failureReason: "阿里失败" }
+        ]
+      },
+      {
+        group: "华住" as const,
+        query: { ...query, keyword: "全季" },
+        targetCount: 2,
+        maxAttempts: 6,
+        budgetMs: 18 * 60 * 1000,
+        attemptedCount: 2,
+        completedCount: 2,
+        partialCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+        unattemptedCount: 0,
+        timeoutBudget: false,
+        samples: [
+          { group: "华住" as const, groupIndex: 2, sampleIndex: 1, query: { ...query, keyword: "全季" }, status: "completed" as const, selectedCandidate: null, quotes: [], message: "ok" },
+          { group: "华住" as const, groupIndex: 2, sampleIndex: 2, query: { ...query, keyword: "全季" }, status: "completed" as const, selectedCandidate: null, quotes: [], message: "ok" }
+        ]
+      }
+    ];
+    expect(groups.every((group) => group.samples.length === 2)).toBe(true);
+    expect(summarizeHotelSmallBatchGroups(groups)).toEqual({
+      completedCount: 3,
+      partialCount: 0,
+      failedCount: 1,
+      skippedCount: 0,
+      unattemptedCount: 0,
+      targetTotal: 4,
+      timeoutBudget: false,
+      status: "partial"
+    });
+  });
+
+  it("does not stop hotel small-batch groups on per-group budgets during test runs", () => {
+    expect(resolveHotelSmallBatchBudgetStop({
+      maxAttempts: null,
+      budgetMs: null,
+      startedAtMs: 1000,
+      nowMs: 1000
+    })).toBeNull();
+    expect(resolveHotelSmallBatchBudgetStop({
+      maxAttempts: null,
+      budgetMs: null,
+      startedAtMs: 1000,
+      nowMs: 1000 + 18 * 60 * 1000
+    })).toBeNull();
+  });
+
+  it("can still stop hotel small-batch groups when a per-group budget is explicitly configured", () => {
+    expect(resolveHotelSmallBatchBudgetStop({
+      maxAttempts: 0,
+      budgetMs: 18 * 60 * 1000,
+      startedAtMs: 1000,
+      nowMs: 1000
+    })).toBe("达到本集团候选尝试上限");
+    expect(resolveHotelSmallBatchBudgetStop({
+      maxAttempts: 1,
+      budgetMs: 18 * 60 * 1000,
+      startedAtMs: 1000,
+      nowMs: 1000 + 18 * 60 * 1000
+    })).toBe("达到本集团时间预算");
+    expect(resolveHotelSmallBatchBudgetStop({
+      maxAttempts: 1,
+      budgetMs: 18 * 60 * 1000,
+      startedAtMs: 1000,
+      nowMs: 2000
+    })).toBeNull();
+  });
+
+  it("returns partial summary with skipped targets when the overall hotel small-batch budget is exhausted", () => {
+    const query = { city: "广州", keyword: "亚朵", checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 };
+    const groups = [
+      {
+        group: "亚朵" as const,
+        query,
+        targetCount: 2,
+        maxAttempts: 6,
+        budgetMs: 18 * 60 * 1000,
+        attemptedCount: 0,
+        completedCount: 0,
+        partialCount: 0,
+        failedCount: 0,
+        skippedCount: 2,
+        unattemptedCount: 2,
+        timeoutBudget: true,
+        budgetStopReason: "达到小放量整体时间预算",
+        samples: [
+          { group: "亚朵" as const, groupIndex: 5, sampleIndex: 1, query, status: "skipped" as const, selectedCandidate: null, quotes: [], message: "budget", timeoutBudget: true },
+          { group: "亚朵" as const, groupIndex: 5, sampleIndex: 2, query, status: "skipped" as const, selectedCandidate: null, quotes: [], message: "budget", timeoutBudget: true }
+        ]
+      }
+    ];
+    expect(resolveHotelSmallBatchOverallBudgetStop(1000, 1000 + 90 * 60 * 1000)).toBe("达到小放量整体时间预算");
+    expect(summarizeHotelSmallBatchGroups(groups)).toMatchObject({
+      completedCount: 0,
+      failedCount: 0,
+      skippedCount: 2,
+      unattemptedCount: 2,
+      timeoutBudget: true,
+      status: "partial"
+    });
+  });
+
+  it("does not continue remaining competitors after hotel small-batch fail-fast sees a competitor failure", async () => {
+    const ctrip = vi.fn(async () => ({
+      platform: "携程商旅" as const,
+      status: "available" as const,
+      price: 280,
+      hotelName: "测试酒店",
+      roomType: "大床房",
+      ratePlan: "大床有早餐" as const
+    }));
+    const ali = vi.fn(async () => ({
+      platform: "阿里商旅" as const,
+      status: "failed" as const,
+      price: null,
+      hotelName: "测试酒店",
+      roomType: "",
+      ratePlan: "大床有早餐" as const,
+      error: "阿里未匹配同店"
+    }));
+    const ztrip = vi.fn(async () => ({
+      platform: "在途商旅" as const,
+      status: "available" as const,
+      price: 260,
+      hotelName: "测试酒店",
+      roomType: "大床房",
+      ratePlan: "大床有早餐" as const
+    }));
+
+    const result = await collectHotelMainRateCompetitorQuotes([
+      {
+        platform: "携程商旅",
+        beforeMessage: "开始查携程",
+        collect: ctrip,
+        pendingQuote: (reason) => ({ platform: "携程商旅", status: "pending", price: null, hotelName: "测试酒店", roomType: "", ratePlan: "大床有早餐", error: reason })
+      },
+      {
+        platform: "阿里商旅",
+        beforeMessage: "开始查阿里",
+        collect: ali,
+        pendingQuote: (reason) => ({ platform: "阿里商旅", status: "pending", price: null, hotelName: "测试酒店", roomType: "", ratePlan: "大床有早餐", error: reason })
+      },
+      {
+        platform: "在途商旅",
+        beforeMessage: "开始查在途",
+        collect: ztrip,
+        pendingQuote: (reason) => ({ platform: "在途商旅", status: "pending", price: null, hotelName: "测试酒店", roomType: "", ratePlan: "大床有早餐", error: reason })
+      }
+    ], { stopOnFirstCompetitorFailure: true });
+
+    expect(ctrip).toHaveBeenCalledTimes(1);
+    expect(ali).toHaveBeenCalledTimes(1);
+    expect(ztrip).not.toHaveBeenCalled();
+    expect(result.stoppedByFailure?.platform).toBe("阿里商旅");
+    expect(result.quotes.map((quote) => quote.platform)).toEqual(["携程商旅", "阿里商旅", "在途商旅"]);
+    expect(result.quotes[2]).toMatchObject({
+      platform: "在途商旅",
+      status: "pending"
+    });
+  });
+
   it("selects the matching ali card even when it is not the first card", () => {
     const candidate = {
       hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
@@ -1250,6 +1733,167 @@ CNY 260`);
     expect(selection.matchedCard?.index).toBe(1);
     expect(selection.matchedCard?.match.reason).toBe("阿里列表候选：品牌+核心店名，待详情门牌确认");
     expect(selection.matchedCard?.match.sameHotelConfirmed).toBe(false);
+  });
+
+  it("keeps ali brand and core-name list cards as detail confirmation candidates", () => {
+    const candidate = {
+      hotelName: "如家商旅酒店(广州白云国际机场T2航站楼店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "花都区空港大道10号之六3栋二至十层",
+      price: 216,
+      rawText: ""
+    };
+    const selection = selectAliHotelListMatchFromCards(candidate, "广州", [
+      { index: 0, text: "如家商旅(金标)-广州白云国际机场T2航站楼店 舒适型 4.7 白云机场附近 ￥216起", screenIndex: 0 }
+    ]);
+
+    expect(selection.matched).toBe(true);
+    expect(selection.detailCandidates).toHaveLength(1);
+    expect(selection.detailCandidates[0]).toMatchObject({
+      cardIndex: 0,
+      listMatchReason: "阿里列表候选：品牌+核心店名，待详情门牌确认"
+    });
+  });
+
+  it("keeps ali airport landmark list cards as detail confirmation candidates even without door number", () => {
+    const candidate = {
+      hotelName: "如家商旅酒店(广州白云国际机场T2航站楼店)",
+      level: "舒适型",
+      score: "4.8",
+      area: "",
+      address: "花都区空港大道10号之六3栋二至十层",
+      price: 216,
+      rawText: ""
+    };
+    const selection = selectAliHotelListMatchFromCards(candidate, "广州", [
+      { index: 0, text: "如家商旅-广州白云国际机场店舒适4.8很好432条评价近空港电商国际产业园·东北烧烤可开专票免费接送服务￥206起", screenIndex: 0 }
+    ]);
+
+    expect(selection.matched).toBe(true);
+    expect(selection.matchedCard?.index).toBe(0);
+    expect(selection.detailCandidates[0]).toMatchObject({
+      cardIndex: 0,
+      listMatchReason: "阿里列表候选：品牌+核心店名，待详情门牌确认"
+    });
+  });
+
+  it("keeps ali cards with the same brand and strong airport landmark as detail candidates", () => {
+    const candidate = {
+      hotelName: "维也纳酒店(广州白云机场花都大道店)",
+      level: "舒适型",
+      score: "4.6",
+      area: "",
+      address: "花都区花东镇花都大道东406号",
+      price: 226,
+      rawText: ""
+    };
+    const selection = selectAliHotelListMatchFromCards(candidate, "广州", [
+      { index: 0, text: "维也纳酒店(广州白云机场物流汽配城店)舒适4.8很好389条评价近花东商业城·世外桃源景区可开专票免费接送机￥230起", screenIndex: 0 }
+    ]);
+
+    expect(selection.matched).toBe(true);
+    expect(selection.matchedCard?.index).toBe(0);
+    expect(selection.matchedCard?.match).toMatchObject({
+      brandMatched: true,
+      coreNameMatched: true,
+      strongLandmarkMatched: true,
+      doorNumber: null,
+      reason: "阿里列表候选：品牌+核心店名，待详情门牌确认"
+    });
+    expect(selection.detailCandidates).toHaveLength(1);
+  });
+
+  it("keeps Yishang Yuexiu Park list cards as detail confirmation candidates without door number", () => {
+    const candidate = {
+      hotelName: "宜尚酒店(广州越秀公园地铁站北京路步行街店)",
+      level: "高档型",
+      score: "4.4",
+      area: "",
+      address: "越秀区盘福路79号",
+      price: 336,
+      rawText: ""
+    };
+    const selection = selectAliHotelListMatchFromCards(candidate, "广州", [
+      { index: 0, text: "宜尚酒店(广州越秀公园地铁站店)高档4.4好356条评价近北京路步行街·华茂中心大厦可开专票￥336起", screenIndex: 0 }
+    ]);
+
+    expect(selection.matched).toBe(true);
+    expect(selection.matchedCard?.index).toBe(0);
+    expect(selection.matchedCard?.match).toMatchObject({
+      brandMatched: true,
+      coreNameMatched: true,
+      strongLandmarkMatched: true,
+      doorNumber: null,
+      reason: "阿里列表候选：品牌+核心店名，待详情门牌确认"
+    });
+    expect(selection.detailCandidates).toHaveLength(1);
+  });
+
+  it("does not click ali airport landmark cards when the hotel brand does not match", () => {
+    const candidate = {
+      hotelName: "维也纳酒店(广州白云机场花都大道店)",
+      level: "舒适型",
+      score: "4.6",
+      area: "",
+      address: "花都区花东镇花都大道东406号",
+      price: 226,
+      rawText: ""
+    };
+    const selection = selectAliHotelListMatchFromCards(candidate, "广州", [
+      { index: 0, text: "尚客优连锁（广州白云机场花东店）经济4.4好112条评价距花东镇步行310米 4分钟可开专票免费接送机￥143起", screenIndex: 0 }
+    ]);
+
+    expect(selection.matched).toBe(false);
+    expect(selection.detailCandidates).toHaveLength(0);
+  });
+
+  it("does not click ali cards that only match the brand without target landmarks", () => {
+    const candidate = {
+      hotelName: "维也纳酒店(广州白云机场花都大道店)",
+      level: "舒适型",
+      score: "4.6",
+      area: "",
+      address: "花都区花东镇花都大道东406号",
+      price: 226,
+      rawText: ""
+    };
+    const selection = selectAliHotelListMatchFromCards(candidate, "广州", [
+      { index: 0, text: "维也纳酒店(广州北京路步行街店)舒适4.5好1000+评价近北京路步行街·新大新百货可开专票￥294起", screenIndex: 0 }
+    ]);
+
+    expect(selection.matched).toBe(false);
+    expect(selection.detailCandidates).toHaveLength(0);
+  });
+
+  it("keeps ali failure evidence fields on failed main-rate quotes", () => {
+    const candidate = {
+      hotelName: "维也纳酒店(广州惠福西上下九店)",
+      level: "舒适型",
+      score: "4.5",
+      area: "",
+      address: "越秀区惠福西路38号",
+      price: 214,
+      rawText: ""
+    };
+
+    expect(buildFailedAliHotelMainRateQuote({
+      candidate,
+      ratePlan: "大床有早餐",
+      error: "阿里详情门牌不匹配",
+      durationMs: 105516,
+      finalUrl: "https://travel.alibtrip.com/hotel-demeter#/list",
+      screenshotPath: "/tmp/ali-failed.png",
+      diagnosisPath: "/tmp/alibtrip-list-diagnosis.json"
+    })).toMatchObject({
+      platform: "阿里商旅",
+      status: "failed",
+      finalUrl: "https://travel.alibtrip.com/hotel-demeter#/list",
+      screenshotPath: "/tmp/ali-failed.png",
+      diagnosisPath: "/tmp/alibtrip-list-diagnosis.json",
+      error: "阿里详情门牌不匹配"
+    });
   });
 
   it("ranks ali same-keyword detail candidates and caps them at the top three", () => {
