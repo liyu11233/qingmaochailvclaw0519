@@ -3,10 +3,12 @@ import {
   classifyProbeOutcome,
   classifyZtripProbeOutcome,
   classifyZtripProductEntries,
+  classifyZtripHotelSearchReadiness,
   collectHotelMainRateCompetitorQuotes,
   buildCtripHotelSearchKeywords,
   buildCtripHotelCoreKeywords,
   buildStrictCtripHotelSearchUrl,
+  buildHotelSearchKeywords,
   buildAliHotelSearchKeywords,
   buildAliHotelSearchKeywordPlan,
   buildAliHotelPathRecord,
@@ -21,6 +23,7 @@ import {
   resolveAliHotelSameHotelAfterFailure,
   formatAliHotelListMatchFailure,
   matchAliHotelListCandidateForDetail,
+  matchAliHotelSearchSuggestionText,
   matchAliHotelListCandidateText,
   matchHotelByBrandCoreCityDoorNumber,
   selectAliHotelListMatchFromCards,
@@ -293,7 +296,7 @@ CNY398
     });
   });
 
-  it("skips ztrip random bed assignment rates even when the room title names a bed type", () => {
+  it("accepts ztrip random bed assignment rates when the room title names a bed type", () => {
     const rates = parseZtripHotelRatesText(`如家商旅酒店
 亲子大床房
 2份早餐 | 到店随机分配床型
@@ -304,6 +307,12 @@ CNY 240
 CNY 306`);
 
     expect(rates[0]).toMatchObject({
+      roomType: "亲子大床房",
+      breakfast: "有早餐",
+      bedType: "大床",
+      price: 240
+    });
+    expect(rates[1]).toMatchObject({
       roomType: "商务大床房A",
       breakfast: "有早餐",
       bedType: "大床",
@@ -335,7 +344,7 @@ CNY 336`);
     });
   });
 
-  it("does not parse ztrip rates below the unmatched-products divider", () => {
+  it("keeps ztrip matched products above the unmatched-products divider", () => {
     const rates = parseZtripHotelRatesTextForRatePlan(`如家商旅酒店
 5月23日
 1晚
@@ -355,7 +364,31 @@ CNY 271
 2份早餐
 CNY 280`, "双床有早餐");
 
-    expect(rates).toHaveLength(0);
+    expect(rates).toHaveLength(1);
+    expect(rates[0]).toMatchObject({
+      roomType: "亲子双床房",
+      breakfast: "有早餐",
+      bedType: "双床",
+      price: 477
+    });
+  });
+
+  it("accepts ztrip random-bed text when the main room type is explicit", () => {
+    const rates = parseZtripHotelRatesTextForRatePlan(`柏曼酒店
+5月25日
+1晚
+1间1人
+标准大床房
+到店随机分配床型 | 2份早餐
+CNY 262`, "大床有早餐");
+
+    expect(rates).toHaveLength(1);
+    expect(rates[0]).toMatchObject({
+      roomType: "标准大床房",
+      breakfast: "有早餐",
+      bedType: "大床",
+      price: 262
+    });
   });
 
   it("does not force ztrip big-bed rooms into twin-bed rate plans", () => {
@@ -917,6 +950,44 @@ CNY 260`);
     expect(normalizeHotelSearchKeywords("如家商旅酒店(广州天河东圃科学城珠吉店)")).toContain("如家商旅");
   });
 
+  it("builds shared hotel search keywords with ali-style core location and address fallbacks", () => {
+    const query = { city: "深圳", keyword: "维也纳", checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 };
+    const candidate = {
+      hotelName: "维也纳酒店(深圳福田福华路店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "福田区福华路73号",
+      price: 341,
+      rawText: ""
+    };
+    const keywords = buildHotelSearchKeywords(query, candidate);
+
+    expect(keywords.slice(0, 3)).toEqual([
+      "维也纳酒店(深圳福田福华路店)",
+      "维也纳酒店福田福华路",
+      "维也纳酒店福田福华"
+    ]);
+    expect(keywords).toEqual(expect.arrayContaining(["维也纳福华路", "维也纳福华路73号", "福华路", "福田区福华路73号"]));
+    expect(keywords.indexOf("维也纳酒店")).toBeGreaterThan(keywords.indexOf("福华路"));
+  });
+
+  it("keeps ztrip hotel search waiting while the result list is still loading", () => {
+    const candidate = {
+      hotelName: "维也纳酒店(深圳福田福华路店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "福田区福华路73号",
+      price: 341,
+      rawText: ""
+    };
+
+    expect(classifyZtripHotelSearchReadiness("深圳", candidate, "加载中，请稍等... ¥146起 ¥154起")).toBe("loading");
+    expect(classifyZtripHotelSearchReadiness("深圳", candidate, "维也纳酒店(深圳福田福华路店) 福华路73号 查看详情 CNY319")).toBe("target-candidate");
+    expect(classifyZtripHotelSearchReadiness("深圳", candidate, "如家酒店深圳南山店 查看详情 CNY319")).toBe("finished-without-target");
+  });
+
   it("puts ali hotel full-name and address keywords before loose fallback keywords", () => {
     const query = { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-23", checkOutDate: "2026-05-24", nights: 1 };
     const keywords = buildAliHotelSearchKeywords(query, {
@@ -929,13 +1000,38 @@ CNY 260`);
       rawText: ""
     });
 
-    expect(keywords.slice(0, 4)).toEqual([
+    expect(keywords.slice(0, 2)).toEqual([
       "如家商旅酒店(广州永庆坊荔湾湖公园店)",
-      "黄沙大道144号",
-      "如家黄沙大道",
-      "如家黄沙大道144号"
+      "如家商旅酒店永庆坊荔湾湖公园"
     ]);
+    expect(keywords.indexOf("如家永庆坊荔湾湖公园")).toBeGreaterThan(keywords.indexOf("如家商旅酒店永庆坊荔湾湖公园"));
+    expect(keywords.indexOf("黄沙大道144号")).toBeGreaterThan(keywords.indexOf("如家永庆坊荔湾湖公园"));
     expect(keywords.indexOf("如家黄沙大道144号")).toBeLessThan(keywords.indexOf("如家商旅"));
+  });
+
+  it("builds ali human-style core-location keywords before brand fallback", () => {
+    const query = { city: "杭州", keyword: "柏曼", checkInDate: "2026-05-25", checkOutDate: "2026-05-26", nights: 1 };
+    const keywords = buildAliHotelSearchKeywords(query, {
+      hotelName: "柏曼酒店(杭州千岛湖景区银泰店)",
+      level: "舒适型",
+      score: "4.6",
+      area: "",
+      address: "千岛湖镇新安大街128号",
+      price: 220,
+      rawText: ""
+    });
+
+    expect(keywords.slice(0, 4)).toEqual([
+      "柏曼酒店(杭州千岛湖景区银泰店)",
+      "柏曼酒店千岛湖景区银泰",
+      "柏曼酒店千岛湖银泰",
+      "柏曼酒店千岛湖"
+    ]);
+    expect(keywords.indexOf("柏曼千岛湖景区银泰")).toBeGreaterThan(keywords.indexOf("柏曼酒店千岛湖"));
+    expect(keywords.indexOf("柏曼千岛湖银泰")).toBeGreaterThan(keywords.indexOf("柏曼千岛湖景区银泰"));
+    expect(keywords).toContain("千岛湖镇新安大街128号");
+    expect(keywords).not.toContain("柏曼酒店");
+    expect(keywords).not.toContain("柏曼");
   });
 
   it("does not confirm ali hotel list candidates without same-card door number", () => {
@@ -969,6 +1065,8 @@ CNY 260`);
   it("extracts comparable hotel door numbers from road address variants", () => {
     expect(extractHotelDoorNumber("广州市白云区广州大道路1420号")).toBe("1420号");
     expect(extractHotelDoorNumber("白云区广州大道北1420号")).toBe("1420号");
+    expect(extractHotelDoorNumber("人民南路175-179号1F、2F-8F | 沙面岛/上下九步行街商圈")).toBe("175-179号");
+    expect(extractHotelDoorNumber("6号大街6号，1层局部；3-9整层 | 下沙开发区 距地铁1号线文泽路站")).toBe("6号");
   });
 
   it("matches ali list card by brand core city and door number in the same card", () => {
@@ -1116,6 +1214,59 @@ CNY 260`);
     });
   });
 
+  it("keeps ali cards when weak location words differ between qingmao and ali", () => {
+    const candidate = {
+      hotelName: "柏曼酒店(杭州千岛湖景区银泰店)",
+      level: "舒适型",
+      score: "4.6",
+      area: "",
+      address: "千岛湖镇新安大街128号",
+      price: 220,
+      rawText: ""
+    };
+    const cardText = "柏曼酒店杭州千岛湖银泰店高档4.6很好247条评价近千岛湖银泰城·千岛湖广场可开专票￥219起";
+
+    expect(matchAliHotelListCandidateForDetail(candidate, cardText, "杭州")).toMatchObject({
+      matched: true,
+      reason: "阿里列表候选：品牌+核心店名，待详情门牌确认",
+      brandMatched: true,
+      coreNameMatched: true,
+      cityMatched: true,
+      doorNumber: null
+    });
+    expect(selectAliHotelListMatchFromCards(candidate, "杭州", [{ index: 0, text: cardText, screenIndex: 0 }])).toMatchObject({
+      matched: true,
+      detailCandidates: [
+        expect.objectContaining({
+          cardIndex: 0,
+          listMatchReason: "阿里列表候选：品牌+核心店名，待详情门牌确认"
+        })
+      ]
+    });
+  });
+
+  it("matches ali search suggestion cards by brand core location and city", () => {
+    const candidate = {
+      hotelName: "星程酒店(杭州滨江伟业路地铁站店)",
+      level: "舒适型",
+      score: "4.8",
+      area: "",
+      address: "滨江区伟业路298号",
+      price: 260,
+      rawText: ""
+    };
+
+    expect(matchAliHotelSearchSuggestionText(candidate, "星程酒店滨江 酒店", "杭州")).toMatchObject({
+      matched: true,
+      brandMatched: true,
+      coreNameMatched: true,
+      cityMatched: true
+    });
+    expect(matchAliHotelSearchSuggestionText(candidate, "星程酒店上海陆家嘴店 酒店", "杭州")).toMatchObject({
+      matched: false
+    });
+  });
+
   it("confirms ali same hotel only after detail page door number matches", () => {
     const baiyunshan = {
       hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
@@ -1157,6 +1308,46 @@ CNY 260`);
     expect(confirmAliHotelDetailDoorPlate("广州", yongqingfang, "酒店详情 广州市荔湾区黄沙大道144号 | 沙面岛/上下九步行街商圈查看地图 ICP备案：浙ICP备2021030200号-2")).toMatchObject({
       sameHotel: true,
       detailDoorNumber: "144号"
+    });
+  });
+
+  it("confirms ali detail address ranges and ignores subway-line numbers", () => {
+    const nihao = {
+      hotelName: "你好广州上下九步行街酒店",
+      level: "经济型",
+      score: "4.8",
+      area: "",
+      address: "人民南路175号",
+      price: 219,
+      rawText: ""
+    };
+    const orange = {
+      hotelName: "桔子杭州下沙酒店",
+      level: "舒适型",
+      score: "4.8",
+      area: "",
+      address: "6号大街6号",
+      price: 321,
+      rawText: ""
+    };
+
+    expect(confirmAliHotelDetailDoorPlate(
+      "广州",
+      nihao,
+      "酒店详情 你好广州上下九步行街酒店 人民南路175-179号1F、2F-8F | 沙面岛/上下九步行街商圈 查看地图 广州市天河区中山大道中1025号君易大厦5-6层"
+    )).toMatchObject({
+      sameHotel: true,
+      detailAddress: "人民南路175-179号",
+      detailDoorNumber: "175-179号"
+    });
+    expect(confirmAliHotelDetailDoorPlate(
+      "杭州",
+      orange,
+      "酒店详情 桔子杭州下沙酒店 6号大街6号，1层局部；3-9整层 | 下沙开发区/高教园区 距地铁1号线文泽路站 查看地图"
+    )).toMatchObject({
+      sameHotel: true,
+      detailAddress: "6号大街6号",
+      detailDoorNumber: "6号"
     });
   });
 
@@ -1784,6 +1975,10 @@ CNY 260`);
     expect(isHotelRateLineExcludedByBedAssignment("安心睡安睡大床房 到店随机分配床型 2份早餐 CNY 189")).toEqual({
       excluded: true,
       reason: "到店随机分配床型"
+    });
+    expect(isHotelRateLineExcludedByBedAssignment("安心睡安睡大床房 到店随机分配床型 2份早餐 CNY 189", { mainRoomTypeText: "安心睡安睡大床房" })).toEqual({
+      excluded: false,
+      reason: ""
     });
     expect(isHotelRateLineExcludedByBedAssignment("高级大床房 房型待定 1份早餐 ￥320")).toEqual({
       excluded: true,
@@ -2472,16 +2667,17 @@ CNY 260`);
       price: 299,
       rawText: ""
     };
-    const keywords = buildCtripHotelSearchKeywords(candidate);
+    const keywords = buildHotelSearchKeywords(query, candidate);
     const url = new URL(buildStrictCtripHotelSearchUrl(query, keywords[0]));
 
     expect(keywords.slice(0, 4)).toEqual([
       "如家商旅酒店(广州珠江新城杨箕东地铁站店)",
-      "珠江新城杨箕东",
-      "珠江新城",
-      "杨箕东"
+      "如家商旅酒店珠江新城杨箕东地铁站",
+      "如家商旅酒店珠江新城杨箕东",
+      "如家酒店珠江新城杨箕东地铁站"
     ]);
     expect(keywords.indexOf("广州大道中301号")).toBeGreaterThan(3);
+    expect(buildCtripHotelSearchKeywords(candidate)).toEqual(expect.arrayContaining(["广州大道中301号", "广州大道中"]));
     expect(url.pathname).toBe("/corp-hotel-booking/hotelList");
     expect(url.searchParams.get("geoCategoryName")).toBe("广州");
     expect(url.searchParams.get("checkIn")).toBe("2026-05-24");
@@ -2525,7 +2721,7 @@ CNY 260`);
     expect(matchCtripHotelSuggestionText(candidate, "关键词（选填） 如家商旅酒店(广州永庆坊荔湾湖公园店)")).toBe(false);
   });
 
-  it("uses the full hotel name as the ctrip single-diagnosis suggestion keyword", () => {
+  it("uses ali-style hotel keywords for ctrip single-diagnosis suggestions", () => {
     const candidate = {
       hotelName: "如家商旅酒店(广州永庆坊荔湾湖公园店)",
       level: "舒适型",
@@ -2535,9 +2731,15 @@ CNY 260`);
       price: 264,
       rawText: ""
     };
+    const query = { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-24", checkOutDate: "2026-05-25", nights: 1 };
 
-    expect(buildCtripHotelSuggestionKeywords(candidate)).toEqual(["如家商旅酒店(广州永庆坊荔湾湖公园店)"]);
-    expect(buildCtripHotelSuggestionKeywords(candidate)).not.toContain("黄沙大道144号");
+    expect(buildCtripHotelSuggestionKeywords(candidate, query)).toEqual(expect.arrayContaining([
+      "如家商旅酒店(广州永庆坊荔湾湖公园店)",
+      "如家商旅酒店永庆坊荔湾湖公园",
+      "如家黄沙大道",
+      "黄沙大道144号"
+    ]));
+    expect(buildCtripHotelSuggestionKeywords(candidate, query).indexOf("黄沙大道144号")).toBeGreaterThan(0);
   });
 
   it("does not submit ctrip single-diagnosis search until the hotel suggestion is selected", () => {

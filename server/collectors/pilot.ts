@@ -1260,7 +1260,11 @@ function emptyHotelScaleValidationTimingSummary(): HotelScaleValidationTimingSum
   };
 }
 
-export function isHotelRateLineExcludedByBedAssignment(rawText: string) {
+function hasExplicitMainRoomBedType(text: string) {
+  return /大床|双床/.test(text);
+}
+
+export function isHotelRateLineExcludedByBedAssignment(rawText: string, options: { mainRoomTypeText?: string } = {}) {
   const checks = [
     "到店随机分配床型",
     "随机床型",
@@ -1268,6 +1272,12 @@ export function isHotelRateLineExcludedByBedAssignment(rawText: string) {
     "到店安排"
   ];
   const reason = checks.find((item) => rawText.includes(item)) ?? "";
+  if (reason && options.mainRoomTypeText && hasExplicitMainRoomBedType(options.mainRoomTypeText)) {
+    return {
+      excluded: false,
+      reason: ""
+    };
+  }
   return {
     excluded: Boolean(reason),
     reason
@@ -2097,6 +2107,112 @@ async function openFirstZtripHotelDetail(page: BrowserPage) {
   throw new Error("在途商旅酒店详情房型加载超时");
 }
 
+const hotelMatchCityNames = ["北京", "上海", "深圳", "广州", "杭州", "成都", "重庆", "天津", "南京", "武汉", "长沙", "厦门", "福州", "青岛", "西安", "苏州", "佛山", "东莞", "珠海"];
+
+function stripLeadingHotelCity(value: string, queryCity = "") {
+  let normalized = value.trim();
+  const cityCandidates = Array.from(new Set([queryCity.replace(/市$/, ""), ...hotelMatchCityNames].filter(Boolean)))
+    .sort((left, right) => right.length - left.length);
+  for (const city of cityCandidates) {
+    normalized = normalized.replace(new RegExp(`^${city}市?`), "");
+  }
+  return normalized;
+}
+
+function stripAliHotelCoreNoise(value: string, queryCity = "") {
+  return normalizeAddressForMatch(stripLeadingHotelCity(value, queryCity))
+    .replace(/酒店|宾馆|民宿|公寓|客栈|如家|商旅|金标|旗舰|店/g, "")
+    .trim();
+}
+
+function withoutAliWeakLocationQualifiers(value: string) {
+  return value
+    .replace(/风景区|旅游区|度假区|景区|商圈|附近|周边/g, "")
+    .trim();
+}
+
+function isMeaningfulAliCoreKeyword(value: string) {
+  if (value.length < 2) return false;
+  if (/^(酒店|宾馆|民宿|公寓|客栈|景区|商圈|附近|周边|中心|国际|高档|舒适|经济)$/.test(value)) return false;
+  return true;
+}
+
+function addAliHotelCoreKeyword(target: Set<string>, value: string, queryCity = "") {
+  const normalized = stripAliHotelCoreNoise(value, queryCity);
+  if (isMeaningfulAliCoreKeyword(normalized)) target.add(normalized);
+  const withoutWeak = withoutAliWeakLocationQualifiers(normalized);
+  if (isMeaningfulAliCoreKeyword(withoutWeak)) target.add(withoutWeak);
+  const shortCoreLocations = ["千岛湖", "滨江", "下沙", "萧山", "白云山", "永庆坊", "荔湾湖", "上下九", "北京路", "越秀公园", "琶洲", "金融城"];
+  for (const token of shortCoreLocations) {
+    if (normalized.includes(token)) target.add(token);
+  }
+
+  const locationPattern = /([\u4e00-\u9fa5A-Za-z0-9]{2,10})(?:风景区|旅游区|度假区|景区|商圈|地铁站|步行街|公园|广场|中心|机场|火车站|高铁站|大道|路|街)/g;
+  for (const match of normalized.matchAll(locationPattern)) {
+    const fullToken = stripAliHotelCoreNoise(match[0], queryCity);
+    const prefixToken = stripAliHotelCoreNoise(match[1] ?? "", queryCity);
+    if (isMeaningfulAliCoreKeyword(fullToken)) target.add(fullToken);
+    if (isMeaningfulAliCoreKeyword(prefixToken)) target.add(prefixToken);
+    const softenedFullToken = withoutAliWeakLocationQualifiers(fullToken);
+    if (isMeaningfulAliCoreKeyword(softenedFullToken)) target.add(softenedFullToken);
+  }
+}
+
+function aliHotelBracketText(hotelName: string) {
+  return hotelName.match(/[（(]([^）)]*)[）)]/)?.[1] ?? "";
+}
+
+function aliHotelNamePrefixBeforeBracket(hotelName: string) {
+  return hotelName.split(/[（(]/)[0]?.trim() || hotelName.trim();
+}
+
+function buildAliHotelCoreLocationKeywords(
+  candidate: QingmaoHotelCandidate,
+  queryCity = "",
+  options: { includeAddress?: boolean; includeNameWithoutBracket?: boolean } = {}
+) {
+  const includeAddress = options.includeAddress ?? true;
+  const includeNameWithoutBracket = options.includeNameWithoutBracket ?? true;
+  const target = new Set<string>();
+  const bracketText = aliHotelBracketText(candidate.hotelName);
+  if (bracketText) {
+    addAliHotelCoreKeyword(target, bracketText, queryCity);
+  }
+
+  const roadKeyword = extractHotelRoadKeyword(candidate.address);
+  if (includeAddress && roadKeyword) {
+    addAliHotelCoreKeyword(target, roadKeyword, queryCity);
+  }
+
+  if (!bracketText && includeNameWithoutBracket) {
+    const brandName = detectAliHotelBrandKeyword(candidate.hotelName);
+    const withoutBrand = brandName
+      ? candidate.hotelName.replace(new RegExp(`${brandName}(?:酒店)?`), "")
+      : candidate.hotelName;
+    addAliHotelCoreKeyword(target, withoutBrand, queryCity);
+  }
+
+  return Array.from(target);
+}
+
+function buildAliHotelNameWithCoreKeywords(candidate: QingmaoHotelCandidate, queryCity = "") {
+  const prefix = aliHotelNamePrefixBeforeBracket(candidate.hotelName);
+  const coreKeywords = buildAliHotelCoreLocationKeywords(candidate, queryCity, {
+    includeAddress: false,
+    includeNameWithoutBracket: false
+  });
+  return coreKeywords
+    .map((keyword) => `${prefix}${keyword}`)
+    .filter((keyword) => keyword !== candidate.hotelName);
+}
+
+function isAliPureBrandKeyword(keyword: string, brandName: string) {
+  if (!brandName) return false;
+  const normalizedKeyword = normalizeAddressForMatch(keyword).replace(/酒店|店/g, "");
+  const normalizedBrand = normalizeAddressForMatch(brandName).replace(/酒店|店/g, "");
+  return normalizedKeyword === normalizedBrand;
+}
+
 export function normalizeHotelSearchKeywords(hotelName: string) {
   const withoutBracket = hotelName.replace(/[（(].*?[）)]/g, "").trim();
   const withoutHotelSuffix = withoutBracket.replace(/酒店$/, "").trim();
@@ -2112,6 +2228,68 @@ export function normalizeHotelSearchKeywords(hotelName: string) {
   const brandFallbackKeywords = /如家|商旅/.test(hotelName) ? ["如家商旅"] : [];
 
   return Array.from(new Set([hotelName, withoutBracket, withoutHotelSuffix, ...tailFragments, metroKeyword, ...brandFallbackKeywords].filter(Boolean)));
+}
+
+function hotelBrandFallbackKeywords(candidate: QingmaoHotelCandidate) {
+  const brandName = /如家/.test(candidate.hotelName) ? "如家" : detectAliHotelBrandKeyword(candidate.hotelName);
+  if (!brandName) return [];
+  return brandName === "亚朵" ? ["亚朵酒店", "亚朵"] : [`${brandName}酒店`, brandName];
+}
+
+function buildHotelCoreSearchKeywords(candidate: QingmaoHotelCandidate, queryCity = "") {
+  const target = new Set<string>();
+  const add = (value: string | null | undefined) => {
+    const normalized = value?.trim();
+    if (normalized && normalized.length >= 2) target.add(normalized);
+  };
+
+  for (const keyword of buildCtripHotelCoreKeywords(candidate.hotelName)) add(keyword);
+  for (const keyword of buildAliHotelCoreLocationKeywords(candidate, queryCity)) add(keyword);
+  add(extractHotelRoadKeyword(candidate.address));
+  add(extractHotelRoadDoorKeyword(candidate.address));
+  add(extractHotelDoorPlate(candidate.address));
+  return Array.from(target);
+}
+
+export function buildHotelSearchKeywords(query: Pick<QingmaoHotelCandidateQuery, "city">, candidate: QingmaoHotelCandidate) {
+  const brandName = /如家/.test(candidate.hotelName) ? "如家" : detectAliHotelBrandKeyword(candidate.hotelName);
+  const brandHotelName = brandName ? `${brandName}酒店` : "";
+  const doorPlate = extractHotelRoadDoorKeyword(candidate.address);
+  const doorNumber = extractHotelDoorNumber(candidate.address);
+  const roadKeyword = extractHotelRoadKeyword(candidate.address);
+  const coreLocationKeywords = buildAliHotelCoreLocationKeywords(candidate, query.city, {
+    includeAddress: false,
+    includeNameWithoutBracket: false
+  });
+  const nameWithCoreKeywords = buildAliHotelNameWithCoreKeywords(candidate, query.city);
+  const brandCoreKeywords = brandName
+    ? coreLocationKeywords.flatMap((keyword) => Array.from(new Set([
+      brandHotelName ? `${brandHotelName}${keyword}` : "",
+      `${brandName}${keyword}`
+    ].filter(Boolean))))
+    : [];
+  const normalizedNameKeywords = normalizeHotelSearchKeywords(candidate.hotelName);
+  const brandRoadKeyword = brandName && roadKeyword ? `${brandName}${roadKeyword}` : "";
+  const brandDoorPlateKeyword = brandName && doorPlate ? `${brandName}${doorPlate}` : "";
+  const brandDoorNumberKeyword = brandName && doorNumber ? `${brandName}${doorNumber}` : "";
+
+  return Array.from(new Set([
+    candidate.hotelName,
+    ...nameWithCoreKeywords,
+    ...brandCoreKeywords,
+    doorPlate,
+    brandRoadKeyword,
+    brandDoorPlateKeyword,
+    brandDoorNumberKeyword,
+    roadKeyword,
+    candidate.address,
+    ...normalizedNameKeywords,
+    ...hotelBrandFallbackKeywords(candidate)
+  ].filter((keyword): keyword is string => {
+    const value = keyword?.trim();
+    if (!value) return false;
+    return !brandName || !isAliPureBrandKeyword(value, brandName) || hotelBrandFallbackKeywords(candidate).includes(value);
+  })));
 }
 
 function extractHotelRoadKeyword(address: string) {
@@ -2145,18 +2323,7 @@ export function buildCtripHotelCoreKeywords(hotelName: string) {
 }
 
 export function buildCtripHotelSearchKeywords(candidate: QingmaoHotelCandidate) {
-  const doorPlate = extractHotelDoorPlate(candidate.address);
-  const roadKeyword = extractHotelRoadKeyword(candidate.address);
-  const coreKeywords = buildCtripHotelCoreKeywords(candidate.hotelName);
-  const brandFallbackKeywords = /如家|商旅/.test(candidate.hotelName) ? ["如家商旅"] : [];
-  return Array.from(new Set([
-    candidate.hotelName,
-    ...coreKeywords,
-    ...brandFallbackKeywords,
-    doorPlate,
-    roadKeyword,
-    candidate.address
-  ].filter((keyword): keyword is string => Boolean(keyword && keyword.trim()))));
+  return buildHotelSearchKeywords({ city: "" }, candidate);
 }
 
 function detectAliHotelBrandKeyword(value: string) {
@@ -2223,7 +2390,7 @@ function addAliHotelKnownLocationSignals(target: Set<string>, normalizedSource: 
 }
 
 function addAliHotelBracketLocationSignals(target: Set<string>, hotelName: string) {
-  const bracketText = hotelName.match(/[（(]([^）)]*)[）)]/)?.[1] ?? "";
+  const bracketText = aliHotelBracketText(hotelName);
   const normalizedBracket = normalizeAddressForMatch(bracketText)
     .replace(/^广州/, "")
     .replace(/酒店|店|如家|商旅|金标/g, "");
@@ -2242,11 +2409,14 @@ function addAliHotelBracketLocationSignals(target: Set<string>, hotelName: strin
   }
 }
 
-function buildAliHotelDetailCoreSignals(candidate: QingmaoHotelCandidate) {
+function buildAliHotelDetailCoreSignals(candidate: QingmaoHotelCandidate, queryCity = "") {
   const sourceText = `${candidate.hotelName} ${candidate.address}`;
   const normalizedSource = normalizeAddressForMatch(sourceText);
   const primaryKeywords = new Set(
-    buildCtripHotelCoreKeywords(candidate.hotelName)
+    [
+      ...buildCtripHotelCoreKeywords(candidate.hotelName),
+      ...buildAliHotelCoreLocationKeywords(candidate, queryCity)
+    ]
       .map((keyword) => normalizeAddressForMatch(keyword))
       .filter((keyword) => keyword.length >= 2 && !/如家商旅|酒店|广州/.test(keyword))
   );
@@ -2278,32 +2448,50 @@ function buildAliHotelDetailCoreSignals(candidate: QingmaoHotelCandidate) {
   };
 }
 
-function buildAliHotelDetailCoreKeywords(candidate: QingmaoHotelCandidate) {
-  return buildAliHotelDetailCoreSignals(candidate).allKeywords;
+function buildAliHotelDetailCoreKeywords(candidate: QingmaoHotelCandidate, queryCity = "") {
+  return buildAliHotelDetailCoreSignals(candidate, queryCity).allKeywords;
 }
 
 function aliHotelKeywordMatched(keyword: string, normalizedCardName: string, normalizedCard: string) {
   return normalizedCardName.includes(keyword) || normalizedCard.includes(keyword);
 }
 
-export function buildAliHotelSearchKeywords(_query: QingmaoHotelCandidateQuery, candidate: QingmaoHotelCandidate) {
+export function buildAliHotelSearchKeywords(query: QingmaoHotelCandidateQuery, candidate: QingmaoHotelCandidate) {
   const doorPlate = extractHotelRoadDoorKeyword(candidate.address);
   const doorNumber = extractHotelDoorNumber(candidate.address);
   const roadKeyword = extractHotelRoadKeyword(candidate.address);
   const normalizedNameKeywords = normalizeHotelSearchKeywords(candidate.hotelName);
   const brandName = /如家/.test(candidate.hotelName) ? "如家" : detectAliHotelBrandKeyword(candidate.hotelName);
+  const brandHotelName = brandName ? `${brandName}酒店` : "";
+  const coreLocationKeywords = buildAliHotelCoreLocationKeywords(candidate, query.city, {
+    includeAddress: false,
+    includeNameWithoutBracket: false
+  });
+  const nameWithCoreKeywords = buildAliHotelNameWithCoreKeywords(candidate, query.city);
+  const brandCoreKeywords = brandName
+    ? coreLocationKeywords.flatMap((keyword) => Array.from(new Set([
+      brandHotelName ? `${brandHotelName}${keyword}` : "",
+      `${brandName}${keyword}`
+    ].filter(Boolean))))
+    : [];
   const brandRoadKeyword = brandName && roadKeyword ? `${brandName}${roadKeyword}` : "";
   const brandDoorPlateKeyword = brandName && doorPlate ? `${brandName}${doorPlate}` : "";
   const brandDoorNumberKeyword = brandName && doorNumber ? `${brandName}${doorNumber}` : "";
   return Array.from(new Set([
     candidate.hotelName,
+    ...nameWithCoreKeywords,
+    ...brandCoreKeywords,
     doorPlate,
     brandRoadKeyword,
     brandDoorPlateKeyword,
     brandDoorNumberKeyword,
     roadKeyword,
     ...normalizedNameKeywords
-  ].filter((keyword): keyword is string => Boolean(keyword && keyword.trim()))));
+  ].filter((keyword): keyword is string => {
+    const value = keyword?.trim();
+    if (!value) return false;
+    return !isAliPureBrandKeyword(value, brandName);
+  })));
 }
 
 export interface AliHotelSearchKeywordPlanItem {
@@ -2382,7 +2570,7 @@ export function matchAliHotelListCandidateForDetail(candidate: QingmaoHotelCandi
   const otherCityMatched = /(北京|上海|深圳|杭州|成都|重庆|天津|南京|武汉|长沙|厦门|福州|青岛|西安|苏州|佛山|东莞|珠海)/.test(normalizedCard.replace(city, ""));
   const cityMatched = !city || normalizedCard.includes(city) || candidate.hotelName.includes(queryCity) || (!parsed.address && !otherCityMatched);
   const exactNameMatched = scoreHotelNameMatch(candidate.hotelName, parsed.hotelName || text) >= Math.min(8, normalizeHotelNameForMatch(candidate.hotelName).length);
-  const coreSignals = buildAliHotelDetailCoreSignals(candidate);
+  const coreSignals = buildAliHotelDetailCoreSignals(candidate, queryCity);
   const roadKeyword = extractHotelRoadKeyword(candidate.address);
   const normalizedRoadKeyword = roadKeyword ? normalizeAddressForMatch(roadKeyword) : "";
   const primaryCoreMatched = coreSignals.primaryKeywords.some((keyword) => aliHotelKeywordMatched(keyword, normalizedCardName, normalizedCard));
@@ -2397,9 +2585,13 @@ export function matchAliHotelListCandidateForDetail(candidate: QingmaoHotelCandi
   const matched = brandMatched && coreNameMatched && cityMatched;
   const reason = matched
     ? "阿里列表候选：品牌+核心店名，待详情门牌确认"
-    : strictMatch.reason === "door-number-not-matched"
-      ? "core-name-not-matched"
-      : strictMatch.reason;
+    : !brandMatched
+      ? "brand-not-matched"
+      : !coreNameMatched
+        ? "core-name-not-matched"
+        : !cityMatched
+          ? "city-not-matched"
+          : strictMatch.reason;
 
   return {
     matched,
@@ -2420,6 +2612,19 @@ export function matchAliHotelListCandidateForDetail(candidate: QingmaoHotelCandi
   };
 }
 
+export function matchAliHotelSearchSuggestionText(candidate: QingmaoHotelCandidate, text: string, queryCity = "") {
+  const match = matchAliHotelListCandidateForDetail(candidate, text, queryCity);
+  return {
+    matched: match.matched,
+    reason: match.reason,
+    hotelName: match.hotelName,
+    brandMatched: match.brandMatched,
+    coreNameMatched: match.coreNameMatched,
+    cityMatched: match.cityMatched,
+    rawText: text
+  };
+}
+
 function isLikelyHotelDoorNumber(value: string | null) {
   if (!value) return false;
   const normalized = value.replace(/[－]/g, "-");
@@ -2428,10 +2633,36 @@ function isLikelyHotelDoorNumber(value: string | null) {
   return numericParts.every((part) => part.length <= 5);
 }
 
-export function extractHotelDoorNumber(text: string) {
+function extractHotelDoorNumbers(text: string) {
   const normalized = normalizeAddressForMatch(text);
-  const matches = Array.from(normalized.matchAll(/(\d+(?:[-－]\d+)?号)/g)).map((match) => match[1]);
-  return [...matches].reverse().find(isLikelyHotelDoorNumber) ?? null;
+  return Array.from(normalized.matchAll(/(\d+(?:[-－]\d+)?号)(?!线)/g))
+    .map((match) => match[1])
+    .filter(isLikelyHotelDoorNumber);
+}
+
+export function extractHotelDoorNumber(text: string) {
+  return [...extractHotelDoorNumbers(text)].reverse()[0] ?? null;
+}
+
+function hotelDoorNumberRange(value: string | null) {
+  if (!value) return null;
+  const match = value.replace(/[－]/g, "-").match(/^(\d+)(?:-(\d+))?号$/);
+  if (!match) return null;
+  const first = Number(match[1]);
+  const second = Number(match[2] ?? match[1]);
+  return {
+    start: Math.min(first, second),
+    end: Math.max(first, second)
+  };
+}
+
+function areHotelDoorNumbersCompatible(expected: string | null, actual: string | null) {
+  if (!expected || !actual) return false;
+  if (expected === actual) return true;
+  const expectedRange = hotelDoorNumberRange(expected);
+  const actualRange = hotelDoorNumberRange(actual);
+  if (!expectedRange || !actualRange) return false;
+  return expectedRange.start <= actualRange.end && actualRange.start <= expectedRange.end;
 }
 
 function extractAliHotelDetailAddressText(queryCity: string, rawText: string, expectedDoorNumber: string | null) {
@@ -2439,15 +2670,21 @@ function extractAliHotelDetailAddressText(queryCity: string, rawText: string, ex
   const city = queryCity.replace(/市$/, "");
   const textCandidates = rawText
     .split(/\n+/)
-    .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter((line) => line.includes(expectedDoorNumber));
+    .map((line) => normalizeAddressForMatch(line).replace(/\s+/g, " ").trim())
+    .filter((line) => extractHotelDoorNumbers(line).some((doorNumber) => areHotelDoorNumbersCompatible(expectedDoorNumber, doorNumber)));
   if (!textCandidates.length) {
-    const compactText = rawText.replace(/\s+/g, " ").trim();
-    if (compactText.includes(expectedDoorNumber)) textCandidates.push(compactText);
+    const compactText = normalizeAddressForMatch(rawText).replace(/\s+/g, " ").trim();
+    if (extractHotelDoorNumbers(compactText).some((doorNumber) => areHotelDoorNumbersCompatible(expectedDoorNumber, doorNumber))) {
+      textCandidates.push(compactText);
+    }
   }
 
   for (const text of textCandidates) {
-    const doorIndex = text.indexOf(expectedDoorNumber);
+    const matchedDoorNumber = [...extractHotelDoorNumbers(text)]
+      .reverse()
+      .find((doorNumber) => areHotelDoorNumbersCompatible(expectedDoorNumber, doorNumber));
+    if (!matchedDoorNumber) continue;
+    const doorIndex = text.lastIndexOf(matchedDoorNumber);
     if (doorIndex < 0) continue;
     const prefix = text.slice(Math.max(0, doorIndex - 80), doorIndex);
     const startMarkers = [
@@ -2470,10 +2707,17 @@ function extractAliHotelDetailAddressText(queryCity: string, rawText: string, ex
       const districtMatch = prefix.match(/[^\s|｜:：，,。]*?(?:区|县|市)[^\s|｜:：，,。]*$/);
       startIndex = districtMatch?.index ?? -1;
     }
-    const addressPrefix = (startIndex >= 0 ? prefix.slice(startIndex) : prefix)
-      .replace(/^.*?(?=[\u4e00-\u9fa5]{1,}(?:省|市|区|县|路|街|大道|道))/, "")
-      .trim();
-    const address = `${addressPrefix}${expectedDoorNumber}`.trim();
+    let addressPrefix = (startIndex >= 0 ? prefix.slice(startIndex) : prefix).trim();
+    const hotelNameEnd = Math.max(addressPrefix.lastIndexOf("酒店"), addressPrefix.lastIndexOf("宾馆"));
+    if (hotelNameEnd >= 0 && hotelNameEnd < addressPrefix.length - 2) {
+      addressPrefix = addressPrefix.slice(hotelNameEnd + 2).trim();
+    }
+    if (!/^\d/.test(addressPrefix)) {
+      addressPrefix = addressPrefix
+        .replace(/^.*?(?=[\u4e00-\u9fa5]{1,}(?:省|市|区|县|路|街|大道|道))/, "")
+        .trim();
+    }
+    const address = `${addressPrefix}${matchedDoorNumber}`.trim();
     if (address && /(?:市|区|县|路|街|大道|道)/.test(address)) return address;
   }
 
@@ -2487,7 +2731,7 @@ function extractAliHotelAnyDetailAddressText(queryCity: string, rawText: string)
     .map((line) => line.replace(/\s+/g, " ").trim())
     .filter(Boolean);
   const matchedChunk = chunks.find((chunk) =>
-    /\d+(?:[-－]\d+)?号/.test(chunk)
+    /\d+(?:[-－]\d+)?号(?!线)/.test(chunk)
     && /(?:市|区|县|路|街|大道|道)/.test(chunk)
     && (!city || chunk.includes(city))
     && !/备案|ICP|许可证|营业执照/.test(chunk)
@@ -2530,7 +2774,7 @@ export function matchHotelByBrandCoreCityDoorNumber(candidate: QingmaoHotelCandi
   const cityMatched = !city || normalizedCard.includes(city);
   const candidateDoorNumber = extractHotelDoorNumber(candidate.address);
   const cardDoorNumber = parsed.doorNumber;
-  const doorNumberMatched = Boolean(candidateDoorNumber && cardDoorNumber && candidateDoorNumber === cardDoorNumber);
+  const doorNumberMatched = areHotelDoorNumbersCompatible(candidateDoorNumber, cardDoorNumber);
   const exactNameMatched = scoreHotelNameMatch(candidate.hotelName, parsed.hotelName || cardText) >= Math.min(8, normalizeHotelNameForMatch(candidate.hotelName).length);
   const coreKeywords = buildCtripHotelCoreKeywords(candidate.hotelName)
     .map((keyword) => normalizeAddressForMatch(keyword))
@@ -2572,7 +2816,8 @@ export function confirmAliHotelDetailDoorPlate(queryCity: string, candidate: Qin
   const normalizedDetail = normalizeAddressForMatch(detailAddress || detailText);
   const normalizedFullDetail = normalizeAddressForMatch(detailText);
   const city = queryCity.replace(/市$/, "");
-  const localAddressMatched = Boolean(detailAddress && actualDoorNumber === expectedDoorNumber && /(?:市|区|县|路|街|大道|道)/.test(detailAddress));
+  const doorNumberMatched = areHotelDoorNumbersCompatible(expectedDoorNumber, actualDoorNumber);
+  const localAddressMatched = Boolean(detailAddress && doorNumberMatched && /(?:市|区|县|路|街|大道|道)/.test(detailAddress));
   const cityMatched = !city || normalizedDetail.includes(city) || normalizedFullDetail.includes(city) || localAddressMatched;
 
   if (!expectedDoorNumber) {
@@ -2595,7 +2840,7 @@ export function confirmAliHotelDetailDoorPlate(queryCity: string, candidate: Qin
       failureReason: "阿里详情页未提取到地址"
     };
   }
-  if (cityMatched && actualDoorNumber === expectedDoorNumber) {
+  if (cityMatched && doorNumberMatched) {
     return {
       sameHotel: true,
       matchBasis: "阿里详情确认：列表品牌+核心店名，详情门牌数字",
@@ -2704,6 +2949,7 @@ export type AliHotelPathRecordStatus = "completed" | "failed" | "skipped";
 
 export type AliHotelPathStep =
   | "open-hotel-home"
+  | "select-search-suggestion"
   | "open-search-result"
   | "read-candidate-cards"
   | "rank-candidates"
@@ -3251,18 +3497,81 @@ async function clickZtripSearchButton(page: BrowserPage) {
   }
 }
 
-async function clickZtripHotelSuggestion(page: BrowserPage, hotelName: string) {
-  const hotelValue = JSON.stringify(hotelName);
+function ztripHotelTextHasCandidateSignal(queryCity: string, candidate: QingmaoHotelCandidate, text: string) {
+  const normalizedText = normalizeAddressForMatch(text);
+  const normalizedHotelName = normalizeAddressForMatch(candidate.hotelName);
+  const brandName = detectAliHotelBrandKeyword(candidate.hotelName);
+  const normalizedBrand = normalizeAddressForMatch(brandName);
+  const doorPlate = extractHotelDoorPlate(candidate.address);
+  const roadKeyword = extractHotelRoadKeyword(candidate.address);
+  const coreKeywords = buildHotelCoreSearchKeywords(candidate, queryCity).map(normalizeAddressForMatch);
+  if (normalizedHotelName && normalizedText.includes(normalizedHotelName)) return true;
+  if (doorPlate && normalizedText.includes(normalizeAddressForMatch(doorPlate))) return true;
+  if (roadKeyword && normalizedText.includes(normalizeAddressForMatch(roadKeyword)) && normalizedBrand && normalizedText.includes(normalizedBrand)) return true;
+  return Boolean(normalizedBrand && normalizedText.includes(normalizedBrand) && coreKeywords.some((keyword) => keyword.length >= 2 && normalizedText.includes(keyword)));
+}
+
+export function classifyZtripHotelSearchReadiness(queryCity: string, candidate: QingmaoHotelCandidate, text: string) {
+  if (/加载中|请稍等|loading/i.test(text)) return "loading";
+  if (ztripHotelTextHasCandidateSignal(queryCity, candidate, text)) return "target-candidate";
+  if (/暂无|未找到|无搜索结果|没有找到|没有符合条件/.test(text)) return "empty";
+  if ((/查看详情|CNY\s*\d+|[¥￥]\s*\d+起/.test(text)) && /酒店|宾馆|公寓|客栈/.test(text)) return "finished-without-target";
+  return "loading";
+}
+
+async function waitForZtripHotelSearchReadiness(page: BrowserPage, query: ZtripHotelQuery, candidate: QingmaoHotelCandidate, keyword: string) {
+  let latestText = "";
+  for (let attempt = 0; attempt < 45; attempt += 1) {
+    latestText = await page.locator("body").innerText({ timeout: 3_000 }).catch(() => latestText);
+    const readiness = classifyZtripHotelSearchReadiness(query.city, candidate, latestText);
+    if (readiness !== "loading") {
+      return { readiness, text: latestText };
+    }
+    await page.waitForTimeout(1_000);
+  }
+
+  throw new Error(`在途商旅酒店搜索结果加载超时：${keyword}`);
+}
+
+async function clickZtripHotelSuggestion(page: BrowserPage, candidate: QingmaoHotelCandidate, queryCity: string) {
+  const hotelValue = JSON.stringify(candidate.hotelName);
+  const doorPlateValue = JSON.stringify(extractHotelDoorPlate(candidate.address) ?? "");
+  const roadKeywordValue = JSON.stringify(extractHotelRoadKeyword(candidate.address) ?? "");
+  const brandValue = JSON.stringify(detectAliHotelBrandKeyword(candidate.hotelName));
+  const coreKeywordsValue = JSON.stringify(buildHotelCoreSearchKeywords(candidate, queryCity));
   return await page.evaluate<boolean>(`(() => {
     const hotelName = ${hotelValue};
+    const doorPlate = ${doorPlateValue};
+    const roadKeyword = ${roadKeywordValue};
+    const brand = ${brandValue};
+    const coreKeywords = ${coreKeywordsValue};
+    const normalizeAddress = (value) => String(value || "").replace(/\\s+/g, "").replace(/[()（）,，。；;：:]/g, "");
     const isVisible = (element) => {
       const rect = element.getBoundingClientRect();
       const style = window.getComputedStyle(element);
       return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
     };
+    const normalizedHotelName = normalizeAddress(hotelName);
+    const normalizedBrand = normalizeAddress(brand);
+    const normalizedDoorPlate = normalizeAddress(doorPlate);
+    const normalizedRoadKeyword = normalizeAddress(roadKeyword);
+    const normalizedCoreKeywords = coreKeywords.map(normalizeAddress).filter((keyword) => keyword.length >= 2);
+    const score = (text) => {
+      const normalizedText = normalizeAddress(text);
+      if (!normalizedText || /筛选|价格|排序|热门|清空|入住|离店/.test(text)) return 0;
+      if (normalizedHotelName && normalizedText.includes(normalizedHotelName)) return 100;
+      if (normalizedDoorPlate && normalizedText.includes(normalizedDoorPlate)) return 90;
+      if (normalizedBrand && normalizedRoadKeyword && normalizedText.includes(normalizedBrand) && normalizedText.includes(normalizedRoadKeyword)) return 80;
+      if (normalizedBrand && normalizedText.includes(normalizedBrand) && normalizedCoreKeywords.some((keyword) => normalizedText.includes(keyword))) return 70;
+      return 0;
+    };
     const elements = Array.from(document.querySelectorAll("*"))
-      .filter((element) => isVisible(element) && (element.textContent || "").trim() === hotelName);
-    const target = elements[0];
+      .map((element) => ({ element, text: (element.textContent || "").replace(/\\s+/g, " ").trim() }))
+      .filter(({ element, text }) => isVisible(element) && text.length >= 4 && text.length <= 300)
+      .map((item) => ({ ...item, score: score(item.text) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.text.length - right.text.length);
+    const target = elements[0]?.element;
     if (!target) return false;
     target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
     target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
@@ -3276,19 +3585,46 @@ async function isZtripHotelDetailLoaded(page: BrowserPage) {
   return /相册|封面|客房/.test(bodyText) && /大床|双床/.test(bodyText) && /CNY\s*\d+/.test(bodyText);
 }
 
-async function openMatchingZtripHotelDetail(page: BrowserPage, hotelName: string) {
+async function openMatchingZtripHotelDetail(page: BrowserPage, candidate: QingmaoHotelCandidate, queryCity: string) {
   if (await isZtripHotelDetailLoaded(page)) return;
 
-  const hotelValue = JSON.stringify(hotelName);
+  const hotelValue = JSON.stringify(candidate.hotelName);
+  const doorPlateValue = JSON.stringify(extractHotelDoorPlate(candidate.address) ?? "");
+  const roadKeywordValue = JSON.stringify(extractHotelRoadKeyword(candidate.address) ?? "");
+  const brandValue = JSON.stringify(detectAliHotelBrandKeyword(candidate.hotelName));
+  const coreKeywordsValue = JSON.stringify(buildHotelCoreSearchKeywords(candidate, queryCity));
   const clicked = await page.evaluate<boolean>(`(() => {
     const hotelName = ${hotelValue};
+    const doorPlate = ${doorPlateValue};
+    const roadKeyword = ${roadKeywordValue};
+    const brand = ${brandValue};
+    const coreKeywords = ${coreKeywordsValue};
+    const normalizeAddress = (value) => String(value || "").replace(/\\s+/g, "").replace(/[()（）,，。；;：:]/g, "");
     const isVisible = (element) => {
       const rect = element.getBoundingClientRect();
       const style = window.getComputedStyle(element);
       return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
     };
+    const normalizedHotelName = normalizeAddress(hotelName);
+    const normalizedBrand = normalizeAddress(brand);
+    const normalizedDoorPlate = normalizeAddress(doorPlate);
+    const normalizedRoadKeyword = normalizeAddress(roadKeyword);
+    const normalizedCoreKeywords = coreKeywords.map(normalizeAddress).filter((keyword) => keyword.length >= 2);
+    const score = (text) => {
+      const normalizedText = normalizeAddress(text);
+      if (!normalizedText || !/查看详情|CNY|¥|￥|酒店/.test(text)) return 0;
+      if (normalizedHotelName && normalizedText.includes(normalizedHotelName)) return 100;
+      if (normalizedDoorPlate && normalizedText.includes(normalizedDoorPlate)) return 90;
+      if (normalizedBrand && normalizedRoadKeyword && normalizedText.includes(normalizedBrand) && normalizedText.includes(normalizedRoadKeyword)) return 80;
+      if (normalizedBrand && normalizedText.includes(normalizedBrand) && normalizedCoreKeywords.some((keyword) => normalizedText.includes(keyword))) return 70;
+      return 0;
+    };
     const nameNode = Array.from(document.querySelectorAll("*"))
-      .find((element) => isVisible(element) && (element.textContent || "").trim() === hotelName);
+      .map((element) => ({ element, text: (element.textContent || "").replace(/\\s+/g, " ").trim() }))
+      .filter(({ element, text }) => isVisible(element) && text.length >= 4 && text.length <= 800)
+      .map((item) => ({ ...item, score: score(item.text) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.text.length - right.text.length)[0]?.element;
     const candidates = [];
     let current = nameNode;
     while (current && current !== document.body) {
@@ -3306,7 +3642,7 @@ async function openMatchingZtripHotelDetail(page: BrowserPage, hotelName: string
   })()`);
 
   if (!clicked) {
-    throw new Error(`在途商旅酒店结果页未找到同酒店详情入口：${hotelName}`);
+    throw new Error(`在途商旅酒店结果页未找到同酒店详情入口：${candidate.hotelName}`);
   }
 
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -3317,33 +3653,33 @@ async function openMatchingZtripHotelDetail(page: BrowserPage, hotelName: string
   throw new Error("在途商旅同酒店详情房型加载超时");
 }
 
-async function openZtripHotelSearchResultByHotel(page: BrowserPage, query: ZtripHotelQuery, hotelName: string) {
+async function openZtripHotelSearchResultByHotel(page: BrowserPage, query: ZtripHotelQuery, candidate: QingmaoHotelCandidate) {
   await page.goto(ztripHotelListUrl(query), { waitUntil: "domcontentloaded", timeout: 45_000 });
   await page.waitForLoadState?.("networkidle", { timeout: 15_000 }).catch(() => undefined);
   await waitForZtripHotelKeywordInput(page);
 
-  for (const keyword of normalizeHotelSearchKeywords(hotelName)) {
+  for (const keyword of buildHotelSearchKeywords({ city: query.city }, candidate)) {
     await page.locator('input[placeholder*="酒店名称"]').first().fill(keyword);
     await page.waitForTimeout(300);
     await clickZtripSearchButton(page);
     await page.waitForTimeout(1_500);
 
-    const suggestionText = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
-    if (!suggestionText.includes(hotelName)) {
+    const searchState = await waitForZtripHotelSearchReadiness(page, query, candidate, keyword);
+    if (searchState.readiness !== "target-candidate") {
       continue;
     }
 
-    await clickZtripHotelSuggestion(page, hotelName);
+    await clickZtripHotelSuggestion(page, candidate, query.city);
     for (let attempt = 0; attempt < 15; attempt += 1) {
       if (await isZtripHotelDetailLoaded(page)) return;
       await page.waitForTimeout(1_000);
     }
 
-    await openMatchingZtripHotelDetail(page, hotelName);
+    await openMatchingZtripHotelDetail(page, candidate, query.city);
     return;
   }
 
-  throw new Error(`在途商旅未搜索到同酒店：${hotelName}`);
+  throw new Error(`在途商旅未搜索到同酒店：${candidate.hotelName}`);
 }
 
 async function clickZtripHotelFilter(page: BrowserPage, label: string) {
@@ -4077,8 +4413,8 @@ interface CtripSuggestionSelectionResult {
   text?: string;
 }
 
-export function buildCtripHotelSuggestionKeywords(candidate: QingmaoHotelCandidate) {
-  return [candidate.hotelName];
+export function buildCtripHotelSuggestionKeywords(candidate: QingmaoHotelCandidate, query: Pick<QingmaoHotelCandidateQuery, "city"> = { city: "" }) {
+  return buildHotelSearchKeywords(query, candidate);
 }
 
 export function canSubmitCtripHotelSearchAfterSuggestionSelection(selection: CtripSuggestionSelectionResult) {
@@ -4154,10 +4490,10 @@ export function validateStrictCtripHotelSearchState(query: QingmaoHotelCandidate
   return null;
 }
 
-export function matchCtripHotelListCandidateText(candidate: QingmaoHotelCandidate, text: string) {
+export function matchCtripHotelListCandidateText(candidate: QingmaoHotelCandidate, text: string, queryCity = "") {
   const normalizedText = normalizeAddressForMatch(text);
   const doorPlate = extractHotelDoorPlate(candidate.address);
-  const coreKeywords = buildCtripHotelCoreKeywords(candidate.hotelName).map(normalizeAddressForMatch);
+  const coreKeywords = buildHotelCoreSearchKeywords(candidate, queryCity).map(normalizeAddressForMatch);
   const hotelName = normalizeAddressForMatch(candidate.hotelName);
   const nameMatched = normalizedText.includes(hotelName) || coreKeywords.some((keyword) => keyword.length >= 2 && normalizedText.includes(keyword));
   const addressMatched = Boolean(doorPlate && normalizedText.includes(doorPlate));
@@ -4358,10 +4694,10 @@ async function resolveCtripHotelIdFromSearchSuggestion(
   };
 }
 
-async function clickMatchingCtripHotelFromList(page: BrowserPage, _query: QingmaoHotelCandidateQuery, candidate: QingmaoHotelCandidate) {
+async function clickMatchingCtripHotelFromList(page: BrowserPage, query: QingmaoHotelCandidateQuery, candidate: QingmaoHotelCandidate) {
   const candidateValue = JSON.stringify(candidate.hotelName);
   const doorPlateValue = JSON.stringify(extractHotelDoorPlate(candidate.address) ?? "");
-  const coreKeywordsValue = JSON.stringify(buildCtripHotelCoreKeywords(candidate.hotelName));
+  const coreKeywordsValue = JSON.stringify(buildHotelCoreSearchKeywords(candidate, query.city));
   const result = await page.evaluate<{ clicked: boolean; reason: string; text: string }>(`(() => {
     const candidateName = ${candidateValue};
     const doorPlate = ${doorPlateValue};
@@ -4457,7 +4793,7 @@ async function openCtripHotelListByKeyword(page: BrowserPage, query: QingmaoHote
 async function openCtripHotelDetailByHotel(page: BrowserPage, query: QingmaoHotelCandidateQuery, candidate: QingmaoHotelCandidate) {
   let lastError = "";
 
-  for (const keyword of buildCtripHotelSearchKeywords(candidate)) {
+  for (const keyword of buildHotelSearchKeywords(query, candidate)) {
     try {
       await openCtripHotelListByKeyword(page, query, candidate, keyword);
       let hotelId = extractCtripHotelIdFromUrl(page.url());
@@ -4496,7 +4832,7 @@ async function openCtripHotelDetailByHotelForSingleDiagnosis(page: BrowserPage, 
   let lastError = "";
   let latestTrace: CtripSingleHotelTrace = {};
 
-  for (const keyword of buildCtripHotelSuggestionKeywords(candidate)) {
+  for (const keyword of buildCtripHotelSuggestionKeywords(candidate, query)) {
     try {
       latestTrace = { ctripSearchKeywordUsed: keyword };
       const suggestionTrace = await resolveCtripHotelIdFromSearchSuggestion(page, query, candidate, keyword);
@@ -4676,12 +5012,211 @@ async function createAliHotelItineraryNo(context: BrowserContext, page: BrowserP
   return itineraryNo;
 }
 
+interface AliHotelSearchOpenResult {
+  source: "suggestion" | "direct-url";
+  suggestionAttempted: boolean;
+  suggestionSelected: boolean;
+  selectedSuggestionText?: string;
+  suggestionFailureReason?: string;
+  finalUrl: string;
+}
+
+async function tryOpenAliHotelListFromSearchSuggestion(
+  page: BrowserPage,
+  query: QingmaoHotelCandidateQuery,
+  candidate: QingmaoHotelCandidate,
+  keyword: string
+): Promise<Omit<AliHotelSearchOpenResult, "source" | "finalUrl">> {
+  const setInputResult = await page.evaluate<{ attempted: boolean; failureReason?: string }>(`((keyword) => {
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const inputs = Array.from(document.querySelectorAll("input, textarea, [contenteditable='true']"))
+      .filter((element) => isVisible(element));
+    const target = inputs.find((element) => {
+      const text = [
+        element.getAttribute("placeholder"),
+        element.getAttribute("aria-label"),
+        element.getAttribute("title"),
+        element.getAttribute("value"),
+        element.textContent
+      ].filter(Boolean).join("");
+      return /酒店|关键|关键词|名称|搜索|目的地/.test(text);
+    }) ?? inputs.find((element) => {
+      const text = [
+        element.getAttribute("placeholder"),
+        element.getAttribute("aria-label"),
+        element.getAttribute("title")
+      ].filter(Boolean).join("");
+      return !/入住|离店|日期|城市/.test(text);
+    });
+    if (!target) return { attempted: false, failureReason: "未找到阿里酒店关键词输入框" };
+    target.scrollIntoView({ block: "center" });
+    target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+    target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+    target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    target.focus?.();
+    if ("value" in target) {
+      target.value = "";
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      target.value = keyword;
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      target.textContent = keyword;
+      target.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: keyword }));
+    }
+    target.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter" }));
+    return { attempted: true };
+  })(${JSON.stringify(keyword)})`).catch((error) => ({
+    attempted: false,
+    failureReason: errorMessage(error)
+  }));
+
+  if (!setInputResult.attempted) {
+    return {
+      suggestionAttempted: false,
+      suggestionSelected: false,
+      suggestionFailureReason: setInputResult.failureReason
+    };
+  }
+
+  await page.waitForTimeout(1_200).catch(() => undefined);
+
+  const optionTexts = await page.evaluate<Array<{ index: number; text: string }>>(`(() => {
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const selectors = [
+      "[role='option']",
+      "li",
+      "[class*='suggest']",
+      "[class*='Suggest']",
+      "[class*='dropdown']",
+      "[class*='Dropdown']",
+      "[class*='option']",
+      "[class*='Option']",
+      "[class*='popover']",
+      "[class*='Popover']"
+    ];
+    const elements = Array.from(new Set(selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)))))
+      .filter((element) => isVisible(element));
+    return elements
+      .map((element, index) => ({
+        index,
+        text: (element.textContent || "").replace(/\\s+/g, " ").trim()
+      }))
+      .filter((item) => item.text.length >= 2 && item.text.length <= 180);
+  })()`).catch(() => []);
+
+  const matchedOption = optionTexts.find((option) => matchAliHotelSearchSuggestionText(candidate, option.text, query.city).matched) ?? null;
+  if (!matchedOption) {
+    return {
+      suggestionAttempted: true,
+      suggestionSelected: false,
+      suggestionFailureReason: optionTexts.length
+        ? "阿里关键词推荐卡片未命中品牌+核心地名候选"
+        : "阿里关键词栏未出现推荐卡片"
+    };
+  }
+
+  const clicked = await page.evaluate<boolean>(`((targetText) => {
+    const normalize = (value) => String(value || "").replace(/\\s+/g, "");
+    const expected = normalize(targetText);
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const selectors = [
+      "[role='option']",
+      "li",
+      "[class*='suggest']",
+      "[class*='Suggest']",
+      "[class*='dropdown']",
+      "[class*='Dropdown']",
+      "[class*='option']",
+      "[class*='Option']",
+      "[class*='popover']",
+      "[class*='Popover']"
+    ];
+    const elements = Array.from(new Set(selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)))))
+      .filter((element) => isVisible(element));
+    const target = elements.find((element) => {
+      const text = normalize(element.textContent || "");
+      return text === expected || text.includes(expected) || expected.includes(text);
+    });
+    if (!target) return false;
+    target.scrollIntoView({ block: "center" });
+    target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+    target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+    target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    return true;
+  })(${JSON.stringify(matchedOption.text)})`).catch(() => false);
+
+  if (!clicked) {
+    return {
+      suggestionAttempted: true,
+      suggestionSelected: false,
+      selectedSuggestionText: matchedOption.text,
+      suggestionFailureReason: "阿里关键词推荐卡片命中但点击失败"
+    };
+  }
+
+  await page.waitForTimeout(1_500).catch(() => undefined);
+  if (!/#\/list/.test(page.url())) {
+    const searchClicked = await page.evaluate<boolean>(`(() => {
+      const isVisible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+      const buttons = Array.from(document.querySelectorAll("button, [role='button'], a"))
+        .filter((element) => isVisible(element));
+      const target = buttons.find((element) => /搜索/.test(element.textContent || ""));
+      if (!target) return false;
+      target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      return true;
+    })()`).catch(() => false);
+    if (searchClicked) await page.waitForTimeout(3_000).catch(() => undefined);
+  }
+
+  return {
+    suggestionAttempted: true,
+    suggestionSelected: true,
+    selectedSuggestionText: matchedOption.text,
+    suggestionFailureReason: /#\/list/.test(page.url()) ? undefined : "已点击阿里关键词推荐卡片，但未进入列表页，继续使用直达列表兜底"
+  };
+}
+
 async function openAliHotelList(
   context: BrowserContext,
   page: BrowserPage,
   query: QingmaoHotelCandidateQuery,
-  keyword: string
-) {
+  keyword: string,
+  candidate?: QingmaoHotelCandidate
+): Promise<AliHotelSearchOpenResult> {
+  let suggestionResult: Omit<AliHotelSearchOpenResult, "source" | "finalUrl"> = {
+    suggestionAttempted: false,
+    suggestionSelected: false
+  };
+  if (candidate) {
+    suggestionResult = await tryOpenAliHotelListFromSearchSuggestion(page, query, candidate, keyword);
+    if (suggestionResult.suggestionSelected && /#\/list/.test(page.url())) {
+      return {
+        source: "suggestion",
+        ...suggestionResult,
+        finalUrl: page.url()
+      };
+    }
+  }
+
   const identity = await readAliIdentityParams(page);
   const bookUser = await readAliBookUser(page);
   const cityCode = aliHotelCityCodes[query.city];
@@ -4716,6 +5251,11 @@ async function openAliHotelList(
 
   await page.goto(`https://travel.alibtrip.com/hotel-demeter?${params.toString()}#/list`, { waitUntil: "domcontentloaded", timeout: 45_000 });
   await page.waitForTimeout(6_000);
+  return {
+    source: "direct-url",
+    ...suggestionResult,
+    finalUrl: page.url()
+  };
 }
 
 function aliHotelListDiagnosisPath(artifactDir: string | undefined) {
@@ -5278,7 +5818,7 @@ async function searchAliHotelMainRateQuote(
     let lastError = "";
     for (const keywordPlan of buildAliHotelSearchKeywordPlan(query, candidate)) {
       try {
-        await openAliHotelList(context, page, query, keywordPlan.keyword);
+        await openAliHotelList(context, page, query, keywordPlan.keyword, candidate);
         const aliSelection = await clickMatchingAliHotelCard(context, page, query, candidate, {
           keyword: keywordPlan.keyword,
           keywordMode: keywordPlan.mode,
@@ -5379,7 +5919,7 @@ async function searchZtripHotelMainRateQuote(
   const startedAt = Date.now();
 
   try {
-    await openZtripHotelSearchResultByHotel(page, query, candidate.hotelName);
+    await openZtripHotelSearchResultByHotel(page, query, candidate);
     await filterZtripHotelRatePlan(page, ratePlan);
     await expandZtripRoomCards(page);
     const bodyText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
@@ -5939,7 +6479,7 @@ async function diagnoseZtripSingleHotel(
 
   try {
     onUpdate(platform, { step: "searching-hotel", sourceDoorPlate, matchBasis: "从在途商旅酒店页重新搜索酒店" });
-    await openZtripHotelSearchResultByHotel(page, buildZtripHotelQueryFromQingmao(query), candidate.hotelName);
+    await openZtripHotelSearchResultByHotel(page, buildZtripHotelQueryFromQingmao(query), candidate);
     onUpdate(platform, { step: "matching-hotel", sourceDoorPlate, matchBasis: "按同城市同门牌号校验在途详情页" });
     bodyText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
     const match = diagnoseDoorPlateMatch(query.city, candidate.address, bodyText);
@@ -6121,7 +6661,21 @@ async function diagnoseAliHotelCalibration(
       const keywordAttemptStartedAt = Date.now();
       try {
         const openListStartedAt = Date.now();
-        await openAliHotelList(context, page, query, keywordPlan.keyword);
+        const openResult = await openAliHotelList(context, page, query, keywordPlan.keyword, candidate);
+        appendAliHotelPathRecord(pathRecords, {
+          step: "select-search-suggestion",
+          status: openResult.suggestionSelected ? "completed" : openResult.suggestionAttempted ? "skipped" : "skipped",
+          startedAtMs: openListStartedAt,
+          keyword: keywordPlan.keyword,
+          keywordMode: keywordPlan.mode,
+          finalUrl: openResult.finalUrl,
+          diagnosisPath,
+          failureReason: openResult.suggestionSelected ? "" : openResult.suggestionFailureReason,
+          details: {
+            source: openResult.source,
+            selectedSuggestionText: openResult.selectedSuggestionText
+          }
+        });
         appendAliHotelPathRecord(pathRecords, {
           step: "open-search-result",
           status: "completed",
@@ -6309,7 +6863,7 @@ async function diagnoseZtripHotelCalibration(
   let screenshotPath: string | undefined;
 
   try {
-    await openZtripHotelSearchResultByHotel(page, buildZtripHotelQueryFromQingmao(query), candidate.hotelName);
+    await openZtripHotelSearchResultByHotel(page, buildZtripHotelQueryFromQingmao(query), candidate);
     bodyText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
     const match = diagnoseDoorPlateMatch(query.city, candidate.address, bodyText);
     if (!match.sameHotel) {
@@ -6709,7 +7263,9 @@ function buildHotelScalePageTextSummary(quotes: HotelMainRateQuote[]) {
 function collectExcludedHotelRateRows(quotes: HotelMainRateQuote[]) {
   return quotes.flatMap((quote) => {
     if (!quote.rawText) return [];
-    const excluded = isHotelRateLineExcludedByBedAssignment(quote.rawText);
+    const excluded = isHotelRateLineExcludedByBedAssignment(quote.rawText, {
+      mainRoomTypeText: quote.platform === "在途商旅" ? quote.roomType : undefined
+    });
     return excluded.excluded
       ? [{ platform: quote.platform, reason: excluded.reason, rawText: quote.rawText }]
       : [];
@@ -10217,7 +10773,7 @@ export function parseZtripHotelRatesTextForRatePlan(rawText: string, ratePlan?: 
 
     const snippetLines = boundedHotelRoomSnippet(relevantLines, index, 10);
     const snippet = snippetLines.join(" ");
-    if (isHotelRateLineExcludedByBedAssignment(snippet).excluded) {
+    if (isHotelRateLineExcludedByBedAssignment(snippet, { mainRoomTypeText: roomLine }).excluded) {
       continue;
     }
     const bedType = inferZtripBedType(snippet);
