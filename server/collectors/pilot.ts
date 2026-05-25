@@ -2321,7 +2321,7 @@ export function buildHotelSearchKeywords(query: Pick<QingmaoHotelCandidateQuery,
 function extractHotelRoadKeyword(address: string) {
   const doorPlate = extractHotelDoorPlate(address);
   if (!doorPlate) return null;
-  return doorPlate.replace(/\d+(?:[-－]\d+)?号.*$/, "");
+  return doorPlate.replace(/\d+(?:(?:[-－~～]|至)\d+)?号.*$/, "");
 }
 
 function extractHotelRoadDoorKeyword(address: string) {
@@ -2661,8 +2661,8 @@ function isLikelyHotelDoorNumber(value: string | null) {
 
 function extractHotelDoorNumbers(text: string) {
   const normalized = normalizeAddressForMatch(text);
-  return Array.from(normalized.matchAll(/(\d+(?:[-－]\d+)?号)(?!线)/g))
-    .map((match) => match[1])
+  return Array.from(normalized.matchAll(/(\d+(?:(?:[-－~～]|至)\d+)?号)(?!线)/g))
+    .map((match) => match[1].replace(/[－~～]|至/g, "-"))
     .filter(isLikelyHotelDoorNumber);
 }
 
@@ -2675,7 +2675,11 @@ function hotelDoorNumberRange(value: string | null) {
   const match = value.replace(/[－]/g, "-").match(/^(\d+)(?:-(\d+))?号$/);
   if (!match) return null;
   const first = Number(match[1]);
-  const second = Number(match[2] ?? match[1]);
+  let second = Number(match[2] ?? match[1]);
+  if (match[2] && match[2].length < match[1].length && second < first) {
+    const prefix = match[1].slice(0, match[1].length - match[2].length);
+    second = Number(`${prefix}${match[2]}`);
+  }
   return {
     start: Math.min(first, second),
     end: Math.max(first, second)
@@ -3407,9 +3411,21 @@ export function extractHotelDoorPlate(address: string) {
   const normalized = normalizeAddressForMatch(address);
   const addressBody = normalized.replace(/^.*[区县市]/, "") || normalized;
   const matches = Array.from(
-    addressBody.matchAll(/([\u4e00-\u9fa5A-Za-z0-9]{1,24}(?:大道|大街|横路|横街|路|街|巷|弄|道|里|村)[东南西北中]?\d+(?:[-－]\d+)?号(?:之?\d+)?)/g)
+    addressBody.matchAll(/([\u4e00-\u9fa5A-Za-z0-9]{1,24}(?:大道|大街|横路|横街|路|街|巷|弄|道|里|村)[东南西北中]?\d+(?:(?:[-－~～]|至)\d+)?号(?:之?\d+)?)/g)
   ).map((match) => match[1]);
   return matches.length ? matches[matches.length - 1] : null;
+}
+
+function areHotelDoorPlatesCompatible(sourceDoorPlate: string | null, targetDoorPlate: string | null, targetText = "") {
+  if (!sourceDoorPlate) return false;
+  const normalizedTarget = normalizeAddressForMatch(targetText);
+  if (normalizedTarget.includes(normalizeAddressForMatch(sourceDoorPlate))) return true;
+  const sourceRoad = extractHotelRoadKeyword(sourceDoorPlate) ?? "";
+  const targetRoad = targetDoorPlate ? extractHotelRoadKeyword(targetDoorPlate) ?? "" : "";
+  const sourceDoorNumber = extractHotelDoorNumber(sourceDoorPlate);
+  const targetDoorNumber = targetDoorPlate ? extractHotelDoorNumber(targetDoorPlate) : extractHotelDoorNumber(targetText);
+  const roadMatched = Boolean(sourceRoad && (normalizedTarget.includes(normalizeAddressForMatch(sourceRoad)) || (targetRoad && normalizeAddressForMatch(sourceRoad) === normalizeAddressForMatch(targetRoad))));
+  return roadMatched && areHotelDoorNumbersCompatible(sourceDoorNumber, targetDoorNumber);
 }
 
 export function isSameHotelByCityAndDoorPlate(queryCity: string, sourceAddress: string, targetText: string) {
@@ -3418,7 +3434,7 @@ export function isSameHotelByCityAndDoorPlate(queryCity: string, sourceAddress: 
 
   const normalizedTarget = normalizeAddressForMatch(targetText);
   const cityMatched = !queryCity || normalizedTarget.includes(queryCity.replace(/市$/, ""));
-  return cityMatched && normalizedTarget.includes(doorPlate);
+  return cityMatched && areHotelDoorPlatesCompatible(doorPlate, extractHotelDoorPlate(targetText), targetText);
 }
 
 export function selectLockedQingmaoHotelCandidate(candidates: QingmaoHotelCandidate[], query: QingmaoHotelCandidateQuery) {
@@ -3458,12 +3474,12 @@ function diagnoseDoorPlateMatch(queryCity: string, sourceAddress: string, target
       targetDoorPlate
     };
   }
-  if (normalizedTarget.includes(sourceDoorPlate)) {
+  if (areHotelDoorPlatesCompatible(sourceDoorPlate, targetDoorPlate, targetText)) {
     return {
       sameHotel: true,
-      matchBasis: "同城市同门牌号",
+      matchBasis: "同城市同道路且门牌号兼容",
       sourceDoorPlate,
-      targetDoorPlate: sourceDoorPlate
+      targetDoorPlate: targetDoorPlate ?? sourceDoorPlate
     };
   }
   if (!targetDoorPlate) {
@@ -3668,7 +3684,7 @@ async function openMatchingZtripHotelDetail(page: BrowserPage, candidate: Qingma
   })()`);
 
   if (!clicked) {
-    throw new Error(`在途商旅酒店结果页未找到同酒店详情入口：${candidate.hotelName}`);
+    throw new Error(`在途商旅同店命中失败：结果页未找到同酒店详情入口：${candidate.hotelName}`);
   }
 
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -3685,12 +3701,39 @@ async function openZtripHotelSearchResultByHotel(page: BrowserPage, query: Ztrip
   await waitForZtripHotelKeywordInput(page);
 
   for (const keyword of buildHotelSearchKeywords({ city: query.city }, candidate)) {
-    await page.locator('input[placeholder*="酒店名称"]').first().fill(keyword);
-    await page.waitForTimeout(300);
-    await clickZtripSearchButton(page);
-    await page.waitForTimeout(1_500);
+    const timeoutNotes: string[] = [];
+    const submitSearch = async () => {
+      await waitForZtripHotelKeywordInput(page);
+      await page.locator('input[placeholder*="酒店名称"]').first().fill(keyword);
+      await page.waitForTimeout(300);
+      await clickZtripSearchButton(page);
+      await page.waitForTimeout(1_500);
+    };
+    await submitSearch();
 
-    const searchState = await waitForZtripHotelSearchReadiness(page, query, candidate, keyword);
+    let searchState: Awaited<ReturnType<typeof waitForZtripHotelSearchReadiness>>;
+    try {
+      searchState = await waitForZtripHotelSearchReadiness(page, query, candidate, keyword);
+    } catch (firstError) {
+      timeoutNotes.push(`首次等待失败：${errorMessage(firstError)}`);
+      await page.goto(page.url(), { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined);
+      await page.waitForLoadState?.("networkidle", { timeout: 15_000 }).catch(() => undefined);
+      try {
+        await submitSearch();
+        searchState = await waitForZtripHotelSearchReadiness(page, query, candidate, keyword);
+      } catch (refreshError) {
+        timeoutNotes.push(`刷新后等待失败：${errorMessage(refreshError)}`);
+        await page.goto(ztripHotelListUrl(query), { waitUntil: "domcontentloaded", timeout: 45_000 });
+        await page.waitForLoadState?.("networkidle", { timeout: 15_000 }).catch(() => undefined);
+        await submitSearch();
+        try {
+          searchState = await waitForZtripHotelSearchReadiness(page, query, candidate, keyword);
+        } catch (reopenError) {
+          timeoutNotes.push(`重进在途酒店页后等待失败：${errorMessage(reopenError)}`);
+          throw new Error(`在途商旅酒店搜索结果加载超时：${keyword}；${timeoutNotes.join("；")}`);
+        }
+      }
+    }
     if (searchState.readiness !== "target-candidate") {
       continue;
     }
@@ -3705,7 +3748,7 @@ async function openZtripHotelSearchResultByHotel(page: BrowserPage, query: Ztrip
     return;
   }
 
-  throw new Error(`在途商旅未搜索到同酒店：${candidate.hotelName}`);
+  throw new Error(`在途商旅同店命中失败：多轮关键词未搜索到同一家酒店：${candidate.hotelName}`);
 }
 
 async function clickZtripHotelFilter(page: BrowserPage, label: string) {
@@ -4378,6 +4421,16 @@ export interface HotelMainRateCompetitorCollector {
   pendingQuote: (reason: string) => HotelMainRateQuote;
 }
 
+function hasSameHotelFailureEvidence(quote: HotelMainRateQuote) {
+  return Boolean(quote.finalUrl || quote.screenshotPath || quote.diagnosisPath || quote.rawText);
+}
+
+function isHotelSameHotelHitFailureQuote(quote: HotelMainRateQuote) {
+  if (quote.status === "available" && typeof quote.price === "number") return false;
+  const failureType = classifyHotelCalibrationFailureType(quote.error ?? "", quote.platform);
+  return failureType === "competitor_no_same_hotel" && hasSameHotelFailureEvidence(quote);
+}
+
 export async function collectHotelMainRateCompetitorQuotes(
   collectors: HotelMainRateCompetitorCollector[],
   options: { stopOnFirstCompetitorFailure?: boolean; onProgress?: (message: string) => void } = {}
@@ -4389,9 +4442,9 @@ export async function collectHotelMainRateCompetitorQuotes(
     options.onProgress?.(collector.beforeMessage);
     const quote = await collector.collect();
     quotes.push(quote);
-    if (options.stopOnFirstCompetitorFailure && firstUnavailableHotelMainRateQuote([quote])) {
+    if (options.stopOnFirstCompetitorFailure && isHotelSameHotelHitFailureQuote(quote)) {
       stoppedByFailure = quote;
-      const reason = `${quote.platform}失败，已按小放量 fail-fast 跳过剩余竞品：${quote.error ?? `无${quote.ratePlan}`}`;
+      const reason = `${quote.platform}同店命中失败，已跳过剩余竞品：${quote.error ?? "多轮关键词和详情页判断未命中同一家酒店"}`;
       for (const remaining of collectors.slice(index + 1)) {
         quotes.push(remaining.pendingQuote(reason));
       }
@@ -4836,7 +4889,7 @@ async function openCtripHotelDetailByHotel(page: BrowserPage, query: QingmaoHote
       await page.waitForLoadState?.("networkidle", { timeout: 15_000 }).catch(() => undefined);
       const bodyText = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
       if (!isSameHotelByCityAndDoorPlate(query.city, candidate.address, bodyText) && scoreHotelNameMatch(candidate.hotelName, bodyText) < 6) {
-        throw new Error(`携程商旅同店校验失败：未匹配到同城市同门牌号 ${query.city} ${extractHotelDoorPlate(candidate.address) ?? candidate.address}`);
+        throw new Error(`携程商旅同店命中失败：未匹配到同城市同门牌号 ${query.city} ${extractHotelDoorPlate(candidate.address) ?? candidate.address}`);
       }
       return;
     } catch (error) {
@@ -4844,7 +4897,7 @@ async function openCtripHotelDetailByHotel(page: BrowserPage, query: QingmaoHote
     }
   }
 
-  throw new Error(lastError || `携程商旅未找到同酒店：${candidate.hotelName}`);
+  throw new Error(lastError || `携程商旅同店命中失败：多轮关键词未找到同一家酒店：${candidate.hotelName}`);
 }
 
 interface CtripSingleHotelTrace {
@@ -4932,7 +4985,7 @@ async function openCtripHotelDetailByHotelForSingleDiagnosis(page: BrowserPage, 
     }
   }
 
-  const error = new Error(lastError || `携程商旅未找到同酒店：${candidate.hotelName}`) as Error & { ctripTrace?: CtripSingleHotelTrace };
+  const error = new Error(lastError || `携程商旅同店命中失败：多轮关键词未找到同一家酒店：${candidate.hotelName}`) as Error & { ctripTrace?: CtripSingleHotelTrace };
   error.ctripTrace = latestTrace;
   throw error;
 }
@@ -5986,8 +6039,19 @@ async function searchZtripHotelMainRateQuote(
       durationMs: Date.now() - startedAt
     };
   } catch (error) {
+    const bodyText = await page.locator("body").innerText({ timeout: 3_000 }).catch(() => "");
+    const screenshotPath = path.join(artifactDir, `在途商旅-酒店失败-${safeFilename(ratePlan)}.png`);
+    const evidencePath = await savePageEvidence(page, screenshotPath, {
+      platform: "在途商旅",
+      finalUrl: page.url(),
+      bodyText,
+      error: errorMessage(error)
+    }).catch(() => undefined);
     return {
       ...buildFailedHotelQuote("在途商旅", errorMessage(error), candidate, ratePlan),
+      finalUrl: page.url(),
+      screenshotPath: evidencePath,
+      rawText: bodyText,
       durationMs: Date.now() - startedAt
     };
   }
@@ -7182,13 +7246,14 @@ async function runHotelMainRateForQuery(
     }
 
     const unavailable = competitorQuotes.filter((quote) => quote.status !== "available" || typeof quote.price !== "number");
-    if (runOptions.stopOnFirstCompetitorFailure && unavailable.length) {
+    const sameHotelHitFailure = unavailable.find(isHotelSameHotelHitFailureQuote);
+    if (runOptions.stopOnFirstCompetitorFailure && sameHotelHitFailure) {
       selectedCandidate = candidate;
       qingmaoQuote = { ...rate, durationMs: qingmaoDurationMs };
       ctripQuote = nextCtripQuote;
       aliQuote = nextAliQuote;
       ztripQuote = nextZtripQuote;
-      skipped.push(`${candidate.hotelName}: ${unavailable[0].platform}${unavailable[0].error ? ` ${unavailable[0].error}` : `无${ratePlan}`}`);
+      skipped.push(`${candidate.hotelName}: ${sameHotelHitFailure.platform}同店命中失败${sameHotelHitFailure.error ? ` ${sameHotelHitFailure.error}` : ""}`);
       await closeCreatedBrowserPages(context, pagesBeforeCandidate, new Set([qingmaoPage]));
       break;
     }
@@ -7264,8 +7329,10 @@ async function writeJsonArtifact(filePath: string, value: unknown) {
 
 function buildHotelScaleValidationPathRecordsFromQuotes(quotes: HotelMainRateQuote[], sampleStartedAtMs: number): HotelScaleValidationPathRecord[] {
   let cursorMs = sampleStartedAtMs;
-  return HOTEL_SCALE_VALIDATION_PLATFORM_ORDER.map((platform) => {
-    const quote = quotes.find((item) => item.platform === platform);
+  const orderedQuotes = quotes.length > HOTEL_SCALE_VALIDATION_PLATFORM_ORDER.length
+    ? quotes.map((quote) => ({ platform: quote.platform, quote }))
+    : HOTEL_SCALE_VALIDATION_PLATFORM_ORDER.map((platform) => ({ platform, quote: quotes.find((item) => item.platform === platform) }));
+  return orderedQuotes.map(({ platform, quote }) => {
     const durationMs = Math.max(0, quote?.durationMs ?? 0);
     const startedAt = new Date(cursorMs).toISOString();
     cursorMs += durationMs;
@@ -7273,7 +7340,7 @@ function buildHotelScaleValidationPathRecordsFromQuotes(quotes: HotelMainRateQuo
     const failed = quote && (quote.status !== "available" || typeof quote.price !== "number");
     return {
       platform,
-      step: platform === "青猫差旅" ? "qingmao-main-rate" : "read-main-rate",
+      step: `${platform === "青猫差旅" ? "qingmao-rate" : "read-rate"}:${quote?.ratePlan ?? HOTEL_CALIBRATION_MAIN_RATE_PLAN}`,
       status: quote ? failed ? "failed" : "completed" : "skipped",
       startedAt,
       endedAt,
@@ -7516,6 +7583,108 @@ async function runHotelRatePlanForCandidate(
   } finally {
     await closeCreatedBrowserPages(context, pagesBeforeCandidate, new Set([qingmaoPage]));
   }
+}
+
+function isHotelRatePlanComplete(quotes: HotelMainRateQuote[], ratePlan: HotelRatePlanLabel) {
+  return HOTEL_SCALE_VALIDATION_PLATFORM_ORDER.every((platform) =>
+    quotes.some((quote) =>
+      quote.platform === platform
+      && quote.ratePlan === ratePlan
+      && quote.status === "available"
+      && typeof quote.price === "number"
+    )
+  );
+}
+
+async function runHotelAllRatePlansForQuery(
+  context: BrowserContext,
+  qingmaoPage: BrowserPage,
+  artifactDir: string,
+  query: QingmaoHotelCandidateQuery,
+  maxAttempts: number,
+  onProgress?: (message: string) => void,
+  shouldSkipCandidate?: (candidate: QingmaoHotelCandidate) => string | null
+): Promise<{ status: "completed" | "partial"; selectedCandidate: QingmaoHotelCandidate; quotes: HotelMainRateQuote[]; message: string; skipped: string[]; attemptsUsed: number; failurePlatform?: PlatformName }> {
+  await fsp.mkdir(artifactDir, { recursive: true });
+  const skipped: string[] = [];
+  let attemptsUsed = 0;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const listFrame = await searchQingmaoHotelCandidates(qingmaoPage, query);
+    const candidates = await collectQingmaoHotelCandidatesFromFrame(listFrame);
+    const candidate = candidates[attempt];
+    if (!candidate) {
+      onProgress?.(`青猫候选不足：只找到 ${candidates.length} 家`);
+      break;
+    }
+    attemptsUsed += 1;
+    onProgress?.(`尝试第 ${attempt + 1}/${maxAttempts} 家：${candidate.hotelName}，开始采集 4 个口径`);
+    if (!isHotelCandidateRelevantForQuery(candidate, query)) {
+      skipped.push(`${candidate.hotelName}: 不属于${query.keyword}候选`);
+      continue;
+    }
+    if (!candidate.price || candidate.price <= 0) {
+      skipped.push(`${candidate.hotelName}: 候选起价为空`);
+      continue;
+    }
+    const samplingSkipReason = shouldSkipCandidate?.(candidate);
+    if (samplingSkipReason) {
+      skipped.push(`${candidate.hotelName}: ${samplingSkipReason}`);
+      continue;
+    }
+
+    const quotes: HotelMainRateQuote[] = [];
+    let failurePlatform: PlatformName | undefined;
+    let stoppedBySameHotelFailure = false;
+
+    for (const ratePlan of HOTEL_RATE_PLAN_LABELS) {
+      const rateArtifactDir = path.join(artifactDir, safeFilename(ratePlan));
+      const startedAt = Date.now();
+      try {
+        onProgress?.(`${candidate.hotelName}：采集${ratePlan}`);
+        const result = await runHotelRatePlanForCandidate(context, qingmaoPage, rateArtifactDir, query, candidate, ratePlan);
+        quotes.push(...result.quotes);
+        const sameHotelFailure = result.quotes.find(isHotelSameHotelHitFailureQuote);
+        if (sameHotelFailure) {
+          failurePlatform = sameHotelFailure.platform;
+          skipped.push(`${candidate.hotelName}: ${sameHotelFailure.platform}同店命中失败 ${sameHotelFailure.error ?? ""}`.trim());
+          stoppedBySameHotelFailure = true;
+          break;
+        }
+      } catch (error) {
+        quotes.push({
+          platform: "青猫差旅",
+          status: "failed",
+          price: null,
+          hotelName: candidate.hotelName,
+          roomType: "",
+          ratePlan,
+          durationMs: Date.now() - startedAt,
+          error: errorMessage(error)
+        });
+        skipped.push(`${candidate.hotelName}: 青猫${ratePlan} ${errorMessage(error)}`);
+      }
+    }
+
+    const completeRatePlans = HOTEL_RATE_PLAN_LABELS.filter((ratePlan) => isHotelRatePlanComplete(quotes, ratePlan));
+    if (completeRatePlans.length || quotes.length) {
+      return {
+        status: completeRatePlans.length ? "completed" : "partial",
+        selectedCandidate: candidate,
+        quotes,
+        message: completeRatePlans.length
+          ? `${candidate.hotelName} 已形成 ${completeRatePlans.length} 个四平台完整口径：${completeRatePlans.join("、")}`
+          : stoppedBySameHotelFailure
+            ? `${candidate.hotelName} 同店命中失败，已停止该酒店后续平台采集`
+            : `${candidate.hotelName} 4 个口径均未形成四平台完整价格，仅进入后台留痕`,
+        skipped,
+        attemptsUsed,
+        failurePlatform
+      };
+    }
+  }
+
+  throw new Error(`未找到可诊断酒店${skipped.length ? `：${skipped.slice(0, 6).join("；")}` : ""}`);
 }
 
 function errorMessage(error: unknown) {
@@ -8715,26 +8884,21 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
                 const remainingAttempts = Math.max(1, HOTEL_SCALE_VALIDATION_MAX_ATTEMPTS_PER_GROUP - groupAttemptedCandidates);
                 const sampleStartedAtMs = Date.now();
                 try {
-                  const result = await runHotelMainRateForQuery(
+                  const result = await runHotelAllRatePlansForQuery(
                     context,
                     qingmaoPage,
                     sampleArtifactDir,
                     keywordQuery,
-                    HOTEL_CALIBRATION_MAIN_RATE_PLAN,
                     Math.min(remainingAttempts, HOTEL_SMALL_BATCH_MAX_ATTEMPTS_PER_SAMPLE),
                     (detail) => publishProgress(`${config.group} 第 ${sampleIndex} 家：${detail}`),
-                    (candidate) => shouldSkipHotelSmallBatchCandidate(candidate, keywordQuery, usedHotelNames, previousAnchors),
-                    {
-                      stopOnFirstCompetitorFailure: true,
-                      competitorOrder: HOTEL_SCALE_VALIDATION_COMPETITOR_PLATFORM_ORDER
-                    }
+                    (candidate) => shouldSkipHotelSmallBatchCandidate(candidate, keywordQuery, usedHotelNames, previousAnchors)
                   );
                   groupAttemptedCandidates += Math.max(1, result.attemptsUsed);
                   usedHotelNames.add(normalizeHotelIdentity(result.selectedCandidate.hotelName));
 
                   const pathRecords = buildHotelScaleValidationPathRecordsFromQuotes(result.quotes, sampleStartedAtMs);
-                  const unavailable = firstUnavailableHotelMainRateQuote(result.quotes);
-                  const excludedRateRows = collectExcludedHotelRateRows(result.quotes);
+                  const unavailable = result.status === "completed" ? null : firstUnavailableHotelMainRateQuote(result.quotes);
+                  const excludedRateRows = result.status === "completed" ? [] : collectExcludedHotelRateRows(result.quotes);
                   const failureRecord = unavailable
                     ? pathRecords.find((record) => record.platform === unavailable.platform && record.status === "failed")
                     : undefined;
@@ -10786,6 +10950,26 @@ function inferZtripBedType(snippet: string): ZtripHotelRate["bedType"] {
   return "";
 }
 
+function detectZtripSelectedFilters(rawText: string): Pick<ZtripHotelRate, "bedType" | "breakfast"> {
+  const relevantLines = ztripRelevantLines(rawText);
+  const firstRoomIndex = relevantLines.findIndex((line) =>
+    isZtripRoomHeader(line) && !/^(大床|双床|双份早餐|含早餐|无早餐|符合差标|酒店最低价)$/.test(line)
+  );
+  const filterText = relevantLines.slice(0, firstRoomIndex >= 0 ? firstRoomIndex : relevantLines.length).join(" ");
+  const bedType = /双床/.test(filterText) && !/大床/.test(filterText)
+    ? "双床"
+    : /大床/.test(filterText) && !/双床/.test(filterText)
+      ? "大床"
+      : "";
+  const breakfast = /无早餐|无早/.test(filterText)
+    ? "无早餐"
+    : /含早餐|含早|2份早餐|双份早餐|双早|1份早餐|单份早餐|单早/.test(filterText)
+      ? "有早餐"
+      : "";
+
+  return { bedType, breakfast };
+}
+
 export function parseZtripHotelRatesTextForRatePlan(rawText: string, ratePlan?: HotelRatePlanLabel): ZtripHotelRate[] {
   const lines = rawText
     .split(/\n+/)
@@ -10794,6 +10978,9 @@ export function parseZtripHotelRatesTextForRatePlan(rawText: string, ratePlan?: 
   const hotelName = detectZtripHotelName(lines);
   const rates: ZtripHotelRate[] = [];
   const relevantLines = ztripRelevantLines(rawText);
+  const selectedFilters = ratePlan ? detectZtripSelectedFilters(rawText) : { bedType: "", breakfast: "" } satisfies Pick<ZtripHotelRate, "bedType" | "breakfast">;
+  const requestedBedType = ratePlan ? hotelRatePlanBedType(ratePlan) : "";
+  const requestedBreakfast = ratePlan ? hotelRatePlanBreakfast(ratePlan) : "";
 
   for (let index = 0; index < relevantLines.length; index += 1) {
     const roomLine = relevantLines[index];
@@ -10811,19 +10998,25 @@ export function parseZtripHotelRatesTextForRatePlan(rawText: string, ratePlan?: 
     if (isHotelRateLineExcludedByBedAssignment(snippet, { mainRoomTypeText: roomLine }).excluded) {
       continue;
     }
-    const bedType = inferZtripBedType(snippet);
+    const explicitBedType = inferZtripBedType(snippet);
+    const bedType = explicitBedType || selectedFilters.bedType;
     if (!bedType) {
       continue;
     }
-    if (ratePlan && bedType !== hotelRatePlanBedType(ratePlan)) {
+    if (ratePlan && bedType !== requestedBedType) {
       continue;
     }
-    const breakfastMatch = snippet.match(/含早餐|含早|2份早餐|双份早餐|双早|1份早餐|单份早餐|单早|无早餐|无早/);
-    if (!breakfastMatch) {
+    const breakfastMatches = Array.from(snippet.matchAll(/含早餐|含早|2份早餐|双份早餐|双早|1份早餐|单份早餐|单早|无早餐|无早/g));
+    const breakfastMatch = breakfastMatches.at(-1);
+    const explicitBreakfast = breakfastMatch ? normalizeZtripBreakfast(breakfastMatch[0]) : "";
+    if (ratePlan && explicitBreakfast && selectedFilters.breakfast && explicitBreakfast !== selectedFilters.breakfast) {
       continue;
     }
-    const breakfast = normalizeZtripBreakfast(breakfastMatch[0]);
-    if (ratePlan && breakfast !== hotelRatePlanBreakfast(ratePlan)) {
+    const breakfast = explicitBreakfast || selectedFilters.breakfast;
+    if (!breakfast) {
+      continue;
+    }
+    if (ratePlan && breakfast !== requestedBreakfast) {
       continue;
     }
 

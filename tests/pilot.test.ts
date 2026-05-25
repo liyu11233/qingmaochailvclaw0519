@@ -415,6 +415,45 @@ CNY 280`, "双床有早餐");
     });
   });
 
+  it("lets ztrip room cards inherit selected bed and breakfast filters above the unmatched divider", () => {
+    const rates = parseZtripHotelRatesTextForRatePlan(`汉庭酒店
+5月25日
+1晚
+1间1人
+含早餐
+大床
+高级大床房
+22m² | 1张1.8米大床 | 可住2人
+CNY 420
+不满足筛选条件的产品
+高级大床房
+无早餐
+CNY 390`, "大床有早餐");
+
+    expect(rates).toHaveLength(1);
+    expect(rates[0]).toMatchObject({
+      roomType: "高级大床房",
+      breakfast: "有早餐",
+      bedType: "大床",
+      price: 420
+    });
+  });
+
+  it("does not inherit selected ztrip breakfast when the room card explicitly contradicts it", () => {
+    const rates = parseZtripHotelRatesTextForRatePlan(`汉庭酒店
+5月25日
+1晚
+1间1人
+含早餐
+大床
+高级大床房
+无早餐 | 免费取消
+22m² | 1张1.8米大床 | 可住2人
+CNY 390`, "大床有早餐");
+
+    expect(rates).toHaveLength(0);
+  });
+
   it("accepts ztrip random-bed text when the main room type is explicit", () => {
     const rates = parseZtripHotelRatesTextForRatePlan(`柏曼酒店
 5月25日
@@ -445,6 +484,26 @@ CNY 262`, "大床有早餐");
 CNY 255`, "双床有早餐");
 
     expect(rates).toEqual([]);
+  });
+
+  it("treats compatible door-number ranges as the same hotel only with city and address context", () => {
+    const candidate = {
+      hotelName: "如家酒店(杭州富阳富春江店)",
+      level: "",
+      score: "",
+      area: "杭州",
+      address: "杭州市富阳区桂花路75-8号",
+      price: 128,
+      rawText: "如家酒店(杭州富阳富春江店) 杭州市富阳区桂花路75-8号"
+    };
+
+    const detail = confirmAliHotelDetailDoorPlate("杭州", candidate, `酒店详情
+如家.neo-杭州富阳恩波广场桂花路店
+杭州富阳区桂花路77号 | 富阳城区`);
+
+    expect(detail.sameHotel).toBe(true);
+    expect(detail.expectedDoorNumber).toBe("75-8号");
+    expect(detail.detailDoorNumber).toBe("77号");
   });
 
   it("parses qingmao hotel candidate pool text", () => {
@@ -1898,7 +1957,7 @@ CNY 260`);
     });
   });
 
-  it("does not continue remaining competitors after hotel small-batch fail-fast sees a competitor failure", async () => {
+  it("does not continue remaining competitors after hotel small-batch fail-fast sees a same-hotel hit failure", async () => {
     const ctrip = vi.fn(async () => ({
       platform: "携程商旅" as const,
       status: "available" as const,
@@ -1914,7 +1973,10 @@ CNY 260`);
       hotelName: "测试酒店",
       roomType: "",
       ratePlan: "大床有早餐" as const,
-      error: "阿里未匹配同店"
+      error: "阿里未匹配同店",
+      finalUrl: "https://travel.alibtrip.com/detail",
+      screenshotPath: "/tmp/ali-detail.png",
+      diagnosisPath: "/tmp/ali-diagnosis.json"
     }));
     const ztrip = vi.fn(async () => ({
       platform: "在途商旅" as const,
@@ -1955,6 +2017,46 @@ CNY 260`);
       platform: "在途商旅",
       status: "pending"
     });
+  });
+
+  it("continues remaining competitors when a platform only misses the requested rate plan", async () => {
+    const ali = vi.fn(async () => ({
+      platform: "阿里商旅" as const,
+      status: "failed" as const,
+      price: null,
+      hotelName: "测试酒店",
+      roomType: "",
+      ratePlan: "大床有早餐" as const,
+      error: "阿里商旅未找到大床有早餐价格"
+    }));
+    const ztrip = vi.fn(async () => ({
+      platform: "在途商旅" as const,
+      status: "available" as const,
+      price: 260,
+      hotelName: "测试酒店",
+      roomType: "大床房",
+      ratePlan: "大床有早餐" as const
+    }));
+
+    const result = await collectHotelMainRateCompetitorQuotes([
+      {
+        platform: "阿里商旅",
+        beforeMessage: "开始查阿里",
+        collect: ali,
+        pendingQuote: (reason) => ({ platform: "阿里商旅", status: "pending", price: null, hotelName: "测试酒店", roomType: "", ratePlan: "大床有早餐", error: reason })
+      },
+      {
+        platform: "在途商旅",
+        beforeMessage: "开始查在途",
+        collect: ztrip,
+        pendingQuote: (reason) => ({ platform: "在途商旅", status: "pending", price: null, hotelName: "测试酒店", roomType: "", ratePlan: "大床有早餐", error: reason })
+      }
+    ], { stopOnFirstCompetitorFailure: true });
+
+    expect(ali).toHaveBeenCalledTimes(1);
+    expect(ztrip).toHaveBeenCalledTimes(1);
+    expect(result.stoppedByFailure).toBeNull();
+    expect(result.quotes.map((quote) => quote.platform)).toEqual(["阿里商旅", "在途商旅"]);
   });
 
   it("builds hotel scale validation dates from explicit dates or next-day default", () => {
