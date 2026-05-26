@@ -1218,8 +1218,13 @@ describe("management API", () => {
     });
     expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(explicitScaleInput);
 
+    const smokeScaleInput = { limit: 5 };
+    await request(app).post("/api/pilot/hotel-scale-validation/run").send(smokeScaleInput).expect(200);
+    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(smokeScaleInput);
+
     await request(app).post("/api/pilot/hotel-scale-validation/run").send({ checkInDate: "2026-06-02" }).expect(400);
     await request(app).post("/api/pilot/hotel-scale-validation/run").send({ checkInDate: "2026-06-04", checkOutDate: "2026-06-02" }).expect(400);
+    await request(app).post("/api/pilot/hotel-scale-validation/run").send({ limit: 6 }).expect(400);
 
     const singleDiagnosisStatus = await request(app).get("/api/pilot/hotel-single-diagnosis/status").expect(200);
     expect(singleDiagnosisStatus.body.status).toBe("idle");

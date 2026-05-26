@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   classifyProbeOutcome,
@@ -5,6 +8,7 @@ import {
   classifyZtripProductEntries,
   classifyZtripHotelSearchReadiness,
   collectHotelMainRateCompetitorQuotes,
+  assertCompetitorHotelDetailSameByDoorPlate,
   buildCtripHotelSearchKeywords,
   buildCtripHotelCoreKeywords,
   buildStrictCtripHotelSearchUrl,
@@ -48,6 +52,7 @@ import {
   isHotelCandidateRelevantForQuery,
   isSameHotelByCityAndDoorPlate,
   matchCtripHotelListCandidateText,
+  evaluateCtripHotelDetailKeywordAttempt,
   normalizeHotelSearchKeywords,
   parseAliHotelMainRatesText,
   parseCtripHotelMainRatesText,
@@ -61,12 +66,15 @@ import {
   resolveHotelCalibrationPlatformOrder,
   isHotelCalibrationSampleComplete,
   selectHotelCalibrationDefaultRatePlan,
+  selectZtripHotelRateForRatePlan,
+  shouldStopHotelAllRatePlanCollectionAfterQuoteFailure,
   resolveHotelSmallBatchBudgetStop,
   resolveHotelSmallBatchOverallBudgetStop,
   getHotelSmallBatchGroupSearchKeywords,
   shouldSkipHotelSmallBatchCandidate,
   summarizeHotelSmallBatchGroups,
   aggregateHotelScaleValidationTimings,
+  buildHotelDiagnosticReviewHtml,
   buildHotelScaleValidationInput,
   buildInitialHotelScaleValidationResult,
   evaluateHotelScaleValidationEvidence,
@@ -484,6 +492,73 @@ CNY 262`, "大床有早餐");
 CNY 255`, "双床有早餐");
 
     expect(rates).toEqual([]);
+  });
+
+  it("reads ztrip expanded room package rows as separate breakfast rate plans", () => {
+    const rawText = `千淘商旅酒店
+5月26日
+今天
+1晚
+5月27日
+明天
+1间1人
+大床
+符合差标
+含早餐
+免费取消
+标准大床房
+16-18m² | 大床 | 无窗
+CNY 223
+标准大床房
+无早餐 | 05-26 18:00前可免费取消
+16-18m² | 大床 | 可住2人 | 无窗
+千淘商旅
+CNY 223
+订
+在线付
+1份早餐 | 05-26 18:00前可免费取消
+16-18m² | 大床 | 可住2人 | 无窗
+千淘商旅
+CNY 260
+订
+在线付`;
+
+    expect(selectZtripHotelRateForRatePlan(parseZtripHotelRatesTextForRatePlan(rawText, "大床无早餐"), "大床无早餐")).toMatchObject({
+      roomType: "标准大床房",
+      bedType: "大床",
+      breakfast: "无早餐",
+      price: 223
+    });
+    expect(selectZtripHotelRateForRatePlan(parseZtripHotelRatesTextForRatePlan(rawText, "大床有早餐"), "大床有早餐")).toMatchObject({
+      roomType: "标准大床房",
+      bedType: "大床",
+      breakfast: "有早餐",
+      price: 260
+    });
+  });
+
+  it("prefers explicit ztrip room prices over random bed assignment rates", () => {
+    const rates = parseZtripHotelRatesTextForRatePlan(`如家商旅酒店
+5月27日
+1晚
+1间1人
+大床
+符合差标
+大床房A
+到店随机分配床型 | 无窗 | 新风系统
+CNY 505
+大床房
+1张1.5米双人床
+CNY 511`, "大床无早餐");
+
+    const selected = selectZtripHotelRateForRatePlan(rates, "大床无早餐");
+
+    expect(selected).toMatchObject({
+      roomType: "大床房",
+      breakfast: "无早餐",
+      bedType: "大床",
+      price: 511
+    });
   });
 
   it("treats compatible door-number ranges as the same hotel only with city and address context", () => {
@@ -911,6 +986,43 @@ CNY 255`, "双床有早餐");
     });
   });
 
+  it("parses ctrip visible no-meal twin-bed rates as no-breakfast rates", () => {
+    const rates = parseCtripHotelMainRatesText(`全季酒店(北京天安门广场前门地铁站店)
+房间
+套餐
+双床房A（金可儿床垫+智能客控+小冰箱）
+NH1351
+无餐食
+现磨咖啡-小季伴手礼
+立即确认
+¥619
+订`, "双床无早餐");
+
+    expect(rates[0]).toMatchObject({
+      platform: "携程商旅",
+      roomType: "双床房A（金可儿床垫+智能客控+小冰箱）",
+      ratePlan: "双床无早餐",
+      price: 619
+    });
+  });
+
+  it("parses ctrip visible no-meal big-bed rates as no-breakfast rates", () => {
+    const rates = parseCtripHotelMainRatesText(`海友酒店(北京南站店)
+高级大床房
+R3JHEY
+无餐食
+立即确认
+¥303
+订`, "大床无早餐");
+
+    expect(rates[0]).toMatchObject({
+      platform: "携程商旅",
+      roomType: "高级大床房",
+      ratePlan: "大床无早餐",
+      price: 303
+    });
+  });
+
   it("parses ali hotel main big-bed with-breakfast rates", () => {
     const rates = parseAliHotelMainRatesText(`如家商旅(金标)-广州京溪南方医院地铁站店
 预订
@@ -1093,6 +1205,70 @@ CNY 260`);
     expect(classifyZtripHotelSearchReadiness("深圳", candidate, "加载中，请稍等... ¥146起 ¥154起")).toBe("loading");
     expect(classifyZtripHotelSearchReadiness("深圳", candidate, "维也纳酒店(深圳福田福华路店) 福华路73号 查看详情 CNY319")).toBe("target-candidate");
     expect(classifyZtripHotelSearchReadiness("深圳", candidate, "如家酒店深圳南山店 查看详情 CNY319")).toBe("finished-without-target");
+  });
+
+  it("does not treat ztrip default recommended hotels as matched hotels", () => {
+    const candidate = {
+      hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "白云区广州大道北1420号",
+      price: 218,
+      rawText: ""
+    };
+
+    expect(
+      classifyZtripHotelSearchReadiness(
+        "广州",
+        candidate,
+        "默认推荐酒店 如家商旅(金标)-广州东站燕塘店 天河区燕岭路13号 查看详情 CNY235"
+      )
+    ).toBe("finished-without-target");
+  });
+
+  it("rejects ztrip detail pages when the door plate differs", () => {
+    const query = { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-24", checkOutDate: "2026-05-25", nights: 1 };
+    const candidate = {
+      hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "白云区广州大道北1420号",
+      price: 218,
+      rawText: ""
+    };
+
+    expect(() =>
+      assertCompetitorHotelDetailSameByDoorPlate(
+        "在途商旅",
+        query,
+        candidate,
+        "在途酒店详情 如家商旅(金标)-广州东站燕塘店 广州市天河区燕岭路13号 客房 大床 CNY299"
+      )
+    ).toThrow("门牌号不一致");
+  });
+
+  it("rejects ztrip detail pages when the door plate is missing", () => {
+    const query = { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-24", checkOutDate: "2026-05-25", nights: 1 };
+    const candidate = {
+      hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "白云区广州大道北1420号",
+      price: 218,
+      rawText: ""
+    };
+
+    expect(() =>
+      assertCompetitorHotelDetailSameByDoorPlate(
+        "在途商旅",
+        query,
+        candidate,
+        "广州 如家商旅酒店(广州白云山京溪南方医院地铁站店) 白云同和/龙洞 客房 大床 CNY299"
+      )
+    ).toThrow("竞品页面缺少可提取门牌号");
   });
 
   it("puts ali hotel full-name and address keywords before loose fallback keywords", () => {
@@ -1299,6 +1475,61 @@ CNY 260`);
       matched: true,
       reason: "阿里列表候选：品牌+核心店名，待详情门牌确认",
       sameHotelConfirmed: false
+    });
+  });
+
+  it("lets ali list cards without door numbers enter detail but rejects wrong detail door plates", () => {
+    const candidate = {
+      hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "白云区广州大道北1420号",
+      price: 218,
+      rawText: ""
+    };
+    const selection = selectAliHotelListMatchFromCards(candidate, "广州", [
+      { index: 0, text: "如家商旅(金标)-广州京溪南方医院地铁站店 近京溪南方医院 ￥304起", screenIndex: 0 }
+    ]);
+    const firstDetailCandidate = selection.detailCandidates[0]!;
+    const outcome = resolveAliHotelDetailCandidateAttempts("广州", candidate, [{
+      ...firstDetailCandidate,
+      detailText: "酒店详情 如家商旅(金标)-广州京溪南方医院地铁站店 广州市天河区燕岭路13号"
+    }]);
+
+    expect(selection.matched).toBe(true);
+    expect(firstDetailCandidate.listMatchReason).toBe("阿里列表候选：品牌+核心店名，待详情门牌确认");
+    expect(outcome).toMatchObject({
+      matched: false,
+      attempts: [{ detailSameHotel: false, detailDoorNumber: "13号" }]
+    });
+    expect(outcome.failureReason).toContain("阿里详情门牌不匹配");
+  });
+
+  it("matches ali detail candidates only after the detail door plate is compatible", () => {
+    const candidate = {
+      hotelName: "如家酒店(杭州富阳富春江店)",
+      level: "经济型",
+      score: "4.6",
+      area: "",
+      address: "杭州市富阳区桂花路75-8号",
+      price: 128,
+      rawText: ""
+    };
+    const ranked = rankAliHotelDetailCandidateCards(candidate, "杭州", [
+      { index: 0, text: "如家酒店杭州富阳富春江店 近富阳城区 ￥128起", screenIndex: 0 }
+    ]);
+    const outcome = resolveAliHotelDetailCandidateAttempts("杭州", candidate, [{
+      ...ranked[0]!,
+      detailText: "酒店详情 如家酒店杭州富阳富春江店 杭州市富阳区桂花路77号"
+    }]);
+
+    expect(outcome).toMatchObject({
+      matched: true,
+      matchedCandidate: {
+        detailSameHotel: true,
+        detailDoorNumber: "77号"
+      }
     });
   });
 
@@ -2059,6 +2290,31 @@ CNY 260`);
     expect(result.quotes.map((quote) => quote.platform)).toEqual(["阿里商旅", "在途商旅"]);
   });
 
+  it("does not stop the remaining hotel rate plans after one platform quote failure in scale validation", () => {
+    expect(shouldStopHotelAllRatePlanCollectionAfterQuoteFailure({
+      platform: "携程商旅",
+      status: "not-found",
+      price: null,
+      hotelName: "海友酒店(北京南站店)",
+      roomType: "",
+      ratePlan: "大床无早餐",
+      finalUrl: "https://ct.ctrip.com/detail",
+      screenshotPath: "/tmp/ctrip.png",
+      error: "携程商旅同酒店详情页未解析到大床无早餐价格"
+    })).toBe(false);
+
+    expect(shouldStopHotelAllRatePlanCollectionAfterQuoteFailure({
+      platform: "青猫差旅",
+      status: "failed",
+      price: null,
+      hotelName: "全季酒店",
+      roomType: "",
+      ratePlan: "大床无早餐",
+      screenshotPath: "/tmp/qingmao.png",
+      error: "青猫无大床无早餐"
+    })).toBe(false);
+  });
+
   it("builds hotel scale validation dates from explicit dates or next-day default", () => {
     const defaultInput = buildHotelScaleValidationInput(new Date(2026, 4, 24, 10), {});
     expect(defaultInput).toEqual({
@@ -2103,6 +2359,122 @@ CNY 260`);
     expect(result.groups).toHaveLength(5);
     expect(result.groups.every((group) => group.targetCount === 8)).toBe(true);
     expect(getHotelScaleValidationGroupSearchKeywords("东呈")).toContain("宜尚");
+  });
+
+  it("initializes a 5-hotel scale validation smoke run as one hotel per group", () => {
+    const result = buildInitialHotelScaleValidationResult(new Date(2026, 4, 24, 10), {
+      limit: 5
+    });
+
+    expect(result).toMatchObject({
+      targetTotal: 5,
+      targetPerGroup: 1,
+      unattemptedCount: 5
+    });
+    expect(result.groups).toHaveLength(5);
+    expect(result.groups.map((group) => group.targetCount)).toEqual([1, 1, 1, 1, 1]);
+    expect(result.groups.every((group) => group.unattemptedCount === 1)).toBe(true);
+  });
+
+  it("builds a human-readable hotel diagnostic review page with inline screenshots", () => {
+    const result = buildInitialHotelScaleValidationResult(new Date(2026, 4, 24, 10), { limit: 5 });
+    result.groups[0].samples.push({
+      group: "华住",
+      groupIndex: 1,
+      sampleIndex: 1,
+      status: "partial",
+      selectedCandidate: {
+        hotelName: "全季酒店(北京天安门广场前门地铁站店)",
+        level: "舒适型",
+        score: "4.8",
+        area: "北京",
+        address: "西城区大栅栏西街15号",
+        price: 690,
+        rawText: "全季酒店"
+      },
+      quotes: [
+        {
+          platform: "携程商旅",
+          status: "not-found",
+          price: null,
+          hotelName: "全季酒店(北京天安门广场前门地铁站店)",
+          roomType: "",
+          ratePlan: "双床无早餐",
+          screenshotPath: "/tmp/run/华住/hotel-01/双床无早餐/携程商旅.png",
+          error: "携程商旅同酒店详情页未解析到双床无早餐价格"
+        },
+        {
+          platform: "青猫差旅",
+          status: "available",
+          price: 619,
+          hotelName: "全季酒店(北京天安门广场前门地铁站店)",
+          roomType: "双床房",
+          ratePlan: "双床无早餐",
+          screenshotPath: "/tmp/run/华住/hotel-01/双床无早餐/青猫差旅.png"
+        }
+      ],
+      message: "全季酒店 4 个口径已全部尝试"
+    });
+
+    const html = buildHotelDiagnosticReviewHtml(result, { htmlPath: "/tmp/run/diagnostic-review.html" });
+
+    expect(html).toContain("酒店诊断人工验收页");
+    expect(html).toContain("全季酒店(北京天安门广场前门地铁站店)");
+    expect(html).toContain("系统没读到价格，请人工看截图");
+    expect(html).toContain("双床无早餐");
+    expect(html).toContain("src=\"%E5%8D%8E%E4%BD%8F/hotel-01/%E5%8F%8C%E5%BA%8A%E6%97%A0%E6%97%A9%E9%A4%90/%E6%90%BA%E7%A8%8B%E5%95%86%E6%97%85.png\"");
+    expect(html).toContain("data-lightbox-src=\"%E5%8D%8E%E4%BD%8F/hotel-01/%E5%8F%8C%E5%BA%8A%E6%97%A0%E6%97%A9%E9%A4%90/%E6%90%BA%E7%A8%8B%E5%95%86%E6%97%85.png\"");
+    expect(html).toContain("点击看大图");
+    expect(html).toContain("id=\"imageLightbox\"");
+  });
+
+  it("shows Ali hotel search process evidence on the human review page", () => {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "hotel-review-"));
+    const rateDir = path.join(runDir, "首旅如家", "hotel-01", "大床无早餐");
+    fs.mkdirSync(rateDir, { recursive: true });
+    const mainShot = path.join(rateDir, "阿里商旅-酒店主口径大床无早餐.png");
+    const listShot = path.join(rateDir, "alibtrip-keyword-07-list.png");
+    const cardShot = path.join(rateDir, "alibtrip-keyword-07-selected-card-01.png");
+    const detailShot = path.join(rateDir, "alibtrip-keyword-07-detail-01.png");
+    for (const filePath of [mainShot, listShot, cardShot, detailShot]) {
+      fs.writeFileSync(filePath, "fake");
+    }
+    const result = buildInitialHotelScaleValidationResult(new Date(2026, 4, 24, 10), { limit: 5 });
+    result.groups[0].samples.push({
+      group: "首旅如家",
+      groupIndex: 1,
+      sampleIndex: 1,
+      status: "partial",
+      selectedCandidate: {
+        hotelName: "如家商旅酒店(北京天安门广场前门地铁站店)",
+        level: "舒适型",
+        score: "4.8",
+        area: "北京",
+        address: "西城区前门西河沿街114号",
+        price: 690,
+        rawText: "如家商旅"
+      },
+      quotes: [
+        {
+          platform: "阿里商旅",
+          status: "not-found",
+          price: null,
+          hotelName: "如家商旅酒店(北京天安门广场前门地铁站店)",
+          roomType: "",
+          ratePlan: "大床无早餐",
+          screenshotPath: mainShot,
+          error: "阿里商旅同酒店详情页未解析到大床无早餐价格"
+        }
+      ]
+    });
+
+    const html = buildHotelDiagnosticReviewHtml(result, { htmlPath: path.join(runDir, "diagnostic-review.html") });
+
+    expect(html).toContain("阿里过程证据");
+    expect(html).toContain("搜索列表");
+    expect(html).toContain("命中酒店卡片");
+    expect(html).toContain("详情页截图");
+    expect(html).toContain("alibtrip-keyword-07-selected-card-01.png");
   });
 
   it("stops hotel scale validation on group and overall budgets", () => {
@@ -2951,13 +3323,88 @@ CNY 260`);
   });
 
   it("still fails final ctrip confirmation when the detail page door plate differs", () => {
+    const query = { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-24", checkOutDate: "2026-05-25", nights: 1 };
+    const candidate = {
+      hotelName: "如家商旅酒店(广州永庆坊荔湾湖公园店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "荔湾区黄沙大道144号",
+      price: 264,
+      rawText: ""
+    };
+    const similarNameWrongDoor = "如家商旅酒店(广州永庆坊荔湾湖公园店) 广州市荔湾区中山八路12号 大床房 2份早餐 ¥299";
+
+    expect(scoreHotelNameMatch(candidate.hotelName, similarNameWrongDoor)).toBeGreaterThanOrEqual(6);
     expect(
       isSameHotelByCityAndDoorPlate(
         "广州",
-        "荔湾区黄沙大道144号",
-        "如家商旅酒店(广州中山八地铁站店) 广州市荔湾区中山八路12号 大床房 2份早餐 ¥299"
+        candidate.address,
+        similarNameWrongDoor
       )
     ).toBe(false);
+    expect(() =>
+      assertCompetitorHotelDetailSameByDoorPlate("携程商旅", query, candidate, similarNameWrongDoor)
+    ).toThrow("门牌号不一致");
+  });
+
+  it("continues ctrip keyword attempts after the first keyword opens a different door plate", () => {
+    const query = { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-24", checkOutDate: "2026-05-25", nights: 1 };
+    const candidate = {
+      hotelName: "如家商旅酒店(广州永庆坊荔湾湖公园店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "荔湾区黄沙大道144号",
+      price: 264,
+      rawText: ""
+    };
+    const keywords = buildHotelSearchKeywords(query, candidate);
+    const firstAttempt = evaluateCtripHotelDetailKeywordAttempt(
+      query,
+      candidate,
+      keywords[0],
+      "如家商旅酒店(广州中山八地铁站店) 广州市荔湾区中山八路12号"
+    );
+    const secondAttempt = evaluateCtripHotelDetailKeywordAttempt(
+      query,
+      candidate,
+      keywords[1],
+      "如家商旅酒店(广州永庆坊荔湾湖公园店) 广州市荔湾区黄沙大道144号"
+    );
+
+    expect(firstAttempt).toMatchObject({
+      sameHotel: false,
+      shouldTryNextKeyword: true,
+      matchBasis: "门牌号不一致"
+    });
+    expect(secondAttempt).toMatchObject({
+      sameHotel: true,
+      shouldTryNextKeyword: false,
+      matchBasis: "同城市同道路且门牌号兼容"
+    });
+  });
+
+  it("does not auto-match ctrip detail pages when the door plate is missing", () => {
+    const query = { city: "广州", keyword: "如家商旅", checkInDate: "2026-05-24", checkOutDate: "2026-05-25", nights: 1 };
+    const candidate = {
+      hotelName: "如家商旅酒店(广州永庆坊荔湾湖公园店)",
+      level: "舒适型",
+      score: "4.7",
+      area: "",
+      address: "荔湾区黄沙大道144号",
+      price: 264,
+      rawText: ""
+    };
+
+    expect(() =>
+      assertCompetitorHotelDetailSameByDoorPlate(
+        "携程商旅",
+        query,
+        candidate,
+        "广州 如家商旅酒店(广州永庆坊荔湾湖公园店) 永庆坊/上下九步行街 大床房 2份早餐 ¥299"
+      )
+    ).toThrow("竞品页面缺少可提取门牌号");
   });
 
   it("extracts ctrip hotel id from selectedSearchItem or searchFilter before opening detail", () => {

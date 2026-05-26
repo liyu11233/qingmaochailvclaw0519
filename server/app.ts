@@ -227,12 +227,17 @@ function parseHotelScaleValidationInput(value: unknown): { ok: true; input: Hote
 
   const checkInDate = typeof value.checkInDate === "string" ? value.checkInDate.trim() : undefined;
   const checkOutDate = typeof value.checkOutDate === "string" ? value.checkOutDate.trim() : undefined;
+  const limit = typeof value.limit === "number" ? value.limit : undefined;
+
+  if (value.limit !== undefined && (!Number.isInteger(limit) || !limit || limit < 5 || limit > 40 || limit % 5 !== 0)) {
+    return { ok: false, error: "limit 必须是 5 到 40 之间的 5 的倍数" };
+  }
 
   if ((checkInDate && !checkOutDate) || (!checkInDate && checkOutDate)) {
     return { ok: false, error: "checkInDate 和 checkOutDate 必须同时传入" };
   }
   if (!checkInDate && !checkOutDate) {
-    return { ok: true, input: {} };
+    return { ok: true, input: limit ? { limit } : {} };
   }
   if (!checkInDate || !checkOutDate || !/^\d{4}-\d{2}-\d{2}$/.test(checkInDate) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOutDate)) {
     return { ok: false, error: "checkInDate 和 checkOutDate 必须是 YYYY-MM-DD" };
@@ -248,7 +253,8 @@ function parseHotelScaleValidationInput(value: unknown): { ok: true; input: Hote
     ok: true,
     input: {
       checkInDate,
-      checkOutDate
+      checkOutDate,
+      ...(limit ? { limit } : {})
     }
   };
 }
