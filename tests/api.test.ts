@@ -193,6 +193,19 @@ describe("management API", () => {
         updatedAt: null,
         message: "等待严格单酒店诊断"
       })),
+      getHotelSingleAllRatePlansStatus: vi.fn(() => ({
+        status: "idle",
+        mode: "single-all-rate-plans",
+        input: null,
+        query: null,
+        selectedCandidate: null,
+        sourceHotel: null,
+        platformOrder: ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"],
+        platforms: [],
+        completeRatePlans: [],
+        updatedAt: null,
+        message: "等待指定单酒店一次性四口径复验"
+      })),
       getAliHotelSingleVerifyStatus: vi.fn(() => ({
         status: "idle",
         input: null,
@@ -494,6 +507,62 @@ describe("management API", () => {
         ],
         updatedAt: "2026-05-18T10:04:00.000Z",
         message: "严格单酒店诊断完成"
+      })),
+      runHotelSingleAllRatePlansProbe: vi.fn(async (input) => ({
+        status: "partial",
+        mode: "single-all-rate-plans",
+        input,
+        query: { ...input, nights: 1 },
+        selectedCandidate: {
+          hotelName: input.keyword,
+          level: "舒适型",
+          score: "4.8",
+          area: input.city,
+          address: "东城区北京站街8号",
+          price: 520,
+          rawText: `${input.keyword} 东城区北京站街8号`
+        },
+        sourceHotel: {
+          hotelName: input.keyword,
+          city: input.city,
+          address: "东城区北京站街8号",
+          doorPlate: "北京站街8号",
+          rawText: `${input.keyword} 东城区北京站街8号`
+        },
+        platformOrder: ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"],
+        platforms: ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"].map((platform, index) => ({
+          platform,
+          sameHotel: true,
+          matchBasis: index === 0 ? "青猫候选源酒店" : "同城市同门牌号一致",
+          platformHotelName: input.keyword,
+          platformAddress: "东城区北京站街8号",
+          platformDoorPlate: "北京站街8号",
+          hasMainRate: true,
+          mainRatePrice: 530 + index,
+          otherRates: {
+            大床无早餐: 500 + index,
+            双床有早餐: index === 3 ? null : 560 + index,
+            双床无早餐: 540 + index
+          },
+          ratePrices: {
+            大床无早餐: 500 + index,
+            大床有早餐: 530 + index,
+            双床无早餐: 540 + index,
+            双床有早餐: index === 3 ? null : 560 + index
+          },
+          durationMs: 1000 + index,
+          failureType: index === 3 ? "competitor_no_main_rate" : null,
+          failureReason: index === 3 ? "在途商旅未找到双床有早餐价格" : "",
+          screenshotPath: path.resolve(`outputs/current/pilot/hotel-single-all-rate-plans/test-run/${index + 1}.png`),
+          finalUrl: "https://example.com/hotel",
+          pageTextSummary: "酒店详情 大床 双床 早餐 价格"
+        })),
+        completeRatePlans: ["大床无早餐", "大床有早餐", "双床无早餐"],
+        artifactDir: path.resolve("outputs/current/pilot/hotel-single-all-rate-plans/test-run"),
+        resultPath: path.resolve("outputs/current/pilot/hotel-single-all-rate-plans/test-run/result.json"),
+        diagnosticReviewPath: path.resolve("outputs/current/pilot/hotel-single-all-rate-plans/test-run/diagnostic-review.html"),
+        updatedAt: "2026-05-18T10:04:05.000Z",
+        message: "指定单酒店一次性四口径复验完成：完整口径 3/4"
       })),
       runAliHotelSingleVerifyProbe: vi.fn(async (input) => ({
         status: "completed",
@@ -1269,6 +1338,57 @@ describe("management API", () => {
     });
     expect(pilotCollector.runHotelSingleDiagnosisProbe).toHaveBeenCalledWith(singleDiagnosisInput);
 
+    const singleAllRatePlansStatus = await request(app).get("/api/pilot/hotel-single-all-rate-plans/status").expect(200);
+    expect(singleAllRatePlansStatus.body).toMatchObject({
+      status: "idle",
+      mode: "single-all-rate-plans",
+      platformOrder: ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"]
+    });
+
+    const singleAllRatePlansInput = {
+      city: "北京",
+      keyword: "全季酒店(北京站店)",
+      checkInDate: "2026-05-28",
+      checkOutDate: "2026-05-29"
+    };
+    const singleAllRatePlans = await request(app).post("/api/pilot/hotel-single-all-rate-plans/run").send(singleAllRatePlansInput).expect(200);
+    expect(singleAllRatePlans.body).toMatchObject({
+      status: "partial",
+      mode: "single-all-rate-plans",
+      input: singleAllRatePlansInput,
+      selectedCandidate: {
+        hotelName: "全季酒店(北京站店)",
+        address: "东城区北京站街8号"
+      },
+      sourceHotel: {
+        doorPlate: "北京站街8号"
+      },
+      completeRatePlans: ["大床无早餐", "大床有早餐", "双床无早餐"],
+      resultUrl: "/outputs/current/pilot/hotel-single-all-rate-plans/test-run/result.json",
+      diagnosticReviewUrl: "/outputs/current/pilot/hotel-single-all-rate-plans/test-run/diagnostic-review.html"
+    });
+    expect(singleAllRatePlans.body.platforms).toHaveLength(4);
+    expect(singleAllRatePlans.body.platforms[0]).toMatchObject({
+      platform: "青猫差旅",
+      sameHotel: true,
+      ratePrices: {
+        大床无早餐: 500,
+        大床有早餐: 530,
+        双床无早餐: 540,
+        双床有早餐: 560
+      },
+      screenshotUrl: "/outputs/current/pilot/hotel-single-all-rate-plans/test-run/1.png"
+    });
+    expect(singleAllRatePlans.body.platforms[3]).toMatchObject({
+      platform: "在途商旅",
+      sameHotel: true,
+      ratePrices: {
+        双床有早餐: null
+      }
+    });
+    expect(pilotCollector.runHotelSingleAllRatePlansProbe).toHaveBeenCalledWith(singleAllRatePlansInput);
+    await request(app).post("/api/pilot/hotel-single-all-rate-plans/run").send({ city: "北京", checkInDate: "2026-05-28", checkOutDate: "2026-05-29" }).expect(400);
+
     const aliSingleStatus = await request(app).get("/api/pilot/ali-hotel-single/status").expect(200);
     expect(aliSingleStatus.body.status).toBe("idle");
 
@@ -1540,6 +1660,19 @@ describe("management API", () => {
         updatedAt: null,
         message: "等待严格单酒店诊断"
       })),
+      getHotelSingleAllRatePlansStatus: vi.fn(() => ({
+        status: "idle",
+        mode: "single-all-rate-plans",
+        input: null,
+        query: null,
+        selectedCandidate: null,
+        sourceHotel: null,
+        platformOrder: ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"],
+        platforms: [],
+        completeRatePlans: [],
+        updatedAt: null,
+        message: "等待指定单酒店一次性四口径复验"
+      })),
       getAliHotelSingleVerifyStatus: vi.fn(() => ({
         status: "idle",
         input: null,
@@ -1678,6 +1811,7 @@ describe("management API", () => {
       runHotelMainRateProbe: vi.fn(),
       runHotelGroupMainRateProbe: vi.fn(),
       runHotelSingleDiagnosisProbe: vi.fn(),
+      runHotelSingleAllRatePlansProbe: vi.fn(),
       runAliHotelSingleVerifyProbe: vi.fn(),
       runAliHotelMatchProbe: vi.fn(),
       runHotelRatePlanProbe: vi.fn(),

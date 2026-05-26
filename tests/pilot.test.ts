@@ -64,9 +64,12 @@ import {
   parseQingmaoInternationalFlightCandidatesText,
   readHotelCalibrationRatesFromText,
   resolveHotelCalibrationPlatformOrder,
+  buildZtripSingleAllRatePlanReadSteps,
   isHotelCalibrationSampleComplete,
   selectHotelCalibrationDefaultRatePlan,
+  selectLowestHotelMainRateQuote,
   selectZtripHotelRateForRatePlan,
+  shouldExpandZtripRoomCardForLowestRate,
   shouldStopHotelAllRatePlanCollectionAfterQuoteFailure,
   resolveHotelSmallBatchBudgetStop,
   resolveHotelSmallBatchOverallBudgetStop,
@@ -75,6 +78,7 @@ import {
   summarizeHotelSmallBatchGroups,
   aggregateHotelScaleValidationTimings,
   buildHotelDiagnosticReviewHtml,
+  buildHotelSingleAllRatePlansReviewHtml,
   buildHotelScaleValidationInput,
   buildInitialHotelScaleValidationResult,
   evaluateHotelScaleValidationEvidence,
@@ -537,7 +541,7 @@ CNY 260
     });
   });
 
-  it("prefers explicit ztrip room prices over random bed assignment rates", () => {
+  it("selects the lowest ztrip price within the same rate plan", () => {
     const rates = parseZtripHotelRatesTextForRatePlan(`如家商旅酒店
 5月27日
 1晚
@@ -554,11 +558,34 @@ CNY 511`, "大床无早餐");
     const selected = selectZtripHotelRateForRatePlan(rates, "大床无早餐");
 
     expect(selected).toMatchObject({
-      roomType: "大床房",
+      roomType: "大床房A",
       breakfast: "无早餐",
       bedType: "大床",
-      price: 511
+      price: 505
     });
+  });
+
+  it("decides whether ztrip room cards need expansion by outer price and rate clarity", () => {
+    expect(shouldExpandZtripRoomCardForLowestRate({
+      currentLowestPrice: 260,
+      outerPrice: 310,
+      ratePlanClear: true
+    })).toBe(false);
+    expect(shouldExpandZtripRoomCardForLowestRate({
+      currentLowestPrice: 260,
+      outerPrice: null,
+      ratePlanClear: true
+    })).toBe(true);
+    expect(shouldExpandZtripRoomCardForLowestRate({
+      currentLowestPrice: 260,
+      outerPrice: 240,
+      ratePlanClear: true
+    })).toBe(true);
+    expect(shouldExpandZtripRoomCardForLowestRate({
+      currentLowestPrice: 260,
+      outerPrice: 310,
+      ratePlanClear: false
+    })).toBe(true);
   });
 
   it("treats compatible door-number ranges as the same hotel only with city and address context", () => {
@@ -1076,7 +1103,7 @@ R3JHEY
     });
   });
 
-  it("skips random bed assignment text even when the same rate block confirms the bed type", () => {
+  it("keeps random bed assignment text when the main room type confirms the bed type", () => {
     const qingmaoRates = parseQingmaoHotelMainRatesText(`如家商旅酒店
 安心睡0压大床房
 到店随机分配床型
@@ -1101,20 +1128,109 @@ R3JHEY
 280
 在线付`, "大床有早餐");
 
-    expect(qingmaoRates).toHaveLength(0);
-    expect(ctripRates).toHaveLength(0);
-    expect(aliRates).toHaveLength(0);
+    expect(qingmaoRates[0]).toMatchObject({ platform: "青猫差旅", roomType: "安心睡0压大床房", price: 280 });
+    expect(ctripRates[0]).toMatchObject({ platform: "携程商旅", roomType: "安心睡0压大床房", price: 280 });
+    expect(aliRates[0]).toMatchObject({ platform: "阿里商旅", roomType: "安心睡0压大床房", price: 280 });
   });
 
   it("does not force a random-bed rate into a bed type when no bed signal exists", () => {
-    const rates = parseCtripHotelMainRatesText(`如家商旅酒店
+    const qingmaoRates = parseQingmaoHotelMainRatesText(`如家商旅酒店
+特惠房
+房型待定
+2份早餐
+￥280
+起`, "大床有早餐");
+    const ctripRates = parseCtripHotelMainRatesText(`如家商旅酒店
 特惠房
 到店随机分配床型
 2份早餐
 ¥280
 订`, "大床有早餐");
+    const aliRates = parseAliHotelMainRatesText(`如家商旅酒店
+特惠房
+随机床型
+2份早餐
+￥
+280
+在线付`, "大床有早餐");
 
-    expect(rates).toEqual([]);
+    expect(qingmaoRates).toEqual([]);
+    expect(ctripRates).toEqual([]);
+    expect(aliRates).toEqual([]);
+  });
+
+  it("selects the lowest available quote within the same hotel rate plan", () => {
+    const qingmaoRates = parseQingmaoHotelMainRatesText(`如家商旅酒店
+高级大床房
+2份早餐
+￥320
+起
+商务大床房
+2份早餐
+￥260
+起`, "大床有早餐");
+    const ctripRates = parseCtripHotelMainRatesText(`如家商旅酒店
+高级大床房
+2份早餐
+¥380
+订
+商务大床房
+2份早餐
+¥260
+订`, "大床有早餐");
+    const aliRates = parseAliHotelMainRatesText(`如家商旅酒店
+高级大床房
+大床
+2份早餐
+￥
+380
+在线付
+商务大床房
+大床
+2份早餐
+￥
+260
+在线付`, "大床有早餐");
+
+    expect(selectLowestHotelMainRateQuote(qingmaoRates)).toMatchObject({ platform: "青猫差旅", roomType: "商务大床房", price: 260 });
+    expect(selectLowestHotelMainRateQuote(ctripRates)).toMatchObject({ platform: "携程商旅", roomType: "商务大床房", price: 260 });
+    expect(selectLowestHotelMainRateQuote(aliRates)).toMatchObject({ platform: "阿里商旅", roomType: "商务大床房", price: 260 });
+  });
+
+  it("keeps qingmao no-breakfast and breakfast package prices separate inside one room card", () => {
+    const rawText = `全季酒店(北京站店)
+大床房
+大床 1.51米 22㎡ 无窗 可住2人
+无早
+限时取消
+￥ 494 起
+在线预订
+1份早餐
+免费取消
+￥ 534 起
+在线预订`;
+
+    expect(selectLowestHotelMainRateQuote(parseQingmaoHotelMainRatesText(rawText, "大床无早餐"))).toMatchObject({
+      platform: "青猫差旅",
+      roomType: "大床房",
+      ratePlan: "大床无早餐",
+      price: 494
+    });
+    expect(selectLowestHotelMainRateQuote(parseQingmaoHotelMainRatesText(rawText, "大床有早餐"))).toMatchObject({
+      platform: "青猫差旅",
+      roomType: "大床房",
+      ratePlan: "大床有早餐",
+      price: 534
+    });
+  });
+
+  it("plans ztrip single-hotel all-rate read as clear filters then one filtered pass per rate plan", () => {
+    expect(buildZtripSingleAllRatePlanReadSteps()).toEqual([
+      { ratePlan: "大床无早餐", clearFilters: true, filterLabels: ["大床", "无早餐"], expandRoomCards: true, stopAtUnmatchedProducts: true },
+      { ratePlan: "大床有早餐", clearFilters: true, filterLabels: ["大床", "含早餐"], expandRoomCards: true, stopAtUnmatchedProducts: true },
+      { ratePlan: "双床无早餐", clearFilters: true, filterLabels: ["双床", "无早餐"], expandRoomCards: true, stopAtUnmatchedProducts: true },
+      { ratePlan: "双床有早餐", clearFilters: true, filterLabels: ["双床", "含早餐"], expandRoomCards: true, stopAtUnmatchedProducts: true }
+    ]);
   });
 
   it("reads calibration main and other rate prices from the same page text", () => {
@@ -2477,6 +2593,73 @@ CNY 260`);
     expect(html).toContain("alibtrip-keyword-07-selected-card-01.png");
   });
 
+  it("builds a single-hotel all-rate-plans review page from platform rate prices", () => {
+    const html = buildHotelSingleAllRatePlansReviewHtml({
+      status: "partial",
+      mode: "single-all-rate-plans",
+      input: {
+        city: "北京",
+        keyword: "全季酒店(北京站店)",
+        checkInDate: "2026-05-28",
+        checkOutDate: "2026-05-29"
+      },
+      query: {
+        city: "北京",
+        keyword: "全季酒店(北京站店)",
+        checkInDate: "2026-05-28",
+        checkOutDate: "2026-05-29",
+        nights: 1
+      },
+      selectedCandidate: {
+        hotelName: "全季酒店(北京站店)",
+        level: "舒适型",
+        score: "4.8",
+        area: "北京",
+        address: "东城区北京站街8号",
+        price: 520,
+        rawText: "全季酒店(北京站店) 东城区北京站街8号"
+      },
+      sourceHotel: {
+        hotelName: "全季酒店(北京站店)",
+        city: "北京",
+        address: "东城区北京站街8号",
+        doorPlate: "北京站街8号",
+        rawText: "全季酒店(北京站店) 东城区北京站街8号"
+      },
+      platformOrder: ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"],
+      platforms: [
+        calibrationPlatform("青猫差旅", { 大床无早餐: 500, 大床有早餐: 530, 双床无早餐: 540, 双床有早餐: 560 }),
+        calibrationPlatform("携程商旅", { 大床无早餐: 510, 大床有早餐: 535, 双床无早餐: 545, 双床有早餐: 565 }),
+        calibrationPlatform("阿里商旅", { 大床无早餐: 505, 大床有早餐: 532, 双床无早餐: 542, 双床有早餐: 562 }),
+        {
+          ...calibrationPlatform("在途商旅", { 大床无早餐: 515, 大床有早餐: 538, 双床无早餐: 548, 双床有早餐: null }),
+          failureReason: "在途商旅未找到双床有早餐价格",
+          screenshotPath: "/tmp/run/ztrip.png"
+        }
+      ],
+      completeRatePlans: ["大床无早餐", "大床有早餐", "双床无早餐"],
+      resultPath: "/tmp/run/result.json",
+      diagnosticReviewPath: "/tmp/run/diagnostic-review.html",
+      updatedAt: "2026-05-18T10:04:05.000Z",
+      message: "指定单酒店一次性四口径复验完成：完整口径 3/4"
+    }, { htmlPath: "/tmp/run/diagnostic-review.html" });
+
+    expect(html).toContain("指定单酒店四口径验收页");
+    expect(html).toContain("全季酒店(北京站店)");
+    expect(html).toContain("大床无早餐");
+    expect(html).toContain("双床有早餐");
+    expect(html).toContain("青猫差旅");
+    expect(html).toContain("携程商旅");
+    expect(html).toContain("阿里商旅");
+    expect(html).toContain("在途商旅");
+    expect(html).toContain("¥500");
+    expect(html).toContain("在途商旅未找到双床有早餐价格");
+    expect(html).toContain("src=\"ztrip.png\"");
+    expect(html).toContain("data-lightbox-src=\"ztrip.png\"");
+    expect(html).toContain("点击看大图");
+    expect(html).toContain("id=\"imageLightbox\"");
+  });
+
   it("stops hotel scale validation on group and overall budgets", () => {
     expect(resolveHotelScaleValidationBudgetStop({
       maxAttempts: 0,
@@ -2510,7 +2693,7 @@ CNY 260`);
       excluded: false,
       reason: ""
     });
-    expect(parseCtripHotelMainRatesText("测试酒店\n高级大床房\n到店安排\n2份早餐\n¥320", "大床有早餐")).toHaveLength(0);
+    expect(parseCtripHotelMainRatesText("测试酒店\n高级大床房\n到店安排\n2份早餐\n¥320", "大床有早餐")).toHaveLength(1);
     expect(extractExcludedHotelRateRowsFromText("携程商旅", "测试酒店\n高级大床房\n到店安排\n2份早餐\n¥320")).toEqual([
       {
         platform: "携程商旅",

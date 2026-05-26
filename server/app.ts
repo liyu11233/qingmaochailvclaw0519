@@ -19,6 +19,8 @@ import {
   type HotelGroupMainRateProbeResult,
   type HotelSmallBatchProbeResult,
   type HotelMainRateProbeResult,
+  type HotelSingleAllRatePlansInput,
+  type HotelSingleAllRatePlansResult,
   type HotelSingleDiagnosisInput,
   type HotelSingleDiagnosisProbeResult,
   type HotelRatePlanProbeResult,
@@ -54,6 +56,7 @@ interface AppState {
   hotelSmallBatch: HotelSmallBatchProbeResult;
   hotelScaleValidation: HotelScaleValidationResult;
   hotelSingleDiagnosis: HotelSingleDiagnosisProbeResult;
+  hotelSingleAllRatePlans: HotelSingleAllRatePlansResult;
   aliHotelSingleVerify: AliHotelSingleVerifyResult;
   aliHotelMatch: AliHotelMatchProbeResult;
   hotelRatePlanProbe: HotelRatePlanProbeResult;
@@ -127,6 +130,40 @@ function parseHotelSingleDiagnosisInput(value: unknown): { ok: true; input: Hote
       checkInDate,
       checkOutDate,
       ratePlan: ratePlan as HotelSingleDiagnosisInput["ratePlan"]
+    }
+  };
+}
+
+function parseHotelSingleAllRatePlansInput(value: unknown): { ok: true; input: HotelSingleAllRatePlansInput } | { ok: false; error: string } {
+  if (!isRecord(value)) {
+    return { ok: false, error: "请求体必须是对象" };
+  }
+
+  const city = typeof value.city === "string" ? value.city.trim() : "";
+  const keyword = typeof value.keyword === "string" ? value.keyword.trim() : "";
+  const checkInDate = typeof value.checkInDate === "string" ? value.checkInDate.trim() : "";
+  const checkOutDate = typeof value.checkOutDate === "string" ? value.checkOutDate.trim() : "";
+
+  if (!city || !keyword || !checkInDate || !checkOutDate) {
+    return { ok: false, error: "city、keyword、checkInDate、checkOutDate 均为必填" };
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(checkInDate) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOutDate)) {
+    return { ok: false, error: "checkInDate 和 checkOutDate 必须是 YYYY-MM-DD" };
+  }
+
+  const checkIn = parseDateOnly(checkInDate);
+  const checkOut = parseDateOnly(checkOutDate);
+  if (!checkIn || !checkOut || checkOut.getTime() <= checkIn.getTime()) {
+    return { ok: false, error: "checkOutDate 必须晚于 checkInDate" };
+  }
+
+  return {
+    ok: true,
+    input: {
+      city,
+      keyword,
+      checkInDate,
+      checkOutDate
     }
   };
 }
@@ -314,6 +351,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     hotelSmallBatch: pilotCollector.getHotelSmallBatchStatus(),
     hotelScaleValidation: pilotCollector.getHotelScaleValidationStatus(),
     hotelSingleDiagnosis: pilotCollector.getHotelSingleDiagnosisStatus(),
+    hotelSingleAllRatePlans: pilotCollector.getHotelSingleAllRatePlansStatus(),
     aliHotelSingleVerify: pilotCollector.getAliHotelSingleVerifyStatus(),
     aliHotelMatch: pilotCollector.getAliHotelMatchStatus(),
     hotelRatePlanProbe: pilotCollector.getHotelRatePlanProbeStatus(),
@@ -497,6 +535,25 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
           screenshotUrl: toOutputUrl(platform.screenshotPath)
         };
       })
+    };
+  }
+
+  function outputUrlIfServed(filePath: string | undefined) {
+    if (!filePath || path.relative(servedOutputsRoot, filePath).startsWith("..")) {
+      return undefined;
+    }
+    return toOutputUrl(filePath);
+  }
+
+  function decorateHotelSingleAllRatePlansResult(result: HotelSingleAllRatePlansResult): HotelSingleAllRatePlansResult {
+    return {
+      ...result,
+      resultUrl: outputUrlIfServed(result.resultPath) ?? result.resultUrl,
+      diagnosticReviewUrl: outputUrlIfServed(result.diagnosticReviewPath) ?? result.diagnosticReviewUrl,
+      platforms: result.platforms.map((platform) => ({
+        ...platform,
+        screenshotUrl: outputUrlIfServed(platform.screenshotPath) ?? platform.screenshotUrl
+      }))
     };
   }
 
@@ -819,6 +876,24 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     await runExclusiveOperation("严格单酒店诊断", res, next, async () => {
       state.hotelSingleDiagnosis = await pilotCollector.runHotelSingleDiagnosisProbe(parsed.input);
       return decorateHotelSingleDiagnosisResult(state.hotelSingleDiagnosis);
+    });
+  });
+
+  app.get("/api/pilot/hotel-single-all-rate-plans/status", (_req, res) => {
+    state.hotelSingleAllRatePlans = pilotCollector.getHotelSingleAllRatePlansStatus();
+    res.json(decorateHotelSingleAllRatePlansResult(state.hotelSingleAllRatePlans));
+  });
+
+  app.post("/api/pilot/hotel-single-all-rate-plans/run", async (req, res, next) => {
+    const parsed = parseHotelSingleAllRatePlansInput(req.body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+
+    await runExclusiveOperation("指定单酒店一次性四口径复验", res, next, async () => {
+      state.hotelSingleAllRatePlans = await pilotCollector.runHotelSingleAllRatePlansProbe(parsed.input);
+      return decorateHotelSingleAllRatePlansResult(state.hotelSingleAllRatePlans);
     });
   });
 
