@@ -258,7 +258,7 @@ export interface QingmaoHotelCandidateProbeResult {
 
 export interface HotelMainRateQuote {
   platform: PlatformName;
-  status: "available" | "not-found" | "failed" | "pending";
+  status: "available" | "not-found" | "platform-no-rate" | "parser-suspected-failed" | "failed" | "pending";
   price: number | null;
   hotelName: string;
   roomType: string;
@@ -2747,6 +2747,10 @@ function extractHotelDoorNumbers(text: string) {
 }
 
 export function extractHotelDoorNumber(text: string) {
+  const doorPlate = extractHotelDoorPlate(text);
+  if (doorPlate) {
+    return [...extractHotelDoorNumbers(doorPlate)].reverse()[0] ?? null;
+  }
   return [...extractHotelDoorNumbers(text)].reverse()[0] ?? null;
 }
 
@@ -3491,7 +3495,7 @@ export function extractHotelDoorPlate(address: string) {
   const normalized = normalizeAddressForMatch(address);
   const addressBody = normalized.replace(/^.*[区县市]/, "") || normalized;
   const matches = Array.from(
-    addressBody.matchAll(/([\u4e00-\u9fa5A-Za-z0-9]{1,24}(?:大道|大街|横路|横街|路|街|巷|弄|道|里|村)[东南西北中]?\d+(?:(?:[-－~～]|至)\d+)?号(?:之?\d+)?)/g)
+    addressBody.matchAll(/([\u4e00-\u9fa5A-Za-z0-9]{1,24}(?:大道|大街|横路|横街|路|街|巷|弄|道|里|村)[东南西北中]?\d+(?:(?:[-－~～]|至)\d+)?号)/g)
   ).map((match) => match[1]);
   return matches.length ? matches[matches.length - 1] : null;
 }
@@ -6106,16 +6110,101 @@ export async function waitForAliHotelDetailIdentityText(
   return bodyText;
 }
 
-async function waitForAliHotelDetailRooms(page: BrowserPage) {
+interface AliHotelDetailRoomsRead {
+  bodyText: string;
+  stable: boolean;
+  signature: string;
+  expansionClicks: number;
+}
+
+async function readAliHotelDetailRooms(page: BrowserPage): Promise<AliHotelDetailRoomsRead> {
+  let bodyText = "";
+  let loaded = false;
   for (let attempt = 0; attempt < 35; attempt += 1) {
-    const bodyText = await page.locator("body").innerText({ timeout: 3_000 }).catch(() => "");
+    bodyText = await page.locator("body").innerText({ timeout: 3_000 }).catch(() => "");
     if (/酒店详情|预订/.test(bodyText) && /早餐/.test(bodyText) && /[￥¥]\s*\d{2,5}/.test(bodyText)) {
-      return bodyText;
+      loaded = true;
+      break;
     }
     await page.waitForTimeout(1_000);
   }
 
-  throw new Error("阿里商旅酒店详情房型加载超时");
+  if (!loaded) {
+    throw new Error("阿里商旅酒店详情房型加载超时");
+  }
+
+  let bestBodyText = bodyText;
+  let lastSignature = "";
+  let stableRounds = 0;
+  let expansionClicks = 0;
+
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    expansionClicks += Number(await expandAliHotelDetailOffers(page));
+    await page.evaluate(`window.scrollBy(0, Math.max(600, Math.floor(window.innerHeight * 0.85)))`).catch(() => undefined);
+    await page.waitForTimeout(700).catch(() => undefined);
+    bodyText = await page.locator("body").innerText({ timeout: 3_000 }).catch(() => bodyText);
+    if (bodyText.length > bestBodyText.length) {
+      bestBodyText = bodyText;
+    }
+
+    const signature = aliHotelDetailRateTextSignature(bodyText);
+    if (signature === lastSignature && signature !== "0:0:0") {
+      stableRounds += 1;
+    } else {
+      stableRounds = 0;
+    }
+    lastSignature = signature;
+
+    if (stableRounds >= 2) {
+      return {
+        bodyText,
+        stable: true,
+        signature,
+        expansionClicks
+      };
+    }
+  }
+
+  return {
+    bodyText: bestBodyText,
+    stable: false,
+    signature: aliHotelDetailRateTextSignature(bestBodyText),
+    expansionClicks
+  };
+}
+
+async function waitForAliHotelDetailRooms(page: BrowserPage) {
+  return (await readAliHotelDetailRooms(page)).bodyText;
+}
+
+async function expandAliHotelDetailOffers(page: BrowserPage): Promise<number> {
+  const result = await page.evaluate(`(() => {
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const labels = /加载更多报价|更多报价|更多价格|查看其他更多价格|展开更多|展开报价/;
+    let clicked = 0;
+    for (const element of Array.from(document.querySelectorAll("button,a,div,span"))) {
+      const text = (element.textContent || "").replace(/\\s+/g, " ").trim();
+      if (!text || text.length > 40 || !labels.test(text) || !isVisible(element)) continue;
+      try {
+        element.scrollIntoView?.({ block: "center" });
+        element.click?.();
+        clicked += 1;
+      } catch {}
+    }
+    return clicked;
+  })()`).catch(() => 0);
+  return typeof result === "number" ? result : 0;
+}
+
+function aliHotelDetailRateTextSignature(rawText: string) {
+  const compact = rawText.replace(/\s+/g, " ").trim();
+  const priceCount = Array.from(compact.matchAll(/[￥¥]\s*\d{2,5}/g)).length;
+  const breakfastCount = Array.from(compact.matchAll(/含早餐|含早|1份早餐|单份早餐|单早|2份早餐|双份早餐|双早|无早餐|无早|不含早|无餐食/g)).length;
+  return `${breakfastCount}:${priceCount}:${compact.length}`;
 }
 
 async function scrollAliHotelDetailToRateEvidence(page: BrowserPage, ratePlan: HotelRatePlanLabel) {
@@ -6160,6 +6249,7 @@ async function searchAliHotelMainRateQuote(
   const diagnosisPath = path.join(artifactDir, "alibtrip-list-diagnosis.json");
   let detailPage: BrowserPage | null = null;
   let bodyText = "";
+  let detailRoomsRead: AliHotelDetailRoomsRead | null = null;
 
   try {
     await page.goto("https://travel.alibtrip.com/index.html#/hotel", { waitUntil: "domcontentloaded", timeout: 45_000 });
@@ -6175,7 +6265,8 @@ async function searchAliHotelMainRateQuote(
           artifactDir
         }, keywordPlan);
         detailPage = aliSelection.detailPage;
-        bodyText = await waitForAliHotelDetailRooms(detailPage);
+        detailRoomsRead = await readAliHotelDetailRooms(detailPage);
+        bodyText = detailRoomsRead.bodyText;
         const match = confirmAliHotelDetailDoorPlate(query.city, candidate, bodyText);
         if (!match.sameHotel) {
           throw new Error(match.failureReason || match.matchBasis);
@@ -6189,6 +6280,7 @@ async function searchAliHotelMainRateQuote(
         }
         detailPage = null;
         bodyText = "";
+        detailRoomsRead = null;
       }
     }
     if (lastError) {
@@ -6201,6 +6293,8 @@ async function searchAliHotelMainRateQuote(
     const rates = parseAliHotelMainRatesText(bodyText, ratePlan);
     const selectedRate = selectLowestHotelMainRateQuote(rates);
     const excludedRows = extractExcludedHotelRateRowsFromText("阿里商旅", bodyText);
+    const ratePlanDiagnosticText = buildAliHotelRatePlanDiagnosticText(bodyText, ratePlan);
+    const fallbackRawText = ratePlanDiagnosticText || excludedRows[0]?.rawText;
     const screenshotPath = path.join(artifactDir, hotelRatePlanEvidenceName("阿里商旅", ratePlan));
     await scrollAliHotelDetailToRateEvidence(detailPage, ratePlan);
     const evidencePath = await savePageEvidence(detailPage, screenshotPath, {
@@ -6208,24 +6302,39 @@ async function searchAliHotelMainRateQuote(
       finalUrl: detailPage.url(),
       bodyText,
       price: selectedRate?.price ?? null,
-      rawText: selectedRate?.rawText ?? excludedRows[0]?.rawText
+      rawText: selectedRate?.rawText ?? fallbackRawText
     });
 
     if (!selectedRate) {
+      const status = detailRoomsRead?.stable ? "platform-no-rate" : "parser-suspected-failed";
+      const sidecarPath = screenshotPath.replace(/\.[^.]+$/, ".html");
+      await writeEvidenceSnapshotHtml(sidecarPath, {
+        platform: "阿里商旅",
+        finalUrl: detailPage.url(),
+        bodyText,
+        price: null,
+        rawText: fallbackRawText,
+        error: status === "platform-no-rate"
+          ? `阿里商旅完整展开后未找到${ratePlan}价格`
+          : `阿里商旅报价区未稳定，未能确认${ratePlan}价格`
+      }).catch(() => undefined);
       return {
         platform: "阿里商旅",
-        status: "not-found",
+        status,
         price: null,
         hotelName: candidate.hotelName,
         roomType: "",
         ratePlan,
         finalUrl: detailPage.url(),
         screenshotPath: evidencePath,
+        diagnosisPath: sidecarPath,
         durationMs: Date.now() - startedAt,
-        rawText: excludedRows[0]?.rawText,
+        rawText: fallbackRawText,
         error: excludedRows.length
           ? `阿里商旅${ratePlan}价格行已过滤：${excludedRows.map((row) => row.reason).join("、")}`
-          : `阿里商旅同酒店详情页未解析到${ratePlan}价格`
+          : status === "platform-no-rate"
+            ? `阿里商旅完整展开后未找到${ratePlan}价格`
+            : `阿里商旅报价区未稳定，未能确认${ratePlan}价格`
       };
     }
 
@@ -6403,6 +6512,8 @@ export function classifyHotelCalibrationFailureType(reason: string, platform: Pl
   if (/超时|timeout/i.test(reason)) return "page_load_timeout";
   if (/旧日期|旧城市|日期|城市错误|页面状态|stale/i.test(reason)) return "stale_page_or_wrong_date";
   if (/门牌号|同酒店|同店|未匹配到同城市同门牌号|不是同一家/.test(reason)) return "competitor_no_same_hotel";
+  if (/报价区未稳定|解析不可靠|未能确认/.test(reason)) return "parser_suspected_failed";
+  if (/完整展开后未找到/.test(reason)) return "competitor_no_main_rate";
   if (/未找到.*大床有早餐|无.*大床有早餐|未解析到.*大床有早餐|未找到同口径价格/.test(reason)) return "competitor_no_main_rate";
   if (/解析|疑似/.test(reason)) return "parser_suspected_failed";
   if (/弹窗|遮挡|异常|页面|状态/.test(reason)) return "platform_page_state_error";
@@ -7857,7 +7968,7 @@ function buildHotelScalePageTextSummary(quotes: HotelMainRateQuote[]) {
 }
 
 function quoteNeedsHumanScreenshotCheck(quote: HotelMainRateQuote) {
-  return /未解析到|没读到|未读取到/.test(quote.error ?? "");
+  return quote.status === "parser-suspected-failed" || /未解析到|没读到|未读取到|未能确认/.test(quote.error ?? "");
 }
 
 function describeHotelDiagnosticQuote(quote: HotelMainRateQuote | undefined) {
@@ -7874,6 +7985,12 @@ function describeHotelDiagnosticQuote(quote: HotelMainRateQuote | undefined) {
       tone: "ok",
       reason: `${quote.roomType || "页面价格"}，¥${quote.price}`
     };
+  }
+  if (quote.status === "platform-no-rate") {
+    return { label: "平台没找到这个口径", tone: "missing", reason: quote.error ?? "完整展开后没有该口径报价。" };
+  }
+  if (quote.status === "parser-suspected-failed") {
+    return { label: "需要人工确认", tone: "review", reason: quote.error ?? "报价区未稳定，不能判定平台没有。" };
   }
 
   const reason = quote.error ?? "未说明原因";
@@ -11971,52 +12088,175 @@ export function parseAliHotelMainRatesText(rawText: string, ratePlan: HotelRateP
     .map((line) => line.trim())
     .filter(Boolean);
   const hotelName = lines.find((line) => line.length > 4 && /如家|酒店|宾馆/.test(line) && !/酒店详情|酒店预订|广州酒店|附近酒店|酒店介绍/.test(line)) ?? "";
-  const quotes: HotelMainRateQuote[] = [];
+  return buildAliHotelRoomBlocks(lines)
+    .flatMap((blockLines) => aliHotelRatesFromRoomBlock(blockLines, hotelName, ratePlan));
+}
 
+function buildAliHotelRoomBlocks(lines: string[]) {
+  const blocks: string[][] = [];
   for (let index = 0; index < lines.length; index += 1) {
-    const roomType = lines[index];
-    const bedPattern = hotelRatePlanBedPattern(ratePlan);
-    const excludedBed = hotelRatePlanBedType(ratePlan) === "大床" ? /双床|多床/ : /大床|多床/;
-    if (!bedPattern.test(roomType) || excludedBed.test(roomType) || roomType === "大床房" || roomType === "双床房") {
-      continue;
+    if (!isLikelyAliHotelRoomHeader(lines, index)) continue;
+    let endIndex = Math.min(lines.length, index + 36);
+    for (let nextIndex = index + 1; nextIndex < endIndex; nextIndex += 1) {
+      if (isLikelyAliHotelRoomHeader(lines, nextIndex)) {
+        endIndex = nextIndex;
+        break;
+      }
     }
+    blocks.push(lines.slice(index, endIndex));
+  }
+  return blocks;
+}
 
-    const snippetLines = boundedHotelRoomSnippet(lines, index, 24);
-    const snippet = snippetLines.join(" ");
-    const exclusionContext = [
-      ...lines.slice(Math.max(0, index - 2), index),
-      ...snippetLines
-    ].join(" ");
-    if (isHotelRateLineExcludedByBedAssignment(exclusionContext, { mainRoomTypeText: roomType }).excluded) {
-      continue;
-    }
-    const breakfastPattern = hotelRatePlanBreakfastPattern(ratePlan);
-    if (!breakfastPattern.test(snippet) || !bedPattern.test(snippet)) {
-      continue;
-    }
+function isLikelyAliHotelRoomHeader(lines: string[], index: number) {
+  const line = lines[index]?.trim() ?? "";
+  if (!line || line.length > 48 || /^\d+$/.test(line)) return false;
+  if (/[￥¥]|早餐|取消|入住|个人支付|在线付|可开专票|立即确认|预计|仅剩|加载更多|更多详情|酒店详情|酒店介绍|预订|评论|消息中心/.test(line)) return false;
 
-    const breakfastIndex = snippetLines.findIndex((line) => breakfastPattern.test(line));
-    if (breakfastIndex < 0) continue;
-    const afterBreakfast = snippetLines.slice(breakfastIndex).join(" ");
-    const priceValues = Array.from(afterBreakfast.matchAll(/[￥¥]\s*(\d{2,5}(?:\.\d+)?)/g))
-      .map((match) => Number(match[1]))
-      .filter((price) => price >= 80);
-    const price = priceValues.length ? Math.min(...priceValues) : null;
-
-    if (price) {
-      quotes.push({
-        platform: "阿里商旅",
-        status: "available",
-        price,
-        hotelName,
-        roomType,
-        ratePlan,
-        rawText: snippet
-      });
-    }
+  const previousLine = lines[index - 1] ?? "";
+  if (/含早餐|含早|1份早餐|单份早餐|单早|2份早餐|双份早餐|双早|无早餐|无早|不含早|无餐食/.test(previousLine)) {
+    return false;
+  }
+  if (hasAliHotelRoomTitleBeforeOffer(lines, index) && /^(大床|双床|1张)/.test(line)) {
+    return false;
   }
 
-  return quotes;
+  if (isAliHotelRoomTitleLine(line)) return true;
+  if (/^(大床|双床)$/.test(line)) return true;
+  if (/^1张[^，,。|]*?(?:大床|双人床)$/.test(line)) return true;
+  return false;
+}
+
+function isAliHotelRoomTitleLine(line: string) {
+  return /房/.test(line) && /大床|双床|床房|客房|标间|套房/.test(line) && !/[㎡平方米]/.test(line);
+}
+
+function hasAliHotelRoomTitleBeforeOffer(lines: string[], index: number) {
+  const minIndex = Math.max(0, index - 8);
+  for (let currentIndex = index - 1; currentIndex >= minIndex; currentIndex -= 1) {
+    const line = lines[currentIndex] ?? "";
+    if (/[￥¥]|早餐|个人支付|在线付/.test(line)) return false;
+    if (isAliHotelRoomTitleLine(line)) return true;
+  }
+  return false;
+}
+
+function aliHotelRatesFromRoomBlock(blockLines: string[], hotelName: string, ratePlan: HotelRatePlanLabel): HotelMainRateQuote[] {
+  const roomType = blockLines[0]?.trim() ?? "";
+  if (!roomType) return [];
+  const contextLines = aliHotelRoomContextLines(blockLines);
+  const roomBedType = inferAliHotelRoomBedType(contextLines);
+  const offerLineGroups = splitAliHotelRoomOfferLines(blockLines);
+  return offerLineGroups
+    .map((offerLines) => aliHotelRateFromOfferLines(roomType, contextLines, offerLines, hotelName, ratePlan, roomBedType))
+    .filter((quote): quote is HotelMainRateQuote => Boolean(quote));
+}
+
+function aliHotelRoomContextLines(blockLines: string[]) {
+  const firstOfferIndex = blockLines.findIndex((line, index) => index > 0 && aliHotelBreakfastFromText(line));
+  const contextEnd = firstOfferIndex >= 0 ? firstOfferIndex : Math.min(blockLines.length, 8);
+  return blockLines.slice(0, contextEnd);
+}
+
+function splitAliHotelRoomOfferLines(blockLines: string[]) {
+  const offerStarts = blockLines
+    .map((line, index) => (index > 0 && aliHotelBreakfastFromText(line) ? index : -1))
+    .filter((index) => index >= 0);
+  if (!offerStarts.length) return [blockLines];
+
+  return offerStarts.map((startIndex, position) => {
+    const endIndex = position + 1 < offerStarts.length ? offerStarts[position + 1] : blockLines.length;
+    return blockLines.slice(startIndex, endIndex);
+  });
+}
+
+function aliHotelRateFromOfferLines(
+  roomType: string,
+  contextLines: string[],
+  offerLines: string[],
+  hotelName: string,
+  ratePlan: HotelRatePlanLabel,
+  roomBedType: "大床" | "双床" | ""
+): HotelMainRateQuote | null {
+  const rawText = [roomType, ...offerLines].join(" ");
+  if (isHotelRateLineExcludedByBedAssignment([...contextLines, ...offerLines].join(" "), { mainRoomTypeText: roomType }).excluded) {
+    return null;
+  }
+
+  const breakfast = aliHotelBreakfastFromText(offerLines.join(" "));
+  const bedType = inferAliHotelOfferBedType(offerLines.join(" "), roomBedType);
+  const price = parseAliHotelOfferPrice(offerLines.join(" "));
+  if (bedType !== hotelRatePlanBedType(ratePlan) || breakfast !== hotelRatePlanBreakfast(ratePlan) || typeof price !== "number") {
+    return null;
+  }
+
+  return {
+    platform: "阿里商旅" as const,
+    status: "available" as const,
+    price,
+    hotelName,
+    roomType,
+    ratePlan,
+    rawText
+  };
+}
+
+function inferAliHotelRoomBedType(lines: string[]): "大床" | "双床" | "" {
+  const roomType = lines[0] ?? "";
+  if (/双床/.test(roomType)) return "双床";
+  if (/大床/.test(roomType) && !/双床/.test(roomType)) return "大床";
+  const text = lines.join(" ");
+  if (/双床|2张|两张/.test(text)) return "双床";
+  if (/大床|1张[^，,。|]*?(?:大床|双人床)/.test(text)) return "大床";
+  return "";
+}
+
+function inferAliHotelOfferBedType(offerText: string, roomBedType: "大床" | "双床" | ""): "大床" | "双床" | "" {
+  if (/双床/.test(offerText)) return "双床";
+  if (/大床/.test(offerText)) return "大床";
+  if (/2张|两张/.test(offerText) && !/大床/.test(offerText)) return "双床";
+  if (/多张床|多床/.test(offerText)) return roomBedType;
+  return roomBedType;
+}
+
+function aliHotelBreakfastFromText(text: string): "有早餐" | "无早餐" | "" {
+  if (/无早餐|无早|不含早|无餐食/.test(text)) return "无早餐";
+  if (/含早餐|含早|1份早餐|单份早餐|单早|2份早餐|双份早餐|双早/.test(text)) return "有早餐";
+  return "";
+}
+
+function parseAliHotelOfferPrice(text: string) {
+  const priceValues = Array.from(text.matchAll(/[￥¥]\s*(\d{2,5}(?:\.\d+)?)/g))
+    .map((match) => Number(match[1]))
+    .filter((price) => price >= 80);
+  return priceValues.length ? Math.min(...priceValues) : null;
+}
+
+function buildAliHotelRatePlanDiagnosticText(rawText: string, ratePlan: HotelRatePlanLabel) {
+  const lines = rawText
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const blocks = buildAliHotelRoomBlocks(lines);
+  if (!blocks.length) return "";
+
+  const targetBedType = hotelRatePlanBedType(ratePlan);
+  const targetBreakfast = hotelRatePlanBreakfast(ratePlan);
+  const rows = blocks.flatMap((blockLines) => {
+    const roomType = blockLines[0] ?? "";
+    const contextLines = aliHotelRoomContextLines(blockLines);
+    const roomBedType = inferAliHotelRoomBedType(contextLines);
+    return splitAliHotelRoomOfferLines(blockLines).map((offerLines) => {
+      const offerText = offerLines.join(" ");
+      const bedType = inferAliHotelOfferBedType(offerText, roomBedType);
+      const breakfast = aliHotelBreakfastFromText(offerText);
+      const price = parseAliHotelOfferPrice(offerText);
+      const matched = bedType === targetBedType && breakfast === targetBreakfast && typeof price === "number";
+      return `${matched ? "匹配候选" : "排除"} | 房型=${roomType || "未知"} | 床型=${bedType || "未识别"} | 早餐=${breakfast || "未识别"} | 价格=${price ?? "未识别"} | ${offerText}`;
+    });
+  });
+
+  return rows.join("\n");
 }
 
 export function readZtripTotalFlightCount(rawText: string): number | null {

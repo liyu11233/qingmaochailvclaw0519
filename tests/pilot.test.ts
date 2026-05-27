@@ -1103,6 +1103,57 @@ R3JHEY
     });
   });
 
+  it("keeps ali room-block offer rows separate and selects each rate-plan minimum", () => {
+    const rawText = `锦江之星（广州荔湾西华路彩虹桥地铁站店）
+标准双床房
+1张1.35米小型双人床和1张1.1米单人床
+21-25㎡
+有窗
+禁烟
+更多详情
+无早餐
+双床
+2人入住
+5月28日12点前可免费取消
+预计30分钟确认
+￥
+193
+个人支付
+在线付
+1份早餐
+多张床
+3人入住
+5月28日12点前可免费取消
+立即确认
+￥
+200
+个人支付
+在线付
+2份早餐
+双床
+2人入住
+￥
+240
+个人支付
+在线付`;
+
+    const noBreakfast = selectLowestHotelMainRateQuote(parseAliHotelMainRatesText(rawText, "双床无早餐"));
+    const withBreakfast = selectLowestHotelMainRateQuote(parseAliHotelMainRatesText(rawText, "双床有早餐"));
+
+    expect(noBreakfast).toMatchObject({
+      platform: "阿里商旅",
+      roomType: "标准双床房",
+      ratePlan: "双床无早餐",
+      price: 193
+    });
+    expect(withBreakfast).toMatchObject({
+      platform: "阿里商旅",
+      roomType: "标准双床房",
+      ratePlan: "双床有早餐",
+      price: 200
+    });
+  });
+
   it("keeps random bed assignment text when the main room type confirms the bed type", () => {
     const qingmaoRates = parseQingmaoHotelMainRatesText(`如家商旅酒店
 安心睡0压大床房
@@ -1466,6 +1517,13 @@ CNY 260`);
     expect(extractHotelDoorNumber("白云区广州大道北1420号")).toBe("1420号");
     expect(extractHotelDoorNumber("人民南路175-179号1F、2F-8F | 沙面岛/上下九步行街商圈")).toBe("175-179号");
     expect(extractHotelDoorNumber("6号大街6号，1层局部；3-9整层 | 下沙开发区 距地铁1号线文泽路站")).toBe("6号");
+  });
+
+  it("extracts road door plate before building numbers", () => {
+    expect(extractHotelDoorPlate("海淀区永定路23号1幢3-5层及1层西侧大厅")).toBe("永定路23号");
+    expect(extractHotelDoorNumber("海淀区永定路23号1幢3-5层及1层西侧大厅")).toBe("23号");
+    expect(extractHotelDoorPlate("海淀区玉海园五里22号配套商业楼 (玉兴园) 1号楼1层101、2层、3层301")).toBe("玉海园五里22号");
+    expect(extractHotelDoorNumber("海淀区玉海园五里22号配套商业楼 (玉兴园) 1号楼1层101、2层、3层301")).toBe("22号");
   });
 
   it("matches ali list card by brand core city and door number in the same card", () => {
