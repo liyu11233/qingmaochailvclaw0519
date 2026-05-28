@@ -265,16 +265,20 @@ function parseHotelScaleValidationInput(value: unknown): { ok: true; input: Hote
   const checkInDate = typeof value.checkInDate === "string" ? value.checkInDate.trim() : undefined;
   const checkOutDate = typeof value.checkOutDate === "string" ? value.checkOutDate.trim() : undefined;
   const limit = typeof value.limit === "number" ? value.limit : undefined;
+  const disableBudgets = value.disableBudgets === true;
 
-  if (value.limit !== undefined && (!Number.isInteger(limit) || !limit || limit < 5 || limit > 40 || limit % 5 !== 0)) {
-    return { ok: false, error: "limit 必须是 5 到 40 之间的 5 的倍数" };
+  if (value.limit !== undefined && (!Number.isInteger(limit) || !limit || limit < 1 || limit > 40)) {
+    return { ok: false, error: "limit 必须是 1 到 40 之间的整数" };
+  }
+  if (value.disableBudgets !== undefined && typeof value.disableBudgets !== "boolean") {
+    return { ok: false, error: "disableBudgets 必须是布尔值" };
   }
 
   if ((checkInDate && !checkOutDate) || (!checkInDate && checkOutDate)) {
     return { ok: false, error: "checkInDate 和 checkOutDate 必须同时传入" };
   }
   if (!checkInDate && !checkOutDate) {
-    return { ok: true, input: limit ? { limit } : {} };
+    return { ok: true, input: { ...(limit ? { limit } : {}), ...(disableBudgets ? { disableBudgets } : {}) } };
   }
   if (!checkInDate || !checkOutDate || !/^\d{4}-\d{2}-\d{2}$/.test(checkInDate) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOutDate)) {
     return { ok: false, error: "checkInDate 和 checkOutDate 必须是 YYYY-MM-DD" };
@@ -291,7 +295,8 @@ function parseHotelScaleValidationInput(value: unknown): { ok: true; input: Hote
     input: {
       checkInDate,
       checkOutDate,
-      ...(limit ? { limit } : {})
+      ...(limit ? { limit } : {}),
+      ...(disableBudgets ? { disableBudgets } : {})
     }
   };
 }

@@ -48,8 +48,8 @@ const HOTEL_SCALE_VALIDATION_TOTAL_TARGET = 40;
 const HOTEL_SCALE_VALIDATION_GROUP_BUDGET_MS = 25 * 60 * 1000;
 const HOTEL_SCALE_VALIDATION_TOTAL_BUDGET_MS = 120 * 60 * 1000;
 const HOTEL_SCALE_VALIDATION_MAX_ATTEMPTS_PER_GROUP = 24;
-const HOTEL_SCALE_VALIDATION_PLATFORM_ORDER: PlatformName[] = ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"];
-const HOTEL_SCALE_VALIDATION_COMPETITOR_PLATFORM_ORDER: PlatformName[] = ["阿里商旅", "在途商旅", "携程商旅"];
+const HOTEL_SCALE_VALIDATION_PLATFORM_ORDER: PlatformName[] = ["青猫差旅", "阿里商旅", "携程商旅", "在途商旅"];
+const HOTEL_SCALE_VALIDATION_COMPETITOR_PLATFORM_ORDER: PlatformName[] = ["阿里商旅", "携程商旅", "在途商旅"];
 const HOTEL_SCALE_VALIDATION_CITY_POOL = ["北京", "广州", "杭州", "上海", "深圳", "武汉", "佛山", "成都", "厦门"] as const;
 type HotelGroupName = "首旅如家" | "华住" | "锦江" | "东呈" | "亚朵";
 export type HotelCalibrationFailureType =
@@ -362,6 +362,7 @@ export interface HotelScaleValidationInput {
   checkInDate?: string;
   checkOutDate?: string;
   limit?: number;
+  disableBudgets?: boolean;
 }
 
 export interface HotelScaleValidationResolvedInput {
@@ -451,7 +452,7 @@ export interface HotelScaleValidationGroupResult {
   plannedQueries?: HotelScaleValidationPlannedQuery[];
   targetCount: number;
   maxAttempts?: number;
-  budgetMs?: number;
+  budgetMs?: number | null;
   attemptedCount: number;
   completedCount: number;
   partialCount: number;
@@ -533,8 +534,8 @@ export interface HotelScaleValidationResult extends HotelScaleValidationResolved
   targetPerGroup: number;
   mainRatePlan: "大床有早餐";
   budget: {
-    totalMs: number;
-    perGroupMs: number;
+    totalMs: number | null;
+    perGroupMs: number | null;
     maxAttemptsPerGroup: number;
   };
   platformOrder: PlatformName[];
@@ -1238,8 +1239,9 @@ function resolveHotelScaleValidationTargetTotal(input: HotelScaleValidationInput
 function resolveHotelScaleValidationGroupTargets(input: HotelScaleValidationInput = {}) {
   const targetTotal = resolveHotelScaleValidationTargetTotal(input);
   const groupCount = hotelScaleValidationPilotQueries.length;
-  const targetPerGroup = Math.max(1, Math.floor(targetTotal / groupCount));
-  return hotelScaleValidationPilotQueries.map(() => targetPerGroup);
+  const baseTarget = Math.floor(targetTotal / groupCount);
+  const remainder = targetTotal % groupCount;
+  return hotelScaleValidationPilotQueries.map((_, index) => baseTarget + (index < remainder ? 1 : 0));
 }
 
 function buildHotelScaleValidationQuery(input: HotelScaleValidationResolvedInput, city: string, keyword: string): QingmaoHotelCandidateQuery {
@@ -1400,7 +1402,8 @@ export function resolveHotelScaleValidationBudgetStop(rule: HotelSmallBatchBudge
   return null;
 }
 
-export function resolveHotelScaleValidationOverallBudgetStop(startedAtMs: number, nowMs: number, budgetMs = HOTEL_SCALE_VALIDATION_TOTAL_BUDGET_MS) {
+export function resolveHotelScaleValidationOverallBudgetStop(startedAtMs: number, nowMs: number, budgetMs: number | null = HOTEL_SCALE_VALIDATION_TOTAL_BUDGET_MS) {
+  if (budgetMs === null) return null;
   return nowMs - startedAtMs >= budgetMs ? "达到40家放量验证整体时间预算" : null;
 }
 
@@ -1719,6 +1722,8 @@ export function buildInitialHotelScaleValidationResult(date: Date, input: HotelS
   const groupTargets = resolveHotelScaleValidationGroupTargets(input);
   const targetTotal = groupTargets.reduce((total, targetCount) => total + targetCount, 0);
   const targetPerGroup = groupTargets.every((targetCount) => targetCount === groupTargets[0]) ? groupTargets[0] : Math.max(...groupTargets);
+  const totalBudgetMs = input.disableBudgets ? null : HOTEL_SCALE_VALIDATION_TOTAL_BUDGET_MS;
+  const groupBudgetMs = input.disableBudgets ? null : HOTEL_SCALE_VALIDATION_GROUP_BUDGET_MS;
   const groups: HotelScaleValidationGroupResult[] = hotelScaleValidationPilotQueries.map((config, index) => ({
     group: config.group,
     query: buildHotelScaleValidationGroupDisplayQuery(resolvedInput, config),
@@ -1727,7 +1732,7 @@ export function buildInitialHotelScaleValidationResult(date: Date, input: HotelS
     plannedQueries: buildHotelScaleValidationPlannedQueries(resolvedInput, config),
     targetCount: groupTargets[index],
     maxAttempts: HOTEL_SCALE_VALIDATION_MAX_ATTEMPTS_PER_GROUP,
-    budgetMs: HOTEL_SCALE_VALIDATION_GROUP_BUDGET_MS,
+    budgetMs: groupBudgetMs,
     attemptedCount: 0,
     completedCount: 0,
     partialCount: 0,
@@ -1747,8 +1752,8 @@ export function buildInitialHotelScaleValidationResult(date: Date, input: HotelS
     mainRatePlan: "大床有早餐",
     ...resolvedInput,
     budget: {
-      totalMs: HOTEL_SCALE_VALIDATION_TOTAL_BUDGET_MS,
-      perGroupMs: HOTEL_SCALE_VALIDATION_GROUP_BUDGET_MS,
+      totalMs: totalBudgetMs,
+      perGroupMs: groupBudgetMs,
       maxAttemptsPerGroup: HOTEL_SCALE_VALIDATION_MAX_ATTEMPTS_PER_GROUP
     },
     platformOrder: HOTEL_SCALE_VALIDATION_PLATFORM_ORDER,
@@ -3880,6 +3885,10 @@ async function clickZtripHotelFilter(page: BrowserPage, label: string) {
   throw new Error(`在途商旅酒店未找到筛选项 ${label}`);
 }
 
+export function shouldDowngradeZtripRatePlanFilterFailure(error: unknown) {
+  return /在途商旅酒店未找到筛选项/.test(errorMessage(error));
+}
+
 async function filterZtripHotelBigBedDoubleBreakfast(page: BrowserPage) {
   for (const label of ["大床", "双份早餐"]) {
     await clickZtripHotelFilter(page, label);
@@ -4658,8 +4667,8 @@ function isHotelSameHotelHitFailureQuote(quote: HotelMainRateQuote) {
   return failureType === "competitor_no_same_hotel" && hasSameHotelFailureEvidence(quote);
 }
 
-export function shouldStopHotelAllRatePlanCollectionAfterQuoteFailure(_quote: HotelMainRateQuote) {
-  return false;
+export function shouldStopHotelAllRatePlanCollectionAfterQuoteFailure(quote: HotelMainRateQuote) {
+  return isHotelSameHotelHitFailureQuote(quote);
 }
 
 export async function collectHotelMainRateCompetitorQuotes(
@@ -6434,6 +6443,21 @@ async function searchZtripHotelMainRateQuote(
       bodyText,
       error: errorMessage(error)
     }).catch(() => undefined);
+    if (shouldDowngradeZtripRatePlanFilterFailure(error)) {
+      return {
+        platform: "在途商旅",
+        status: "not-found",
+        price: null,
+        hotelName: candidate.hotelName,
+        roomType: "",
+        ratePlan,
+        finalUrl: page.url(),
+        screenshotPath: evidencePath,
+        rawText: bodyText,
+        durationMs: Date.now() - startedAt,
+        error: `${errorMessage(error)}，按${ratePlan}记为暂无`
+      };
+    }
     return {
       ...buildFailedHotelQuote("在途商旅", errorMessage(error), candidate, ratePlan),
       finalUrl: page.url(),
@@ -6511,8 +6535,9 @@ export function classifyHotelCalibrationFailureType(reason: string, platform: Pl
   if (/登录|权限|未找到.*已登录|login/i.test(reason)) return "login_or_permission_failed";
   if (/超时|timeout/i.test(reason)) return "page_load_timeout";
   if (/旧日期|旧城市|日期|城市错误|页面状态|stale/i.test(reason)) return "stale_page_or_wrong_date";
-  if (/门牌号|同酒店|同店|未匹配到同城市同门牌号|不是同一家/.test(reason)) return "competitor_no_same_hotel";
+  if (/门牌|同店命中失败|未匹配同店|未匹配到同城市同门牌号|不是同一家/.test(reason)) return "competitor_no_same_hotel";
   if (/报价区未稳定|解析不可靠|未能确认/.test(reason)) return "parser_suspected_failed";
+  if (/在途商旅酒店未找到筛选项/.test(reason)) return "competitor_no_main_rate";
   if (/完整展开后未找到/.test(reason)) return "competitor_no_main_rate";
   if (/未找到.*大床有早餐|无.*大床有早餐|未解析到.*大床有早餐|未找到同口径价格/.test(reason)) return "competitor_no_main_rate";
   if (/解析|疑似/.test(reason)) return "parser_suspected_failed";
@@ -7532,14 +7557,24 @@ async function readZtripSingleAllRatePlanPrices(page: BrowserPage) {
   const summaries: string[] = [];
 
   for (const step of buildZtripSingleAllRatePlanReadSteps()) {
-    await clearZtripHotelRatePlanFilters(page);
-    await filterZtripHotelRatePlan(page, step.ratePlan);
-    await expandZtripRoomCards(page, step.ratePlan);
-    const ratePlanText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
-    const selectedRate = selectZtripHotelRateForRatePlan(parseZtripHotelRatesTextForRatePlan(ratePlanText, step.ratePlan), step.ratePlan);
-    ratePrices[step.ratePlan] = selectedRate?.price ?? null;
-    textSections.push(`【${step.ratePlan}】\n${ratePlanText}`);
-    summaries.push(`${step.ratePlan}:${selectedRate?.price ?? "未找到"}`);
+    try {
+      await clearZtripHotelRatePlanFilters(page);
+      await filterZtripHotelRatePlan(page, step.ratePlan);
+      await expandZtripRoomCards(page, step.ratePlan);
+      const ratePlanText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
+      const selectedRate = selectZtripHotelRateForRatePlan(parseZtripHotelRatesTextForRatePlan(ratePlanText, step.ratePlan), step.ratePlan);
+      ratePrices[step.ratePlan] = selectedRate?.price ?? null;
+      textSections.push(`【${step.ratePlan}】\n${ratePlanText}`);
+      summaries.push(`${step.ratePlan}:${selectedRate?.price ?? "未找到"}`);
+    } catch (error) {
+      if (!shouldDowngradeZtripRatePlanFilterFailure(error)) {
+        throw error;
+      }
+      const ratePlanText = await page.locator("body").innerText({ timeout: 3_000 }).catch(() => "");
+      ratePrices[step.ratePlan] = null;
+      textSections.push(`【${step.ratePlan}】\n${ratePlanText}\n${errorMessage(error)}，按${step.ratePlan}记为暂无`);
+      summaries.push(`${step.ratePlan}:暂无(${errorMessage(error)})`);
+    }
   }
 
   return {
@@ -8436,7 +8471,20 @@ function collectExcludedHotelRateRows(quotes: HotelMainRateQuote[]) {
 }
 
 async function collectAliScaleEvidencePaths(sampleArtifactDir: string): Promise<HotelScaleValidationAliEvidence> {
-  const names = await fsp.readdir(sampleArtifactDir).catch(() => []);
+  const names: string[] = [];
+  const collect = async (dir: string, prefix = "") => {
+    const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const relative = prefix ? path.join(prefix, entry.name) : entry.name;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await collect(full, relative);
+      } else {
+        names.push(relative);
+      }
+    }
+  };
+  await collect(sampleArtifactDir);
   const fullPath = (match: (name: string) => boolean) => {
     const name = names.find(match);
     return name ? path.join(sampleArtifactDir, name) : undefined;
@@ -8666,6 +8714,365 @@ async function runHotelRatePlanForCandidate(
   }
 }
 
+async function waitForQingmaoHotelDetailAnyRateText(frame: BrowserFrame, expectedHotelName: string) {
+  let latestText = "";
+  let lastStableKey = "";
+  let stableCount = 0;
+  for (let attempt = 0; attempt < 18; attempt += 1) {
+    await frame.evaluate<boolean>(`(() => {
+      window.scrollTo(0, Math.min(document.body.scrollHeight, 900));
+      return true;
+    })()`).catch(() => false);
+    latestText = await frame.locator("body").innerText({ timeout: 3_000 }).catch(() => "");
+    const hasExpectedHotel = latestText.includes(expectedHotelName);
+    const hasAnyRoomSignal = /大床|双床/.test(latestText) && /[￥¥]\s*\d{2,5}|无早餐|无早|含早餐|含早|早餐/.test(latestText);
+    const stableKey = buildHotelPageTextSummary(latestText, 800);
+    stableCount = stableKey && stableKey === lastStableKey ? stableCount + 1 : 1;
+    lastStableKey = stableKey;
+    if (hasExpectedHotel && hasAnyRoomSignal && stableCount >= 2) {
+      return latestText;
+    }
+    await frame.waitForTimeout(1_000);
+  }
+  return latestText;
+}
+
+function hotelPlatformNoRateStatus(platform: PlatformName, stable = true): HotelMainRateQuote["status"] {
+  if (platform === "阿里商旅" && !stable) return "parser-suspected-failed";
+  return platform === "阿里商旅" ? "platform-no-rate" : "not-found";
+}
+
+function hotelPlatformNoRateError(platform: PlatformName, ratePlan: HotelRatePlanLabel, stable = true) {
+  if (platform === "阿里商旅" && !stable) return `阿里商旅报价区未稳定，未能确认${ratePlan}价格`;
+  if (platform === "阿里商旅") return `阿里商旅完整展开后未找到${ratePlan}价格`;
+  return `${platform}同酒店详情页未解析到${ratePlan}价格`;
+}
+
+async function saveFailureEvidenceForAllRatePlans(
+  page: BrowserPage,
+  artifactDir: string,
+  platform: PlatformName,
+  candidate: QingmaoHotelCandidate,
+  reason: string,
+  startedAt: number,
+  diagnosisPath?: string
+) {
+  const bodyText = await page.locator("body").innerText({ timeout: 3_000 }).catch(() => "");
+  const quotes: HotelMainRateQuote[] = [];
+  for (const [index, ratePlan] of HOTEL_RATE_PLAN_LABELS.entries()) {
+    const screenshotPath = path.join(artifactDir, hotelRatePlanEvidenceName(platform, ratePlan));
+    const evidencePath = await savePageEvidence(page, screenshotPath, {
+      platform,
+      finalUrl: page.url(),
+      bodyText,
+      error: reason
+    }).catch(() => undefined);
+    quotes.push({
+      ...buildFailedHotelQuote(platform, reason, candidate, ratePlan),
+      finalUrl: page.url(),
+      screenshotPath: evidencePath,
+      diagnosisPath,
+      rawText: bodyText,
+      durationMs: index === 0 ? Date.now() - startedAt : 0
+    });
+  }
+  return quotes;
+}
+
+async function collectQingmaoHotelAllRatePlanQuotes(
+  qingmaoPage: BrowserPage,
+  artifactDir: string,
+  listFrame: BrowserFrame,
+  candidate: QingmaoHotelCandidate,
+  clickIndex: number
+) {
+  const startedAt = Date.now();
+  await clickQingmaoHotelCandidateDetail(listFrame, candidate, clickIndex);
+  const qingmaoFrame = await waitForQingmaoHotelDetailFrame(qingmaoPage, candidate.hotelName);
+  let bodyText = await waitForQingmaoHotelDetailAnyRateText(qingmaoFrame, candidate.hotelName);
+  const quotes: HotelMainRateQuote[] = [];
+
+  for (const [index, ratePlan] of HOTEL_RATE_PLAN_LABELS.entries()) {
+    let rates = parseQingmaoHotelMainRatesText(bodyText, ratePlan);
+    if (!rates.some((item) => item.status === "available" && typeof item.price === "number")) {
+      await filterQingmaoHotelMainRate(qingmaoFrame, candidate.hotelName, ratePlan);
+      bodyText = await waitForQingmaoHotelDetailText(qingmaoFrame, candidate.hotelName, ratePlan);
+      rates = parseQingmaoHotelMainRatesText(bodyText, ratePlan);
+    }
+    const selectedRate = selectLowestHotelMainRateQuote(rates);
+    const screenshotPath = path.join(artifactDir, hotelRatePlanEvidenceName("青猫差旅", ratePlan));
+    const evidencePath = await savePageEvidence(qingmaoPage, screenshotPath, {
+      platform: "青猫差旅",
+      finalUrl: qingmaoFrame.url(),
+      bodyText,
+      price: selectedRate?.price ?? null,
+      rawText: selectedRate?.rawText,
+      error: selectedRate ? undefined : `青猫无${ratePlan}`
+    });
+    quotes.push(selectedRate
+      ? {
+        ...selectedRate,
+        finalUrl: qingmaoFrame.url(),
+        screenshotPath: evidencePath,
+        durationMs: index === 0 ? Date.now() - startedAt : 0
+      }
+      : {
+        platform: "青猫差旅",
+        status: "not-found",
+        price: null,
+        hotelName: candidate.hotelName,
+        roomType: "",
+        ratePlan,
+        finalUrl: qingmaoFrame.url(),
+        screenshotPath: evidencePath,
+        rawText: bodyText.slice(0, 1200),
+        durationMs: index === 0 ? Date.now() - startedAt : 0,
+        error: `青猫无${ratePlan}`
+      });
+  }
+
+  return quotes;
+}
+
+async function collectCtripHotelAllRatePlanQuotes(
+  context: BrowserContext,
+  artifactDir: string,
+  query: QingmaoHotelCandidateQuery,
+  candidate: QingmaoHotelCandidate
+) {
+  const page = await context.newPage();
+  const startedAt = Date.now();
+  try {
+    await openCtripHotelDetailByHotel(page, query, candidate);
+    const bodyText = await waitForCtripHotelDetailRooms(page);
+    const quotes: HotelMainRateQuote[] = [];
+    for (const [index, ratePlan] of HOTEL_RATE_PLAN_LABELS.entries()) {
+      const rates = parseCtripHotelMainRatesText(bodyText, ratePlan);
+      const selectedRate = selectLowestHotelMainRateQuote(rates);
+      const excludedRows = extractExcludedHotelRateRowsFromText("携程商旅", bodyText);
+      const screenshotPath = path.join(artifactDir, hotelRatePlanEvidenceName("携程商旅", ratePlan));
+      const evidencePath = await savePageEvidence(page, screenshotPath, {
+        platform: "携程商旅",
+        finalUrl: page.url(),
+        bodyText,
+        price: selectedRate?.price ?? null,
+        rawText: selectedRate?.rawText ?? excludedRows[0]?.rawText
+      });
+      quotes.push(selectedRate
+        ? { ...selectedRate, finalUrl: page.url(), screenshotPath: evidencePath, durationMs: index === 0 ? Date.now() - startedAt : 0 }
+        : {
+          platform: "携程商旅",
+          status: "not-found",
+          price: null,
+          hotelName: candidate.hotelName,
+          roomType: "",
+          ratePlan,
+          finalUrl: page.url(),
+          screenshotPath: evidencePath,
+          durationMs: index === 0 ? Date.now() - startedAt : 0,
+          rawText: excludedRows[0]?.rawText,
+          error: excludedRows.length
+            ? `携程商旅${ratePlan}价格行已过滤：${excludedRows.map((row) => row.reason).join("、")}`
+            : hotelPlatformNoRateError("携程商旅", ratePlan)
+        });
+    }
+    return quotes;
+  } catch (error) {
+    return saveFailureEvidenceForAllRatePlans(page, artifactDir, "携程商旅", candidate, errorMessage(error), startedAt);
+  }
+}
+
+async function collectAliHotelAllRatePlanQuotes(
+  context: BrowserContext,
+  artifactDir: string,
+  query: QingmaoHotelCandidateQuery,
+  candidate: QingmaoHotelCandidate
+) {
+  const page = await context.newPage();
+  const startedAt = Date.now();
+  const aliKeywordTraces: AliHotelKeywordTrace[] = [];
+  const diagnosisPath = path.join(artifactDir, "alibtrip-list-diagnosis.json");
+  let detailPage: BrowserPage | null = null;
+  let bodyText = "";
+  let detailRoomsRead: AliHotelDetailRoomsRead | null = null;
+
+  try {
+    await page.goto("https://travel.alibtrip.com/index.html#/hotel", { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await page.waitForTimeout(3_000);
+    let lastError = "";
+    for (const keywordPlan of buildAliHotelSearchKeywordPlan(query, candidate)) {
+      try {
+        await openAliHotelList(context, page, query, keywordPlan.keyword, candidate);
+        const aliSelection = await clickMatchingAliHotelCard(context, page, query, candidate, {
+          keyword: keywordPlan.keyword,
+          keywordMode: keywordPlan.mode,
+          traces: aliKeywordTraces,
+          artifactDir
+        }, keywordPlan);
+        detailPage = aliSelection.detailPage;
+        detailRoomsRead = await readAliHotelDetailRooms(detailPage);
+        bodyText = detailRoomsRead.bodyText;
+        const match = confirmAliHotelDetailDoorPlate(query.city, candidate, bodyText);
+        if (!match.sameHotel) {
+          throw new Error(match.failureReason || match.matchBasis);
+        }
+        lastError = "";
+        break;
+      } catch (error) {
+        lastError = errorMessage(error);
+        if (detailPage && typeof detailPage.close === "function") {
+          await detailPage.close({ runBeforeUnload: false }).catch(() => undefined);
+        }
+        detailPage = null;
+        bodyText = "";
+        detailRoomsRead = null;
+      }
+    }
+    if (lastError) throw new Error(lastError);
+    if (!detailPage) throw new Error("阿里商旅同酒店详情页未打开");
+
+    const quotes: HotelMainRateQuote[] = [];
+    for (const [index, ratePlan] of HOTEL_RATE_PLAN_LABELS.entries()) {
+      const rates = parseAliHotelMainRatesText(bodyText, ratePlan);
+      const selectedRate = selectLowestHotelMainRateQuote(rates);
+      const excludedRows = extractExcludedHotelRateRowsFromText("阿里商旅", bodyText);
+      const ratePlanDiagnosticText = buildAliHotelRatePlanDiagnosticText(bodyText, ratePlan);
+      const fallbackRawText = ratePlanDiagnosticText || excludedRows[0]?.rawText;
+      const screenshotPath = path.join(artifactDir, hotelRatePlanEvidenceName("阿里商旅", ratePlan));
+      await scrollAliHotelDetailToRateEvidence(detailPage, ratePlan);
+      const evidencePath = await savePageEvidence(detailPage, screenshotPath, {
+        platform: "阿里商旅",
+        finalUrl: detailPage.url(),
+        bodyText,
+        price: selectedRate?.price ?? null,
+        rawText: selectedRate?.rawText ?? fallbackRawText
+      });
+      if (selectedRate) {
+        quotes.push({ ...selectedRate, finalUrl: detailPage.url(), screenshotPath: evidencePath, durationMs: index === 0 ? Date.now() - startedAt : 0 });
+        continue;
+      }
+      const status = hotelPlatformNoRateStatus("阿里商旅", Boolean(detailRoomsRead?.stable));
+      const sidecarPath = screenshotPath.replace(/\.[^.]+$/, ".html");
+      await writeEvidenceSnapshotHtml(sidecarPath, {
+        platform: "阿里商旅",
+        finalUrl: detailPage.url(),
+        bodyText,
+        price: null,
+        rawText: fallbackRawText,
+        error: hotelPlatformNoRateError("阿里商旅", ratePlan, Boolean(detailRoomsRead?.stable))
+      }).catch(() => undefined);
+      quotes.push({
+        platform: "阿里商旅",
+        status,
+        price: null,
+        hotelName: candidate.hotelName,
+        roomType: "",
+        ratePlan,
+        finalUrl: detailPage.url(),
+        screenshotPath: evidencePath,
+        diagnosisPath: sidecarPath,
+        durationMs: index === 0 ? Date.now() - startedAt : 0,
+        rawText: fallbackRawText,
+        error: excludedRows.length
+          ? `阿里商旅${ratePlan}价格行已过滤：${excludedRows.map((row) => row.reason).join("、")}`
+          : hotelPlatformNoRateError("阿里商旅", ratePlan, Boolean(detailRoomsRead?.stable))
+      });
+    }
+    return quotes;
+  } catch (error) {
+    await writeAliHotelListDiagnosis(artifactDir, aliKeywordTraces);
+    const evidencePage = detailPage ?? page;
+    return saveFailureEvidenceForAllRatePlans(evidencePage, artifactDir, "阿里商旅", candidate, errorMessage(error), startedAt, diagnosisPath);
+  }
+}
+
+async function collectZtripHotelAllRatePlanQuotes(
+  context: BrowserContext,
+  artifactDir: string,
+  query: ZtripHotelQuery,
+  candidate: QingmaoHotelCandidate
+) {
+  const page = await context.newPage();
+  const startedAt = Date.now();
+  try {
+    await openZtripHotelSearchResultByHotel(page, query, candidate);
+    const detailIdentityText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
+    assertCompetitorHotelDetailSameByDoorPlate("在途商旅", {
+      city: query.city,
+      keyword: candidate.hotelName,
+      checkInDate: query.checkInDate,
+      checkOutDate: query.checkOutDate,
+      nights: query.nights
+    }, candidate, detailIdentityText);
+
+    const quotes: HotelMainRateQuote[] = [];
+    for (const [index, ratePlan] of HOTEL_RATE_PLAN_LABELS.entries()) {
+      try {
+        await clearZtripHotelRatePlanFilters(page);
+        await filterZtripHotelRatePlan(page, ratePlan);
+        await expandZtripRoomCards(page, ratePlan);
+        const bodyText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => detailIdentityText);
+        const rates = parseZtripHotelRatesTextForRatePlan(bodyText, ratePlan);
+        const selectedRate = selectZtripHotelRateForRatePlan(rates, ratePlan);
+        const excludedRows = extractExcludedHotelRateRowsFromText("在途商旅", bodyText);
+        const screenshotPath = path.join(artifactDir, hotelRatePlanEvidenceName("在途商旅", ratePlan));
+        const evidencePath = await savePageEvidence(page, screenshotPath, {
+          platform: "在途商旅",
+          finalUrl: page.url(),
+          bodyText,
+          price: selectedRate?.price ?? null,
+          rawText: selectedRate?.rawText ?? excludedRows[0]?.rawText
+        });
+        quotes.push(selectedRate
+          ? { ...buildZtripHotelMainRateQuote(selectedRate, page, evidencePath, candidate, ratePlan), durationMs: index === 0 ? Date.now() - startedAt : 0 }
+          : {
+            platform: "在途商旅",
+            status: "not-found",
+            price: null,
+            hotelName: candidate.hotelName,
+            roomType: "",
+            ratePlan,
+            finalUrl: page.url(),
+            screenshotPath: evidencePath,
+            durationMs: index === 0 ? Date.now() - startedAt : 0,
+            rawText: excludedRows[0]?.rawText,
+            error: excludedRows.length
+              ? `在途商旅${ratePlan}价格行已过滤：${excludedRows.map((row) => row.reason).join("、")}`
+              : hotelPlatformNoRateError("在途商旅", ratePlan)
+          });
+      } catch (ratePlanError) {
+        if (!shouldDowngradeZtripRatePlanFilterFailure(ratePlanError)) {
+          throw ratePlanError;
+        }
+        const bodyText = await page.locator("body").innerText({ timeout: 3_000 }).catch(() => detailIdentityText);
+        const screenshotPath = path.join(artifactDir, hotelRatePlanEvidenceName("在途商旅", ratePlan));
+        const evidencePath = await savePageEvidence(page, screenshotPath, {
+          platform: "在途商旅",
+          finalUrl: page.url(),
+          bodyText,
+          error: errorMessage(ratePlanError)
+        }).catch(() => undefined);
+        quotes.push({
+          platform: "在途商旅",
+          status: "not-found",
+          price: null,
+          hotelName: candidate.hotelName,
+          roomType: "",
+          ratePlan,
+          finalUrl: page.url(),
+          screenshotPath: evidencePath,
+          durationMs: index === 0 ? Date.now() - startedAt : 0,
+          rawText: bodyText,
+          error: `${errorMessage(ratePlanError)}，按${ratePlan}记为暂无`
+        });
+      }
+    }
+    return quotes;
+  } catch (error) {
+    return saveFailureEvidenceForAllRatePlans(page, artifactDir, "在途商旅", candidate, errorMessage(error), startedAt);
+  }
+}
+
 function isHotelRatePlanComplete(quotes: HotelMainRateQuote[], ratePlan: HotelRatePlanLabel) {
   return HOTEL_SCALE_VALIDATION_PLATFORM_ORDER.every((platform) =>
     quotes.some((quote) =>
@@ -8723,34 +9130,35 @@ async function runHotelAllRatePlansForQuery(
     let failurePlatform: PlatformName | undefined;
     let sawSameHotelFailure = false;
 
-    for (const ratePlan of HOTEL_RATE_PLAN_LABELS) {
-      const rateArtifactDir = path.join(artifactDir, safeFilename(ratePlan));
-      const startedAt = Date.now();
-      try {
-        onProgress?.(`${candidate.hotelName}：采集${ratePlan}`);
-        const result = await runHotelRatePlanForCandidate(context, qingmaoPage, rateArtifactDir, query, candidate, ratePlan);
-        quotes.push(...result.quotes);
-        const sameHotelFailure = result.quotes.find(isHotelSameHotelHitFailureQuote);
-        if (sameHotelFailure) {
-          failurePlatform = sameHotelFailure.platform;
-          skipped.push(`${candidate.hotelName}: ${sameHotelFailure.platform}同店命中失败 ${sameHotelFailure.error ?? ""}`.trim());
-          sawSameHotelFailure = true;
-          if (shouldStopHotelAllRatePlanCollectionAfterQuoteFailure(sameHotelFailure)) {
-            break;
-          }
+    try {
+      onProgress?.(`${candidate.hotelName}：青猫锁店并读取 4 个口径`);
+      quotes.push(...await collectQingmaoHotelAllRatePlanQuotes(qingmaoPage, artifactDir, listFrame, candidate, attempt));
+    } catch (error) {
+      skipped.push(`${candidate.hotelName}: 青猫锁店或读取 4 个口径失败 ${errorMessage(error)}`);
+      continue;
+    }
+
+    for (const platform of HOTEL_SCALE_VALIDATION_COMPETITOR_PLATFORM_ORDER) {
+      onProgress?.(`${candidate.hotelName}：${platform}同店命中并读取 4 个口径`);
+      const platformArtifactDir = path.join(artifactDir, safeFilename(platform));
+      let platformQuotes: HotelMainRateQuote[] = [];
+      if (platform === "阿里商旅") {
+        platformQuotes = await collectAliHotelAllRatePlanQuotes(context, platformArtifactDir, query, candidate);
+      } else if (platform === "携程商旅") {
+        platformQuotes = await collectCtripHotelAllRatePlanQuotes(context, platformArtifactDir, query, candidate);
+      } else if (platform === "在途商旅") {
+        platformQuotes = await collectZtripHotelAllRatePlanQuotes(context, platformArtifactDir, buildZtripHotelQueryFromQingmao(query), candidate);
+      }
+      quotes.push(...platformQuotes);
+
+      const sameHotelFailure = platformQuotes.find(isHotelSameHotelHitFailureQuote);
+      if (sameHotelFailure) {
+        failurePlatform = sameHotelFailure.platform;
+        skipped.push(`${candidate.hotelName}: ${sameHotelFailure.platform}同店命中失败 ${sameHotelFailure.error ?? ""}`.trim());
+        sawSameHotelFailure = true;
+        if (shouldStopHotelAllRatePlanCollectionAfterQuoteFailure(sameHotelFailure)) {
+          break;
         }
-      } catch (error) {
-        quotes.push({
-          platform: "青猫差旅",
-          status: "failed",
-          price: null,
-          hotelName: candidate.hotelName,
-          roomType: "",
-          ratePlan,
-          durationMs: Date.now() - startedAt,
-          error: errorMessage(error)
-        });
-        skipped.push(`${candidate.hotelName}: 青猫${ratePlan} ${errorMessage(error)}`);
       }
     }
 
@@ -9908,10 +10316,10 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
           let groupAttemptedCandidates = 0;
 
           while (groupResult.completedCount < groupResult.targetCount) {
-            const totalBudgetStopReason = resolveHotelScaleValidationOverallBudgetStop(startedAtMs, Date.now());
+            const totalBudgetStopReason = resolveHotelScaleValidationOverallBudgetStop(startedAtMs, Date.now(), base.budget.totalMs);
             const groupBudgetStopReason = resolveHotelScaleValidationBudgetStop({
               maxAttempts: HOTEL_SCALE_VALIDATION_MAX_ATTEMPTS_PER_GROUP - groupAttemptedCandidates,
-              budgetMs: HOTEL_SCALE_VALIDATION_GROUP_BUDGET_MS,
+              budgetMs: base.budget.perGroupMs,
               startedAtMs: groupStartedAtMs,
               nowMs: Date.now()
             });
@@ -9990,7 +10398,9 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
                   usedHotelNames.add(normalizeHotelIdentity(result.selectedCandidate.hotelName));
 
                   const pathRecords = buildHotelScaleValidationPathRecordsFromQuotes(result.quotes, sampleStartedAtMs);
-                  const unavailable = result.status === "completed" ? null : firstUnavailableHotelMainRateQuote(result.quotes);
+                  const unavailable = result.status === "completed"
+                    ? null
+                    : result.quotes.find(isHotelSameHotelHitFailureQuote) ?? firstUnavailableHotelMainRateQuote(result.quotes);
                   const excludedRateRows = result.status === "completed" ? [] : collectExcludedHotelRateRows(result.quotes);
                   const failureRecord = unavailable
                     ? pathRecords.find((record) => record.platform === unavailable.platform && record.status === "failed")

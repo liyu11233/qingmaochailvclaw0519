@@ -1291,9 +1291,13 @@ describe("management API", () => {
     await request(app).post("/api/pilot/hotel-scale-validation/run").send(smokeScaleInput).expect(200);
     expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(smokeScaleInput);
 
+    const threeHotelScaleInput = { limit: 3 };
+    await request(app).post("/api/pilot/hotel-scale-validation/run").send(threeHotelScaleInput).expect(200);
+    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(threeHotelScaleInput);
+
     await request(app).post("/api/pilot/hotel-scale-validation/run").send({ checkInDate: "2026-06-02" }).expect(400);
     await request(app).post("/api/pilot/hotel-scale-validation/run").send({ checkInDate: "2026-06-04", checkOutDate: "2026-06-02" }).expect(400);
-    await request(app).post("/api/pilot/hotel-scale-validation/run").send({ limit: 6 }).expect(400);
+    await request(app).post("/api/pilot/hotel-scale-validation/run").send({ limit: 41 }).expect(400);
 
     const singleDiagnosisStatus = await request(app).get("/api/pilot/hotel-single-diagnosis/status").expect(200);
     expect(singleDiagnosisStatus.body.status).toBe("idle");

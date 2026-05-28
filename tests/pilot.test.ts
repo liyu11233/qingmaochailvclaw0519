@@ -69,6 +69,7 @@ import {
   selectHotelCalibrationDefaultRatePlan,
   selectLowestHotelMainRateQuote,
   selectZtripHotelRateForRatePlan,
+  shouldDowngradeZtripRatePlanFilterFailure,
   shouldExpandZtripRoomCardForLowestRate,
   shouldStopHotelAllRatePlanCollectionAfterQuoteFailure,
   resolveHotelSmallBatchBudgetStop,
@@ -1374,6 +1375,13 @@ CNY 260`);
     expect(classifyZtripHotelSearchReadiness("深圳", candidate, "如家酒店深圳南山店 查看详情 CNY319")).toBe("finished-without-target");
   });
 
+  it("downgrades missing ztrip rate filters to the current rate plan only", () => {
+    expect(shouldDowngradeZtripRatePlanFilterFailure(new Error("在途商旅酒店未找到筛选项 双床"))).toBe(true);
+    expect(shouldDowngradeZtripRatePlanFilterFailure(new Error("在途商旅酒店未找到筛选项 双份早餐"))).toBe(true);
+    expect(shouldDowngradeZtripRatePlanFilterFailure(new Error("在途商旅酒店搜索结果加载超时：杭州西溪古墩路亚朵S酒店"))).toBe(false);
+    expect(classifyHotelCalibrationFailureType("在途商旅酒店未找到筛选项 双床，按双床无早餐记为暂无", "在途商旅")).toBe("competitor_no_main_rate");
+  });
+
   it("does not treat ztrip default recommended hotels as matched hotels", () => {
     const candidate = {
       hotelName: "如家商旅酒店(广州白云山京溪南方医院地铁站店)",
@@ -2464,7 +2472,19 @@ CNY 260`);
     expect(result.quotes.map((quote) => quote.platform)).toEqual(["阿里商旅", "在途商旅"]);
   });
 
-  it("does not stop the remaining hotel rate plans after one platform quote failure in scale validation", () => {
+  it("stops remaining hotel rate plans only when a platform cannot confirm the same hotel", () => {
+    expect(shouldStopHotelAllRatePlanCollectionAfterQuoteFailure({
+      platform: "阿里商旅",
+      status: "failed",
+      price: null,
+      hotelName: "海友酒店(北京南站店)",
+      roomType: "",
+      ratePlan: "大床无早餐",
+      finalUrl: "https://travel.alibtrip.com/detail",
+      screenshotPath: "/tmp/ali.png",
+      error: "阿里详情门牌不匹配：期望 112号，实际 2号"
+    })).toBe(true);
+
     expect(shouldStopHotelAllRatePlanCollectionAfterQuoteFailure({
       platform: "携程商旅",
       status: "not-found",
@@ -2527,7 +2547,7 @@ CNY 260`);
         perGroupMs: 25 * 60 * 1000,
         maxAttemptsPerGroup: 24
       },
-      platformOrder: ["青猫差旅", "阿里商旅", "在途商旅", "携程商旅"],
+      platformOrder: ["青猫差旅", "阿里商旅", "携程商旅", "在途商旅"],
       cityPool: ["北京", "广州", "杭州", "上海", "深圳", "武汉", "佛山", "成都", "厦门"]
     });
     expect(result.groups).toHaveLength(5);
@@ -2548,6 +2568,20 @@ CNY 260`);
     expect(result.groups).toHaveLength(5);
     expect(result.groups.map((group) => group.targetCount)).toEqual([1, 1, 1, 1, 1]);
     expect(result.groups.every((group) => group.unattemptedCount === 1)).toBe(true);
+  });
+
+  it("initializes a 3-hotel scale validation smoke run across the first three groups", () => {
+    const result = buildInitialHotelScaleValidationResult(new Date(2026, 4, 24, 10), {
+      limit: 3
+    });
+
+    expect(result).toMatchObject({
+      targetTotal: 3,
+      targetPerGroup: 1,
+      unattemptedCount: 3
+    });
+    expect(result.groups.map((group) => group.targetCount)).toEqual([1, 1, 1, 0, 0]);
+    expect(result.groups.map((group) => group.unattemptedCount)).toEqual([1, 1, 1, 0, 0]);
   });
 
   it("builds a human-readable hotel diagnostic review page with inline screenshots", () => {
