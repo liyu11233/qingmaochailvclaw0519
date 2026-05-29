@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { FIXED_ROUTES, INTERNATIONAL_FALLBACK_ROUTES } from "../../src/domain/fakeBatch";
+import { DOMESTIC_FALLBACK_ROUTES, FIXED_ROUTES, INTERNATIONAL_FALLBACK_ROUTES } from "../../src/domain/fakeBatch";
 import type { CollectionBatch, FlightSample, HotelCoverImageFields, PlatformName, PlatformQuote, RouteConfig, RouteScope } from "../../src/domain/types";
 
 type PilotStatus = "idle" | "login-browser-open" | "running" | "completed" | "failed";
@@ -149,6 +149,20 @@ export interface SameFlightPlatformQuote {
   screenshotUrl?: string;
   rawText?: string;
   error?: string;
+}
+
+interface FlightListingResult {
+  platform: PlatformName;
+  candidates: QingmaoFlightCandidate[];
+  page: BrowserPage;
+  bodyText: string;
+  finalUrl: string;
+}
+
+interface FlightListingWorkPages {
+  ctrip: BrowserPage;
+  alibtrip: BrowserPage;
+  ztrip: BrowserPage;
 }
 
 export interface SameFlightComparisonProbeResult {
@@ -855,7 +869,7 @@ interface PilotCollectorOptions {
 
 interface BrowserLocator {
   innerText(options?: { timeout?: number }): Promise<string>;
-  click(options?: { timeout?: number }): Promise<unknown>;
+  click(options?: { timeout?: number; force?: boolean }): Promise<unknown>;
   fill(value: string): Promise<unknown>;
   press(key: string): Promise<unknown>;
   count(): Promise<number>;
@@ -888,6 +902,7 @@ interface BrowserPage {
   on?(event: "console", handler: (message: { text(): string }) => void): unknown;
   frames(): BrowserFrame[];
   bringToFront(): Promise<unknown>;
+  mouse: { click(x: number, y: number): Promise<unknown> };
   close?(options?: { runBeforeUnload?: boolean }): Promise<unknown>;
 }
 
@@ -937,7 +952,10 @@ const cityCodes: Record<string, string> = {
   新加坡: "SIN",
   大阪: "OSA",
   悉尼: "SYD",
-  马尼拉: "MNL"
+  马尼拉: "MNL",
+  雅加达: "CGK",
+  普吉: "HKT",
+  金边: "PNH"
 };
 
 const citySearchNames: Record<string, string> = {
@@ -1938,6 +1956,12 @@ export function classifyZtripProbeOutcome(text: string, finalUrl: string): Pilot
 
 async function openZtripBookingEntry(page: BrowserPage) {
   const currentText = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
+  if (isZtripStaleFlightResult(currentText)) {
+    await page.goto("https://www.z-trip.cn/v/pg/otapub/booking?type=flight", { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await page.waitForLoadState?.("networkidle", { timeout: 15_000 }).catch(() => undefined);
+    return;
+  }
+
   if (/机票|酒店|booking/i.test(currentText) && /\/booking/i.test(page.url())) {
     return;
   }
@@ -1955,44 +1979,80 @@ async function openZtripBookingEntry(page: BrowserPage) {
 
 async function selectZtripFlightCity(page: BrowserPage, placeholder: string, city: string) {
   const input = page.locator(`input[placeholder="${placeholder}"]`).first();
-  await input.click({ timeout: 8_000 });
-  await input.fill(city);
-  await page.waitForTimeout(1_000);
+  const searchTerms = citySelectionTerms(city);
+  const targetTerms = citySelectionTerms(city, true);
 
-  try {
-    await page.locator(`li.ret-item-flight-city:has-text("${city}")`).first().click({ timeout: 5_000 });
+  for (const searchTerm of searchTerms) {
+    await input.click({ timeout: 8_000 }).catch(async () => {
+      const placeholderValue = JSON.stringify(placeholder);
+      await page.evaluate(`(() => {
+        const placeholder = ${placeholderValue};
+        const input = Array.from(document.querySelectorAll("input"))
+          .find((element) => element.getAttribute("placeholder") === placeholder);
+        if (input) {
+          input.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+          input.focus();
+        }
+      })()`).catch(() => undefined);
+    });
+    await input.fill("");
+    await input.fill(searchTerm);
+    await page.waitForTimeout(1_000);
+
+    for (const targetTerm of targetTerms) {
+      try {
+        await page.locator(`li.ret-item-flight-city:has-text("${targetTerm}")`).first().click({ timeout: 2_000 });
+        await page.waitForTimeout(800);
+        return;
+      } catch {
+        // Fall through to DOM event dispatch for older result popovers.
+      }
+    }
+
+    const termsValue = JSON.stringify(targetTerms);
+    const clicked = await page.evaluate<boolean>(`(() => {
+      const targetTerms = ${termsValue};
+      const compactTerms = targetTerms.map((term) => String(term || "").replace(/\\s+/g, "")).filter(Boolean);
+      const isVisible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+      const selectors = [
+        "li.ret-item-flight-city",
+        "li.ret-item-flight-traffic",
+        ".ret-item-flight-city",
+        ".ret-item-flight-traffic",
+        "[role='option']",
+        ".ivu-select-item",
+        "li"
+      ];
+      const items = Array.from(document.querySelectorAll(selectors.join(",")))
+        .filter((element) => isVisible(element));
+      const textOf = (element) => (element.textContent || "").replace(/\\s+/g, "");
+      const containsTerm = (text) => compactTerms.some((term) => text.includes(term));
+      const cityTarget = items.find((element) => {
+        const text = textOf(element);
+        return containsTerm(text) && text.includes("城市");
+      }) ?? items.find((element) => containsTerm(textOf(element)));
+      if (!cityTarget) return false;
+      cityTarget.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true, view: window }));
+      cityTarget.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      cityTarget.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      cityTarget.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      return true;
+    })()`);
+
+    if (clicked) {
+      await page.waitForTimeout(800);
+      return;
+    }
+
+    await input.press("Enter").catch(() => undefined);
     await page.waitForTimeout(800);
-    return;
-  } catch {
-    // Fall through to DOM event dispatch for older result popovers.
   }
 
-  const cityValue = JSON.stringify(city);
-  const clicked = await page.evaluate<boolean>(`(() => {
-    const targetCity = ${cityValue};
-    const isVisible = (element) => {
-      const rect = element.getBoundingClientRect();
-      const style = window.getComputedStyle(element);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const items = Array.from(document.querySelectorAll("li.ret-item-flight-city, li.ret-item-flight-traffic"))
-      .filter((element) => isVisible(element));
-    const target = items.find((element) => {
-      const text = (element.textContent || "").replace(/\\s+/g, "");
-      return text.includes(targetCity) && text.includes("城市");
-    }) ?? items.find((element) => (element.textContent || "").includes(targetCity));
-    if (!target) return false;
-    target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-    target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-    target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-    return true;
-  })()`);
-
-  if (!clicked) {
-    throw new Error(`在途商旅未找到城市 ${city}`);
-  }
-
-  await page.waitForTimeout(800);
+  throw new Error(`在途商旅未找到城市 ${city}`);
 }
 
 async function selectZtripFlightDate(page: BrowserPage, travelDate: string) {
@@ -2033,18 +2093,69 @@ async function selectZtripFlightDate(page: BrowserPage, travelDate: string) {
   await page.waitForTimeout(800);
 }
 
+function isZtripStaleFlightResult(bodyText: string) {
+  return /当前页面长时间未操作|航班价格可能变动|重新选择航班/.test(bodyText);
+}
+
+function citySelectionTerms(city: string, includeAirports = false) {
+  const terms = [
+    city,
+    citySearchNames[city],
+    cityCodes[city],
+    city.endsWith("市") ? city.slice(0, -1) : `${city}市`
+  ];
+
+  if (includeAirports) {
+    if (city === "深圳") terms.push("宝安");
+    if (city === "北京") terms.push("首都", "大兴");
+    if (city === "上海") terms.push("虹桥", "浦东");
+    if (city === "广州") terms.push("白云");
+    if (city === "成都") terms.push("双流", "天府");
+  }
+
+  return [...new Set(terms.filter((term): term is string => Boolean(term)))];
+}
+
+function ztripFlightResultUrlMatchesRoute(urlValue: string, route: PilotRoute, expectedPath: string) {
+  try {
+    const parsed = new URL(urlValue);
+    const originCode = cityCodes[route.origin] ?? route.origin;
+    const destinationCode = cityCodes[route.destination] ?? route.destination;
+    return parsed.pathname.includes(expectedPath)
+      && parsed.searchParams.get("fromDate") === route.travelDate
+      && parsed.searchParams.get("fromCityCode") === originCode
+      && parsed.searchParams.get("toCityCode") === destinationCode;
+  } catch {
+    return false;
+  }
+}
+
+function ztripFlightResultTextMatchesRoute(bodyText: string, route: PilotRoute) {
+  const compactText = bodyText.replace(/\s+/g, "");
+  return compactText.includes(`${route.origin}-${route.destination}`)
+    || compactText.includes(`${route.origin}→${route.destination}`)
+    || compactText.includes(`${route.origin}至${route.destination}`);
+}
+
 async function findReadyZtripFlightResultPage(context: BrowserContext, route: PilotRoute) {
   const resultPages = context.pages().filter((page) => page.url().includes("z-trip.cn") && page.url().includes("/flight/multiList"));
-  const sameDatePages = resultPages.filter((page) => page.url().includes(`fromDate=${route.travelDate}`));
-  const orderedPages = [...sameDatePages, ...resultPages.filter((page) => !sameDatePages.includes(page))].sort((a, b) => {
+  const routePages = resultPages.filter((page) => ztripFlightResultUrlMatchesRoute(page.url(), route, "/flight/multiList"));
+  const sameDatePages = resultPages.filter((page) => page.url().includes(`fromDate=${route.travelDate}`) && !routePages.includes(page));
+  const orderedPages = [...routePages, ...sameDatePages, ...resultPages.filter((page) => !routePages.includes(page) && !sameDatePages.includes(page))].sort((a, b) => {
     const aScore = a.url().includes("/v/pg/flight/multiList") ? 0 : 1;
     const bScore = b.url().includes("/v/pg/flight/multiList") ? 0 : 1;
     return aScore - bScore;
   });
 
   for (const resultPage of orderedPages) {
+    if (!ztripFlightResultUrlMatchesRoute(resultPage.url(), route, "/flight/multiList")) {
+      continue;
+    }
     const bodyText = await resultPage.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
-    if (/共\s*\d+\s*个航班|CNY|暂无符合条件|无航班/i.test(bodyText)) {
+    if (isZtripStaleFlightResult(bodyText)) {
+      continue;
+    }
+    if (ztripFlightResultTextMatchesRoute(bodyText, route) && /共\s*\d+\s*个航班|CNY|暂无符合条件|无航班/i.test(bodyText)) {
       return resultPage;
     }
   }
@@ -2089,7 +2200,9 @@ async function searchZtripFlightRoute(page: BrowserPage, route: PilotRoute, cont
 
     const bodyText = await page.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
 
-    if (/共\s*\d+\s*个航班/.test(bodyText) || /暂无符合条件|无航班|flight\/multiList/i.test(bodyText) || page.url().includes("/flight/multiList")) {
+    const isCurrentRouteResult = ztripFlightResultUrlMatchesRoute(page.url(), route, "/flight/multiList")
+      || ztripFlightResultTextMatchesRoute(bodyText, route);
+    if (!isZtripStaleFlightResult(bodyText) && isCurrentRouteResult && (/共\s*\d+\s*个航班/.test(bodyText) || /暂无符合条件|无航班|flight\/multiList/i.test(bodyText) || page.url().includes("/flight/multiList"))) {
       return page;
     }
   }
@@ -2104,6 +2217,7 @@ async function findReadyZtripInternationalFlightResultPage(context: BrowserConte
     const bodyText = await resultPage.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
     const compactText = bodyText.replace(/\s+/g, "");
     if (
+      !isZtripStaleFlightResult(bodyText) &&
       compactText.includes(`${route.origin}-${route.destination}`) &&
       (/共\s*\d+\s*个航班/.test(bodyText) || /暂无符合条件|无航班|没有可预订航班/i.test(bodyText))
     ) {
@@ -11875,9 +11989,10 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       const outputRoot = path.dirname(options.artifactDir);
       const publicScreenshotDir = path.join(outputRoot, "screenshots", batchId);
       const targetSampleCount = typeof limit === "number" && limit > 0 ? Math.min(limit, 10) : 10;
-      const routes = FIXED_ROUTES
+      const primaryRoutes = FIXED_ROUTES
         .filter((route) => route.scope === "国内")
         .slice(0, targetSampleCount);
+      const routes = [...primaryRoutes, ...DOMESTIC_FALLBACK_ROUTES];
 
       await fsp.mkdir(batchArtifactDir, { recursive: true });
       await fsp.mkdir(publicScreenshotDir, { recursive: true });
@@ -11896,6 +12011,12 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
         await browser.disconnect?.();
         throw new Error("未找到青猫差旅已登录页面，请先打开登录浏览器并保持窗口打开");
       }
+      const protectedPages = protectedPlatformPages(context, [qingmaoPage]);
+      await closeNonBaseBrowserPages(context, protectedPages).catch(() => undefined);
+      const workPages = await createFlightListingWorkPages(context);
+      for (const page of Object.values(workPages)) {
+        protectedPages.add(page);
+      }
 
       await openQingmaoDomesticFlightTab(qingmaoPage);
       const qingmaoFrame = findQingmaoFlightFrame(qingmaoPage);
@@ -11907,6 +12028,24 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
 
       const samples: FlightSample[] = [];
       const failureNotes: string[] = [];
+      const usedFlightKeys = new Set<string>();
+      const writePartialSnapshot = async () => {
+        const failedCount = Math.max(targetSampleCount - samples.length, 0);
+        await fsp.writeFile(
+          path.join(batchArtifactDir, "partial-batch.json"),
+          JSON.stringify({
+            id: batchId,
+            status: samples.length >= targetSampleCount ? "ready" : "partial",
+            generatedAt: collectedAt.toISOString(),
+            sampleCount: samples.length,
+            successCount: samples.length,
+            failedCount,
+            samples,
+            failureNotes
+          }, null, 2),
+          "utf8"
+        ).catch(() => undefined);
+      };
 
       try {
         for (const routeConfig of routes) {
@@ -11923,60 +12062,65 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
           try {
             await searchQingmaoFlightRoute(qingmaoFrame, route);
             const candidates = await extractQingmaoFlightCandidates(qingmaoFrame);
-            const selectedFlight = pickRandomQingmaoCandidate(candidates, random);
-
-            if (!selectedFlight) {
-              failureNotes.push(`${route.origin}-${route.destination}: 青猫候选航班为空`);
+            if (!pickRandomQingmaoCandidate(candidates, random)) {
+              failureNotes.push(`已替换 ${route.origin}-${route.destination}: 青猫候选航班为空`);
+              await writePartialSnapshot();
               continue;
             }
 
-            const randomizedCandidates = shuffledQingmaoCandidates(candidates, random);
-            const skippedFlights: string[] = [];
+            const listings = await Promise.all([
+              searchCtripFlightListing(context, route, workPages.ctrip),
+              searchAliFlightListing(context, route, workPages.alibtrip),
+              searchZtripFlightListing(context, route, workPages.ztrip)
+            ]);
+            const selectedFlight = pickRandomCommonFlightCandidate(candidates, listings, usedFlightKeys, route, random);
             let acceptedSample: FlightSample | null = null;
 
-            for (const candidate of randomizedCandidates) {
-              try {
-                const ctripQuote = await searchCtripSameFlightQuote(context, sampleArtifactDir, route, candidate, `${sampleId}-${platformSlug("携程商旅")}.png`);
-                const aliQuote = await searchAliSameFlightQuote(context, sampleArtifactDir, route, candidate, `${sampleId}-${platformSlug("阿里商旅")}.png`);
-                const ztripQuote = await searchZtripSameFlightQuote(context, sampleArtifactDir, route, candidate, `${sampleId}-${platformSlug("在途商旅")}.png`);
-                const sameFlightQuotes = [buildQingmaoQuote(candidate), ctripQuote, aliQuote, ztripQuote];
-
-                if (!hasCompleteSameFlightQuotes(sameFlightQuotes)) {
-                  skippedFlights.push(`${candidate.flightNo}: ${incompleteQuoteReason(sameFlightQuotes)}`);
-                  continue;
-                }
-
-                const qingmaoScreenshot = path.join(publicScreenshotDir, `${sampleId}-${platformSlug("青猫差旅")}.png`);
-                const qingmaoEvidencePath = await savePageEvidence(qingmaoPage, qingmaoScreenshot, {
-                  platform: "青猫差旅",
+            if (selectedFlight) {
+              const qingmaoScreenshot = path.join(publicScreenshotDir, `${sampleId}-${platformSlug("青猫差旅")}.png`);
+              const qingmaoEvidencePath = await savePageEvidence(qingmaoPage, qingmaoScreenshot, {
+                platform: "青猫差旅",
+                route,
+                selectedFlight,
+                price: selectedFlight.price,
+                bodyText: selectedFlight.rawText
+              });
+              const listingQuotes = await Promise.all(listings.map(async (listing) => {
+                const matched = findCandidateByFlightNo(listing.candidates, selectedFlight.flightNo);
+                const evidencePath = await savePageEvidence(listing.page, path.join(publicScreenshotDir, `${sampleId}-${platformSlug(listing.platform)}.png`), {
+                  platform: listing.platform,
                   route,
-                  selectedFlight: candidate,
-                  price: candidate.price,
-                  bodyText: candidate.rawText
+                  selectedFlight,
+                  price: matched?.price ?? null,
+                  bodyText: listing.bodyText
                 });
-                const quotes = [
-                  mapSameFlightQuoteToPlatformQuote(buildQingmaoQuote(candidate, qingmaoEvidencePath), batchId, sampleId),
-                  await persistSameFlightQuote(ctripQuote, publicScreenshotDir, batchId, sampleId),
-                  await persistSameFlightQuote(aliQuote, publicScreenshotDir, batchId, sampleId),
-                  await persistSameFlightQuote(ztripQuote, publicScreenshotDir, batchId, sampleId)
-                ];
-                acceptedSample = buildFlightSampleFromRealQuote(sampleId, routeConfig, route, candidate, quotes);
-                break;
-              } catch (error) {
-                skippedFlights.push(`${candidate.flightNo}: ${errorMessage(error)}`);
-              }
+                return mapSameFlightQuoteToPlatformQuote(buildListingQuote(listing, selectedFlight, evidencePath), batchId, sampleId);
+              }));
+              const quotes = [
+                mapSameFlightQuoteToPlatformQuote(buildQingmaoQuote(selectedFlight, qingmaoEvidencePath), batchId, sampleId),
+                ...listingQuotes
+              ];
+              acceptedSample = buildFlightSampleFromRealQuote(sampleId, routeConfig, route, selectedFlight, quotes);
+              usedFlightKeys.add(`${route.origin}-${route.destination}-${selectedFlight.flightNo}`);
             }
 
             if (acceptedSample) {
               samples.push(acceptedSample);
+              await writePartialSnapshot();
             } else {
-              failureNotes.push(`${route.origin}-${route.destination}: 已跳过 ${randomizedCandidates.length} 个航班，未找到四平台均可订同航班${skippedFlights.length ? `（${skippedFlights.slice(0, 3).join("；")}）` : ""}`);
+              failureNotes.push(`已替换 ${route.origin}-${route.destination}: ${commonPoolDiagnostic(candidates, listings)}`);
+              await writePartialSnapshot();
             }
           } catch (error) {
-            failureNotes.push(`${route.origin}-${route.destination}: ${errorMessage(error)}`);
+            failureNotes.push(`已替换 ${route.origin}-${route.destination}: ${errorMessage(error)}`);
+            await writePartialSnapshot();
+          } finally {
+            await closeTemporaryFlightPages(context, protectedPages).catch(() => undefined);
           }
         }
       } finally {
+        await closeFlightListingWorkPages(workPages).catch(() => undefined);
+        await closeNonBaseBrowserPages(context, protectedPlatformPages(context, [qingmaoPage])).catch(() => undefined);
         await browser.disconnect?.();
       }
 
@@ -11987,6 +12131,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
 
       if (samples.length < targetSampleCount) {
+        await writePartialSnapshot();
         throw new Error(`国内真实采集未凑够 ${targetSampleCount} 条四平台完整样本，当前成功 ${samples.length} 条：${failureNotes.join("；")}`);
       }
 
@@ -12031,9 +12176,33 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
         await browser.disconnect?.();
         throw new Error("未找到青猫差旅已登录页面，请先打开登录浏览器并保持窗口打开");
       }
+      const protectedPages = protectedPlatformPages(context, [qingmaoPage]);
+      await closeNonBaseBrowserPages(context, protectedPages).catch(() => undefined);
+      const workPages = await createFlightListingWorkPages(context);
+      for (const page of Object.values(workPages)) {
+        protectedPages.add(page);
+      }
 
       const samples: FlightSample[] = [];
       const failureNotes: string[] = [];
+      const usedFlightKeys = new Set<string>();
+      const writePartialSnapshot = async () => {
+        const failedCount = Math.max(targetSampleCount - samples.length, 0);
+        await fsp.writeFile(
+          path.join(batchArtifactDir, "partial-batch.json"),
+          JSON.stringify({
+            id: batchId,
+            status: samples.length >= targetSampleCount ? "ready" : "partial",
+            generatedAt: collectedAt.toISOString(),
+            sampleCount: samples.length,
+            successCount: samples.length,
+            failedCount,
+            samples,
+            failureNotes
+          }, null, 2),
+          "utf8"
+        ).catch(() => undefined);
+      };
 
       try {
         for (const routeConfig of routes) {
@@ -12049,61 +12218,66 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
 
           try {
             const qingmaoFrame = await searchQingmaoInternationalFlightRoute(qingmaoPage, route);
-            const candidates = await extractQingmaoFlightCandidates(qingmaoFrame);
-            const selectedFlight = pickRandomQingmaoCandidate(candidates, random);
-
-            if (!selectedFlight) {
+            const candidates = await extractQingmaoFlightCandidates(qingmaoFrame, 24);
+            if (!pickRandomQingmaoCandidate(candidates, random)) {
               failureNotes.push(`已替换 ${route.origin}-${route.destination}: 青猫国际候选航班为空`);
+              await writePartialSnapshot();
               continue;
             }
 
-            const randomizedCandidates = shuffledQingmaoCandidates(candidates, random);
-            const skippedFlights: string[] = [];
+            const listings = await Promise.all([
+              searchCtripFlightListing(context, route, workPages.ctrip),
+              searchAliFlightListing(context, route, workPages.alibtrip),
+              searchZtripFlightListing(context, route, workPages.ztrip)
+            ]);
+            const selectedFlight = pickRandomCommonFlightCandidate(candidates, listings, usedFlightKeys, route, random);
             let acceptedSample: FlightSample | null = null;
 
-            for (const candidate of randomizedCandidates) {
-              try {
-                const ctripQuote = await searchCtripSameFlightQuote(context, sampleArtifactDir, route, candidate, `${sampleId}-${platformSlug("携程商旅")}.png`);
-                const aliQuote = await searchAliSameFlightQuote(context, sampleArtifactDir, route, candidate, `${sampleId}-${platformSlug("阿里商旅")}.png`);
-                const ztripQuote = await searchZtripSameFlightQuote(context, sampleArtifactDir, route, candidate, `${sampleId}-${platformSlug("在途商旅")}.png`);
-                const sameFlightQuotes = [buildQingmaoQuote(candidate), ctripQuote, aliQuote, ztripQuote];
-
-                if (!hasCompleteSameFlightQuotes(sameFlightQuotes)) {
-                  skippedFlights.push(`${candidate.flightNo}: ${incompleteQuoteReason(sameFlightQuotes)}`);
-                  continue;
-                }
-
-                const qingmaoScreenshot = path.join(publicScreenshotDir, `${sampleId}-${platformSlug("青猫差旅")}.png`);
-                const qingmaoEvidencePath = await savePageEvidence(qingmaoPage, qingmaoScreenshot, {
-                  platform: "青猫差旅",
+            if (selectedFlight) {
+              const qingmaoScreenshot = path.join(publicScreenshotDir, `${sampleId}-${platformSlug("青猫差旅")}.png`);
+              const qingmaoEvidencePath = await savePageEvidence(qingmaoPage, qingmaoScreenshot, {
+                platform: "青猫差旅",
+                route,
+                selectedFlight,
+                price: selectedFlight.price,
+                bodyText: selectedFlight.rawText
+              });
+              const listingQuotes = await Promise.all(listings.map(async (listing) => {
+                const matched = findCandidateByFlightNo(listing.candidates, selectedFlight.flightNo);
+                const evidencePath = await savePageEvidence(listing.page, path.join(publicScreenshotDir, `${sampleId}-${platformSlug(listing.platform)}.png`), {
+                  platform: listing.platform,
                   route,
-                  selectedFlight: candidate,
-                  price: candidate.price,
-                  bodyText: candidate.rawText
+                  selectedFlight,
+                  price: matched?.price ?? null,
+                  bodyText: listing.bodyText
                 });
-                const quotes = [
-                  mapSameFlightQuoteToPlatformQuote(buildQingmaoQuote(candidate, qingmaoEvidencePath), batchId, sampleId),
-                  await persistSameFlightQuote(ctripQuote, publicScreenshotDir, batchId, sampleId),
-                  await persistSameFlightQuote(aliQuote, publicScreenshotDir, batchId, sampleId),
-                  await persistSameFlightQuote(ztripQuote, publicScreenshotDir, batchId, sampleId)
-                ];
-                acceptedSample = buildFlightSampleFromRealQuote(sampleId, routeConfig, route, candidate, quotes);
-                break;
-              } catch (error) {
-                skippedFlights.push(`${candidate.flightNo}: ${errorMessage(error)}`);
-              }
+                return mapSameFlightQuoteToPlatformQuote(buildListingQuote(listing, selectedFlight, evidencePath), batchId, sampleId);
+              }));
+              const quotes = [
+                mapSameFlightQuoteToPlatformQuote(buildQingmaoQuote(selectedFlight, qingmaoEvidencePath), batchId, sampleId),
+                ...listingQuotes
+              ];
+              acceptedSample = buildFlightSampleFromRealQuote(sampleId, routeConfig, route, selectedFlight, quotes);
+              usedFlightKeys.add(`${route.origin}-${route.destination}-${selectedFlight.flightNo}`);
             }
 
             if (acceptedSample) {
               samples.push(acceptedSample);
+              await writePartialSnapshot();
             } else {
-              failureNotes.push(`已替换 ${route.origin}-${route.destination}: 已跳过 ${randomizedCandidates.length} 个航班，未找到四平台均可订同航班${skippedFlights.length ? `（${skippedFlights.slice(0, 3).join("；")}）` : ""}`);
+              failureNotes.push(`已替换 ${route.origin}-${route.destination}: ${commonPoolDiagnostic(candidates, listings)}`);
+              await writePartialSnapshot();
             }
           } catch (error) {
             failureNotes.push(`已替换 ${route.origin}-${route.destination}: ${errorMessage(error)}`);
+            await writePartialSnapshot();
+          } finally {
+            await closeTemporaryFlightPages(context, protectedPages).catch(() => undefined);
           }
         }
       } finally {
+        await closeFlightListingWorkPages(workPages).catch(() => undefined);
+        await closeNonBaseBrowserPages(context, protectedPlatformPages(context, [qingmaoPage])).catch(() => undefined);
         await browser.disconnect?.();
       }
 
@@ -12114,6 +12288,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
 
       if (samples.length < targetSampleCount) {
+        await writePartialSnapshot();
         throw new Error(`国际真实采集未凑够 ${targetSampleCount} 条四平台完整样本，当前成功 ${samples.length} 条：${failureNotes.join("；")}`);
       }
 
@@ -12766,6 +12941,45 @@ function parseAliHotelOfferPrice(text: string) {
   return priceValues.length ? Math.min(...priceValues) : null;
 }
 
+function parseGenericFlightCandidatesText(rawText: string): QingmaoFlightCandidate[] {
+  const text = rawText.replace(/\s+/g, " ").trim();
+  const flightMatches = Array.from(text.matchAll(/(?:[A-Z]{2}|[0-9][A-Z])\d{3,4}/g));
+  const candidates = new Map<string, QingmaoFlightCandidate>();
+
+  for (const match of flightMatches) {
+    const flightNo = match[0];
+    const matchIndex = match.index ?? 0;
+    const snippet = text.slice(matchIndex, matchIndex + 700);
+    const before = text.slice(Math.max(0, matchIndex - 24), matchIndex);
+    const priceMatch = snippet.match(/(?:[￥¥]\s*|CNY\s*)(\d{2,5})(?:\s*起)?/i);
+    if (!priceMatch) continue;
+
+    const price = Number(priceMatch[1]);
+    const airlineMatch = before.match(/([\u4e00-\u9fa5A-Za-z]{2,12})\s*$/);
+    const existing = candidates.get(flightNo);
+    if (existing && typeof existing.price === "number" && existing.price <= price) continue;
+
+    candidates.set(flightNo, {
+      airline: airlineMatch?.[1] ?? "",
+      flightNo,
+      aircraft: "",
+      departureTime: "",
+      arrivalTime: "",
+      originAirport: "",
+      destinationAirport: "",
+      durationMinutes: null,
+      price,
+      cabin: "经济舱",
+      discount: "",
+      meal: "",
+      shared: /共享/.test(snippet),
+      rawText: snippet.slice(0, 700)
+    });
+  }
+
+  return Array.from(candidates.values());
+}
+
 function buildAliHotelRatePlanDiagnosticText(rawText: string, ratePlan: HotelRatePlanLabel) {
   const lines = rawText
     .split(/\n+/)
@@ -13156,9 +13370,65 @@ async function clickVisibleFrameElement(frame: BrowserFrame, selector: string, t
   throw new Error(`未找到可点击的青猫页面元素 ${selector}`);
 }
 
+async function clickQingmaoCalendarDateByMouse(page: BrowserPage, frame: BrowserFrame, travelDate: string) {
+  const targetRect = await frame.evaluate<{ x: number; y: number; width: number; height: number } | null>(`(() => {
+    const [year, monthValue, dayValue] = ${JSON.stringify(travelDate)}.split("-").map(Number);
+    const monthText = year + "年" + monthValue + "月";
+    const dayText = String(dayValue);
+    const isVisibleEnough = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const monthHeader = Array.from(document.querySelectorAll(".tw-calendar-month"))
+      .find((element) => (element.textContent || "").trim() === monthText && isVisibleEnough(element));
+    const dateGrid = monthHeader?.parentElement?.querySelector(".tw-calendar-date");
+    if (!dateGrid) return null;
+    const day = Array.from(dateGrid.querySelectorAll(".item-box"))
+      .find((element) => {
+        const text = (element.textContent || "").replace(/\\s+/g, "");
+        return text === dayText || new RegExp("(^|[^0-9])" + dayText + "(?:$|出发|返程|休)$").test(text);
+      });
+    const clickable = day?.querySelector(".item:not(.disabled)") || day?.querySelector(".item") || day;
+    if (!clickable) return null;
+    const scrollTarget = document.querySelector("uni-scroll-view.tw-calendar-content .uni-scroll-view, .tw-calendar-content .uni-scroll-view, .tw-calendar-content");
+    let rect = clickable.getBoundingClientRect();
+    if (scrollTarget && (rect.y > window.innerHeight - 120 || rect.y < 420)) {
+      const delta = rect.y - 520;
+      scrollTarget.scrollBy?.(0, delta);
+      if ("scrollTop" in scrollTarget) scrollTarget.scrollTop += delta;
+      rect = clickable.getBoundingClientRect();
+    }
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  })()`).catch(() => null);
+
+  if (!targetRect) return false;
+
+  const frameRect = await page.evaluate<{ x: number; y: number } | null>(`(() => {
+    const frame = Array.from(document.querySelectorAll("iframe"))
+      .find((element) => (element.src || "").includes("mcqt.tmctrip.com"));
+    if (!frame) return null;
+    const rect = frame.getBoundingClientRect();
+    return { x: rect.x, y: rect.y };
+  })()`).catch(() => null);
+
+  if (!frameRect) return false;
+
+  await page.mouse.click(
+    frameRect.x + targetRect.x + targetRect.width / 2,
+    frameRect.y + targetRect.y + targetRect.height / 2
+  );
+  await page.waitForTimeout(800);
+  return true;
+}
+
 async function openQingmaoInternationalFlightTab(page: BrowserPage) {
   if (!/TravelBooking/i.test(page.url())) {
-    await page.getByText("差旅预订", { exact: true }).first().click({ timeout: 8_000 });
+    try {
+      await page.getByText("差旅预订", { exact: true }).first().click({ timeout: 8_000 });
+    } catch {
+      await page.goto(platformUrls.青猫差旅, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    }
     await page.waitForTimeout(3_000);
   }
 
@@ -13178,7 +13448,20 @@ async function openQingmaoInternationalFlightTab(page: BrowserPage) {
   }
   await page.waitForTimeout(1_000);
 
-  const frame = await waitForQingmaoIntegratedTrafficFrame(page);
+  let frame = await waitForQingmaoIntegratedTrafficFrame(page);
+  if (!frame) {
+    await page.goto(platformUrls.青猫差旅, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await page.waitForTimeout(3_000);
+    const fallbackOtherBookingTab = page.locator("#tab-16");
+    if ((await fallbackOtherBookingTab.count().catch(() => 0)) > 0) {
+      await fallbackOtherBookingTab.click({ timeout: 8_000 });
+    } else {
+      await page.getByText("其他预订", { exact: true }).first().click({ timeout: 8_000 });
+    }
+    await page.waitForTimeout(2_000);
+    frame = await waitForQingmaoIntegratedTrafficFrame(page);
+  }
+
   if (!frame) {
     throw new Error("未找到青猫其他预订 iframe");
   }
@@ -13231,10 +13514,10 @@ async function selectQingmaoMobileCity(page: BrowserPage, areaSelector: ".depart
   await frame.waitForTimeout(500);
   await frame.locator("input.uni-input-input").first().fill(searchName);
   const cityName = JSON.stringify(searchName);
-  let clicked = false;
+  let selected = false;
   for (let attempt = 0; attempt < 12; attempt += 1) {
     await frame.waitForTimeout(500);
-    clicked = await frame.evaluate<boolean>(`(() => {
+    const clicked = await frame.evaluate<boolean>(`(() => {
       const cityName = ${cityName};
       const isVisible = (element) => {
         const rect = element.getBoundingClientRect();
@@ -13251,21 +13534,35 @@ async function selectQingmaoMobileCity(page: BrowserPage, areaSelector: ".depart
         });
       const target = clickableRow || airportRow || exactCity;
       if (target) {
-        target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+        const rect = target.getBoundingClientRect();
+        const init = { bubbles: true, cancelable: true, view: window, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2 };
+        target.dispatchEvent(new MouseEvent("mouseenter", init));
+        target.dispatchEvent(new PointerEvent("pointerdown", init));
+        target.dispatchEvent(new MouseEvent("mousedown", init));
+        target.dispatchEvent(new PointerEvent("pointerup", init));
+        target.dispatchEvent(new MouseEvent("mouseup", init));
+        target.dispatchEvent(new MouseEvent("click", init));
       }
       return Boolean(target);
     })()`);
 
     if (clicked) {
-      break;
+      for (let waitIndex = 0; waitIndex < 10; waitIndex += 1) {
+        await page.waitForTimeout(500);
+        const currentFrame = findQingmaoTrafficFrame(page);
+        if (currentFrame && !currentFrame.url().includes("cityAirport")) {
+          selected = true;
+          break;
+        }
+      }
+      if (selected) break;
+      frame = findQingmaoTrafficFrame(page) ?? frame;
     }
   }
 
-  if (!clicked) {
+  if (!selected) {
     throw new Error(`青猫国际未找到城市 ${city}`);
   }
-
-  await page.waitForTimeout(1_000);
 }
 
 async function selectQingmaoMobileDate(page: BrowserPage, travelDate: string) {
@@ -13274,11 +13571,105 @@ async function selectQingmaoMobileDate(page: BrowserPage, travelDate: string) {
     throw new Error("未找到青猫国际机票 iframe");
   }
 
-  const [, monthRaw, dayRaw] = travelDate.split("-");
-  const selectedDateTexts = [`${monthRaw}月${dayRaw}日`, `${Number(monthRaw)}月${Number(dayRaw)}日`];
-  const currentBodyText = await frame.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
-  if (selectedDateTexts.some((text) => currentBodyText.includes(text))) {
-    return;
+  const [yearRaw, monthRaw, dayRaw] = travelDate.split("-");
+  const yearText = String(Number(yearRaw));
+  const monthText = String(Number(monthRaw));
+  const dayText = String(Number(dayRaw));
+  const targetDateValue = JSON.stringify({
+    travelDate,
+    yearText,
+    monthText,
+    dayText,
+    paddedMonthDay: `${monthRaw}-${dayRaw}`,
+    compactMonthDay: `${monthText}-${dayText}`,
+    paddedMonthDayText: `${monthRaw}月${dayRaw}日`,
+    monthDayText: `${monthText}月${dayText}日`
+  });
+
+  const clickedShortcut = await frame.evaluate<boolean>(`(() => {
+    const target = ${targetDateValue};
+    const isVisibleEnough = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const textMatches = (text) => {
+      const compactText = String(text || "").replace(/\\s+/g, "");
+      return compactText.includes(target.paddedMonthDay)
+        || compactText.includes(target.compactMonthDay)
+        || compactText.includes(target.paddedMonthDayText)
+        || compactText.includes(target.monthDayText);
+    };
+    const candidates = Array.from(document.querySelectorAll("uni-view, uni-text, span, div"))
+      .filter((element) => isVisibleEnough(element) && textMatches(element.textContent))
+      .filter((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.y < window.innerHeight * 0.45;
+      })
+      .sort((left, right) => {
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        const leftTextLength = (left.textContent || "").replace(/\\s+/g, "").length;
+        const rightTextLength = (right.textContent || "").replace(/\\s+/g, "").length;
+        const leftArea = leftRect.width * leftRect.height;
+        const rightArea = rightRect.width * rightRect.height;
+        return leftTextLength - rightTextLength || leftArea - rightArea || leftRect.y - rightRect.y || leftRect.x - rightRect.x;
+      });
+    const dateNode = candidates[0];
+    if (!dateNode) return false;
+    let clickable = dateNode.closest(".p-30-0, .swiper-item, .date-item, .item") || dateNode;
+    for (let parent = dateNode.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+      const parentText = (parent.textContent || "").replace(/\\s+/g, "");
+      if (textMatches(parentText)) {
+        const parentRect = parent.getBoundingClientRect();
+        if (parentRect.width <= 160 && parentRect.height <= 120) {
+          clickable = parent;
+        }
+      }
+    }
+    clickable.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true, view: window }));
+    clickable.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+    clickable.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+    clickable.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    return true;
+  })()`).catch(() => false);
+
+  if (clickedShortcut) {
+    await page.waitForTimeout(1_200);
+    frame = findQingmaoTrafficFrame(page);
+    const selectedShortcutDate = await frame?.evaluate<boolean>(`(() => {
+      const target = ${targetDateValue};
+      const isVisibleEnough = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+      const textMatches = (text) => {
+        const compactText = String(text || "").replace(/\\s+/g, "");
+        return compactText.includes(target.paddedMonthDay)
+          || compactText.includes(target.compactMonthDay)
+          || compactText.includes(target.paddedMonthDayText)
+          || compactText.includes(target.monthDayText);
+      };
+      return Array.from(document.querySelectorAll("uni-view, uni-text, span, div"))
+        .filter((element) => isVisibleEnough(element) && textMatches(element.textContent))
+        .some((element) => {
+          const rect = element.getBoundingClientRect();
+          const selectedNode = element.closest(".current, .selected, .active");
+          if (selectedNode && isVisibleEnough(selectedNode) && textMatches(selectedNode.textContent)) {
+            return true;
+          }
+          const dateField = element.closest(".p-30-0");
+          return Boolean(dateField && isVisibleEnough(dateField) && textMatches(dateField.textContent) && rect.y < window.innerHeight * 0.7);
+        });
+    })()`).catch(() => false) ?? false;
+    if (selectedShortcutDate) {
+      return;
+    }
+  }
+
+  if (!frame) {
+    throw new Error("未找到青猫国际机票 iframe");
   }
 
   try {
@@ -13290,15 +13681,28 @@ async function selectQingmaoMobileDate(page: BrowserPage, travelDate: string) {
     await clickVisibleFrameElement(frame, "uni-view", "所选日期为航班起降当地日期");
   }
   await frame.waitForTimeout(500);
-  const dateValue = JSON.stringify(travelDate);
-  const dayText = String(Number(dayRaw));
-  let clicked = false;
+  const monthTitle = `${yearText}年${monthText}月`;
+  let clickedByLocator = false;
   try {
-    await frame.locator(`.item-box:has-text("${dayText}")`).first().click({ timeout: 8_000 });
-    clicked = true;
+    await frame
+      .locator(`.tw-calendar-month:has-text("${monthTitle}") + .tw-calendar-date .item-box:has-text("${dayText}") .item:not(.disabled)`)
+      .first()
+      .click({ timeout: 3_000, force: true });
+    clickedByLocator = true;
   } catch {
-    clicked = await frame.evaluate<boolean>(`(() => {
-    const [year, monthValue, dayValue] = ${dateValue}.split("-").map(Number);
+    try {
+      await frame
+        .locator(`.tw-calendar-month:has-text("${monthTitle}") + .tw-calendar-date .item-box:has-text("${dayText}")`)
+        .first()
+        .click({ timeout: 3_000, force: true });
+      clickedByLocator = true;
+    } catch {
+      clickedByLocator = false;
+    }
+  }
+  const clickedByMouse = clickedByLocator ? true : await clickQingmaoCalendarDateByMouse(page, frame, travelDate);
+  const clicked = clickedByMouse || await frame.evaluate<boolean>(`(async () => {
+    const [year, monthValue, dayValue] = ${JSON.stringify(travelDate)}.split("-").map(Number);
     const monthText = year + "年" + monthValue + "月";
     const dayText = String(dayValue);
     const isVisibleEnough = (element) => {
@@ -13306,31 +13710,88 @@ async function selectQingmaoMobileDate(page: BrowserPage, travelDate: string) {
       const style = window.getComputedStyle(element);
       return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
     };
-    const monthHeaders = Array.from(document.querySelectorAll("uni-view, uni-text, span"))
-      .filter((element) => (element.textContent || "").trim() === monthText && isVisibleEnough(element));
-    const monthHeader = monthHeaders[0];
-    if (!monthHeader) return false;
-    const monthY = monthHeader.getBoundingClientRect().y;
-    const nextMonthHeader = Array.from(document.querySelectorAll("uni-view, uni-text, span"))
-      .filter((element) => /^\\d{4}年\\d+月$/.test((element.textContent || "").trim()) && element.getBoundingClientRect().y > monthY)
-      .sort((left, right) => left.getBoundingClientRect().y - right.getBoundingClientRect().y)[0];
-    const nextMonthY = nextMonthHeader ? nextMonthHeader.getBoundingClientRect().y : Number.POSITIVE_INFINITY;
-    const day = Array.from(document.querySelectorAll(".item-box"))
-      .filter((element) => {
-        const rect = element.getBoundingClientRect();
-        const text = (element.textContent || "").trim();
-        return rect.y > monthY && rect.y < nextMonthY && text === dayText && isVisibleEnough(element);
-      })[0];
-    if (day) day.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-    return Boolean(day);
+    const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+    const tryClickDay = () => {
+      const monthHeader = Array.from(document.querySelectorAll(".tw-calendar-month"))
+        .find((element) => (element.textContent || "").trim() === monthText && isVisibleEnough(element));
+      const monthBlock = monthHeader?.parentElement;
+      const dateGrid = monthBlock?.querySelector(".tw-calendar-date");
+      if (!dateGrid) return false;
+      const day = Array.from(dateGrid.querySelectorAll(".item-box"))
+        .filter((element) => {
+          const text = (element.textContent || "").replace(/\\s+/g, "");
+          const dayMatch = text === dayText || new RegExp("(^|[^0-9])" + dayText + "(?:$|出发|返程|休)$").test(text);
+          return dayMatch && isVisibleEnough(element);
+        })[0];
+      if (!day) return false;
+      const scrollView = document.querySelector(".tw-calendar-content .uni-scroll-view, .tw-calendar-content, uni-scroll-view.tw-calendar-content");
+      const popupContent = document.querySelector(".popup-content, .uni-popup__wrapper-box");
+      const scrollTarget = scrollView || popupContent || document.scrollingElement || document.documentElement;
+      const targetY = day.getBoundingClientRect().y;
+      const visibleTop = 420;
+      if (targetY > window.innerHeight - 120 || targetY < visibleTop) {
+        const delta = targetY - visibleTop;
+        scrollTarget.scrollBy?.(0, delta);
+        if ("scrollTop" in scrollTarget) scrollTarget.scrollTop += delta;
+        window.scrollBy(0, delta);
+      }
+      const clickable = day.querySelector(".item:not(.disabled)") || day.querySelector(".item") || day;
+      clickable.scrollIntoView({ block: "center", inline: "center" });
+      const rect = clickable.getBoundingClientRect();
+      const init = { bubbles: true, cancelable: true, view: window, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2 };
+      clickable.dispatchEvent(new MouseEvent("mouseenter", init));
+      clickable.dispatchEvent(new PointerEvent("pointerdown", init));
+      clickable.dispatchEvent(new MouseEvent("mousedown", init));
+      clickable.dispatchEvent(new PointerEvent("pointerup", init));
+      clickable.dispatchEvent(new MouseEvent("mouseup", init));
+      clickable.dispatchEvent(new MouseEvent("click", init));
+      return true;
+    };
+    for (let index = 0; index < 8; index += 1) {
+      if (tryClickDay()) return true;
+      const scrollTarget = document.querySelector(".tw-calendar .uni-scroll-view, .uni-scroll-view, uni-scroll-view") || document.scrollingElement || document.documentElement;
+      scrollTarget.scrollBy?.(0, 280);
+      if ("scrollTop" in scrollTarget) scrollTarget.scrollTop += 280;
+      window.scrollBy(0, 280);
+      await sleep(250);
+    }
+    return false;
   })()`);
-  }
 
   if (!clicked) {
     throw new Error(`青猫国际未找到日期 ${travelDate}`);
   }
 
   await page.waitForTimeout(800);
+  frame = findQingmaoTrafficFrame(page);
+  const selectedCalendarDate = await frame?.evaluate<boolean>(`(() => {
+    const target = ${targetDateValue};
+    const isVisibleEnough = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const textMatches = (text) => {
+      const compactText = String(text || "").replace(/\\s+/g, "");
+      return compactText.includes(target.paddedMonthDay)
+        || compactText.includes(target.compactMonthDay)
+        || compactText.includes(target.paddedMonthDayText)
+        || compactText.includes(target.monthDayText);
+    };
+    return Array.from(document.querySelectorAll("uni-view, uni-text, span, div"))
+      .filter((element) => isVisibleEnough(element) && textMatches(element.textContent))
+      .some((element) => {
+        const selectedNode = element.closest(".current, .selected, .active");
+        if (selectedNode && isVisibleEnough(selectedNode) && textMatches(selectedNode.textContent)) {
+          return true;
+        }
+        const dateField = element.closest(".p-30-0");
+        return Boolean(dateField && isVisibleEnough(dateField) && textMatches(dateField.textContent));
+      });
+  })()`).catch(() => false) ?? false;
+  if (!selectedCalendarDate) {
+    throw new Error(`青猫国际日期未切换到 ${travelDate}`);
+  }
 }
 
 async function searchQingmaoInternationalFlightRoute(page: BrowserPage, route: PilotRoute) {
@@ -13372,9 +13833,13 @@ async function selectQingmaoCity(frame: BrowserFrame, selectIndex: number, city:
     return;
   }
 
-  const cityNameValue = JSON.stringify(city);
+  const searchTerms = citySelectionTerms(city);
+  const targetTerms = citySelectionTerms(city, true);
+  const verifyTerms = citySelectionTerms(city).filter((term) => !/^[A-Z]{3}$/.test(term));
+  const cityNameValue = JSON.stringify(targetTerms);
   const clickCityOption = async () => frame.evaluate<boolean>(`(() => {
-      const cityName = ${cityNameValue};
+      const cityNames = ${cityNameValue};
+      const compactNames = cityNames.map((name) => String(name || "").replace(/\\s+/g, "")).filter(Boolean);
       const isVisible = (element) => {
         const rect = element.getBoundingClientRect();
         const style = window.getComputedStyle(element);
@@ -13382,8 +13847,8 @@ async function selectQingmaoCity(frame: BrowserFrame, selectIndex: number, city:
       };
       const item = Array.from(document.querySelectorAll(".el-select-dropdown__item, [role='option']"))
         .find((element) => {
-          const text = (element.textContent || "").trim();
-          return isVisible(element) && (text === cityName || text.includes(cityName));
+          const text = (element.textContent || "").replace(/\\s+/g, "");
+          return isVisible(element) && compactNames.some((name) => text === name || text.includes(name));
         });
       if (!item) return false;
       item.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true, view: window }));
@@ -13394,22 +13859,26 @@ async function selectQingmaoCity(frame: BrowserFrame, selectIndex: number, city:
     })()`);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const searchTerm = searchTerms[attempt] ?? city;
+    const input = frame.locator("input.el-select__input").nth(selectIndex);
     await select.click({ timeout: 8_000 });
     await frame.waitForTimeout(300);
-    await frame.locator("input.el-select__input").nth(selectIndex).fill(city);
+    await input.click({ timeout: 3_000 }).catch(() => undefined);
+    await input.fill("");
+    await input.fill(searchTerm);
 
     for (let index = 0; index < 10; index += 1) {
       const clicked = await clickCityOption();
       if (clicked) {
         await frame.waitForTimeout(500);
         const selectedText = await select.innerText({ timeout: 2_000 }).catch(() => "");
-        if (selectedText.includes(city)) return;
+        if (verifyTerms.some((term) => selectedText.includes(term))) return;
       }
       await frame.waitForTimeout(300);
     }
 
     const selectedText = await select.innerText({ timeout: 2_000 }).catch(() => "");
-    if (selectedText.includes(city)) {
+    if (verifyTerms.some((term) => selectedText.includes(term))) {
       return;
     }
   }
@@ -13440,10 +13909,10 @@ async function searchQingmaoFlightRoute(frame: BrowserFrame, route: PilotRoute) 
   }
 }
 
-async function extractQingmaoFlightCandidates(frame: BrowserFrame): Promise<QingmaoFlightCandidate[]> {
+async function extractQingmaoFlightCandidates(frame: BrowserFrame, limit = 12): Promise<QingmaoFlightCandidate[]> {
   const rawItems = await frame.evaluate<string[]>(`(() =>
     Array.from(document.querySelectorAll(".list-item"))
-      .slice(0, 12)
+      .slice(0, ${JSON.stringify(limit)})
       .map((item) => (item.textContent || "").replace(/\\s+/g, " ").trim())
   )()`);
 
@@ -13477,7 +13946,7 @@ function pickRandomQingmaoCandidate(candidates: QingmaoFlightCandidate[], random
 }
 
 function shuffledQingmaoCandidates(candidates: QingmaoFlightCandidate[], random: () => number) {
-  const selectable = candidates.filter((candidate) => candidate.flightNo && typeof candidate.price === "number" && !candidate.shared);
+  const selectable = candidates.filter((candidate) => candidate.flightNo && typeof candidate.price === "number");
 
   for (let index = selectable.length - 1; index > 0; index -= 1) {
     const swapIndex = Math.min(index, Math.floor(random() * (index + 1)));
@@ -13487,6 +13956,48 @@ function shuffledQingmaoCandidates(candidates: QingmaoFlightCandidate[], random:
   return selectable;
 }
 
+function findCandidateByFlightNo(candidates: QingmaoFlightCandidate[], flightNo: string) {
+  return candidates.find((candidate) => candidate.flightNo === flightNo && typeof candidate.price === "number") ?? null;
+}
+
+function findCommonFlightCandidates(
+  qingmaoCandidates: QingmaoFlightCandidate[],
+  listings: FlightListingResult[],
+  usedFlightKeys: Set<string>,
+  route: PilotRoute
+) {
+  return qingmaoCandidates.filter((candidate) => {
+    if (!candidate.flightNo || typeof candidate.price !== "number") return false;
+    if (usedFlightKeys.has(`${route.origin}-${route.destination}-${candidate.flightNo}`)) return false;
+    return listings.every((listing) => findCandidateByFlightNo(listing.candidates, candidate.flightNo));
+  });
+}
+
+function pickRandomCommonFlightCandidate(
+  qingmaoCandidates: QingmaoFlightCandidate[],
+  listings: FlightListingResult[],
+  usedFlightKeys: Set<string>,
+  route: PilotRoute,
+  random: () => number
+) {
+  const commonCandidates = findCommonFlightCandidates(qingmaoCandidates, listings, usedFlightKeys, route);
+  if (!commonCandidates.length) return null;
+  const shuffled = shuffledQingmaoCandidates(commonCandidates, random);
+  return shuffled[0] ?? null;
+}
+
+function commonPoolDiagnostic(qingmaoCandidates: QingmaoFlightCandidate[], listings: FlightListingResult[]) {
+  const counts = [
+    `青猫${qingmaoCandidates.length}`,
+    ...listings.map((listing) => `${listing.platform}${listing.candidates.length}`)
+  ].join("/");
+  const qingmaoFlightNos = new Set(qingmaoCandidates.map((candidate) => candidate.flightNo).filter(Boolean));
+  const common = Array.from(qingmaoFlightNos).filter((flightNo) =>
+    listings.every((listing) => listing.candidates.some((candidate) => candidate.flightNo === flightNo))
+  );
+  return `四平台共同航班池为空（列表数量 ${counts}，共同航班 ${common.length}）`;
+}
+
 function buildQingmaoQuote(candidate: QingmaoFlightCandidate, screenshotPath?: string): SameFlightPlatformQuote {
   return {
     platform: "青猫差旅",
@@ -13494,6 +14005,22 @@ function buildQingmaoQuote(candidate: QingmaoFlightCandidate, screenshotPath?: s
     price: candidate.price,
     screenshotPath,
     rawText: candidate.rawText
+  };
+}
+
+function buildListingQuote(
+  listing: FlightListingResult,
+  selectedFlight: QingmaoFlightCandidate,
+  screenshotPath?: string
+): SameFlightPlatformQuote {
+  const candidate = findCandidateByFlightNo(listing.candidates, selectedFlight.flightNo);
+  return {
+    platform: listing.platform,
+    status: candidate && typeof candidate.price === "number" ? "available" : "not-found",
+    price: candidate?.price ?? null,
+    finalUrl: listing.finalUrl,
+    screenshotPath,
+    rawText: candidate?.rawText ?? listing.bodyText.slice(0, 700)
   };
 }
 
@@ -13649,6 +14176,18 @@ function isTemporaryHotelPage(page: BrowserPage) {
   return false;
 }
 
+function isTemporaryFlightPage(page: BrowserPage) {
+  const url = page.url();
+  if (!url || url === "about:blank") return true;
+  if (/^chrome-error:/i.test(url)) return true;
+  if (/ct\.ctrip\.com\/corp-flight-booking\//i.test(url)) return true;
+  if (/travel\.alibtrip\.com\/flight-/i.test(url)) return true;
+  if (/www\.z-trip\.cn\/v\/pg\/flight\//i.test(url)) return true;
+  if (/www\.z-trip\.cn\/v\/pg\/otapub\/booking\?type=flight/i.test(url)) return true;
+  if (/www\.z-trip\.cn\/v\/votapub\/booking\/flight/i.test(url)) return true;
+  return false;
+}
+
 function platformRootKey(url: string) {
   if (/booking\.tmctrip\.com\/TravelBooking/i.test(url)) return "qingmao";
   if (/ct\.ctrip\.com\/(?:online\/home|login)/i.test(url)) return "ctrip";
@@ -13665,6 +14204,36 @@ function platformRootScore(url: string) {
   if (/www\.z-trip\.cn\/v\/vcommon\/home/i.test(url)) return 3;
   if (/login/i.test(url)) return 1;
   return 2;
+}
+
+function platformDomainKey(url: string) {
+  if (/booking\.tmctrip\.com/i.test(url)) return "qingmao";
+  if (/ct\.ctrip\.com/i.test(url)) return "ctrip";
+  if (/travel\.alibtrip\.com/i.test(url)) return "alibtrip";
+  if (/www\.z-trip\.cn/i.test(url)) return "ztrip";
+  return "";
+}
+
+function protectedPlatformPages(context: BrowserContext, requiredPages: BrowserPage[] = []) {
+  const protectedPages = new Set<BrowserPage>(requiredPages);
+  const platformPages = new Map<string, BrowserPage[]>();
+
+  for (const page of context.pages()) {
+    const key = platformDomainKey(page.url());
+    if (!key) {
+      continue;
+    }
+    platformPages.set(key, [...(platformPages.get(key) ?? []), page]);
+  }
+
+  for (const pages of platformPages.values()) {
+    const rootPage = pages
+      .filter((page) => platformRootKey(page.url()))
+      .sort((left, right) => platformRootScore(right.url()) - platformRootScore(left.url()))[0];
+    protectedPages.add(rootPage ?? pages[0]);
+  }
+
+  return protectedPages;
 }
 
 async function ensurePlatformRootPages(context: BrowserContext) {
@@ -13720,6 +14289,65 @@ async function closeTemporaryHotelPages(context: BrowserContext, keepPages: Set<
     }).catch(() => undefined);
   }
   return closedCount;
+}
+
+async function closeTemporaryFlightPages(context: BrowserContext, keepPages: Set<BrowserPage> = new Set()) {
+  let closedCount = 0;
+  for (const page of context.pages()) {
+    if (keepPages.has(page) || !isTemporaryFlightPage(page) || typeof page.close !== "function") {
+      continue;
+    }
+    await closeBrowserPageWithTimeout(page).then(() => {
+      closedCount += 1;
+    }).catch(() => undefined);
+  }
+
+  return closedCount;
+}
+
+async function closeNonBaseBrowserPages(context: BrowserContext, keepPages: Set<BrowserPage> = new Set()) {
+  let closedCount = 0;
+  for (const page of context.pages()) {
+    if (keepPages.has(page) || typeof page.close !== "function") {
+      continue;
+    }
+
+    await closeBrowserPageWithTimeout(page).then(() => {
+      closedCount += 1;
+    }).catch(() => undefined);
+  }
+
+  return closedCount;
+}
+
+async function createFlightListingWorkPages(context: BrowserContext): Promise<FlightListingWorkPages> {
+  const [ctrip, alibtrip, ztrip] = await Promise.all([
+    context.newPage(),
+    context.newPage(),
+    context.newPage()
+  ]);
+
+  await Promise.all([
+    ctrip.goto("https://ct.ctrip.com/online/home", { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined),
+    alibtrip.goto("https://travel.alibtrip.com/index.html#/flight", { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined),
+    ztrip.goto(platformUrls.在途商旅, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined)
+  ]);
+
+  return { ctrip, alibtrip, ztrip };
+}
+
+async function closeFlightListingWorkPages(workPages: FlightListingWorkPages) {
+  await Promise.all(
+    Object.values(workPages).map((page) => closeBrowserPageWithTimeout(page).catch(() => undefined))
+  );
+}
+
+async function closeBrowserPageWithTimeout(page: BrowserPage, timeoutMs = 3_000) {
+  if (typeof page.close !== "function") return;
+  await Promise.race([
+    page.close({ runBeforeUnload: false }),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs))
+  ]);
 }
 
 async function closeCreatedBrowserPages(context: BrowserContext, pagesBeforeRun: Set<BrowserPage>, keepPages: Set<BrowserPage> = new Set()) {
@@ -13846,6 +14474,22 @@ async function waitForSearchText(page: BrowserPage, flightNo: string, options: {
   return page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
 }
 
+async function waitForFlightListingText(page: BrowserPage) {
+  let latestText = "";
+
+  for (let index = 0; index < 50; index += 1) {
+    latestText = await page.locator("body").innerText({ timeout: 2_000 }).catch(() => latestText);
+    const candidates = parseGenericFlightCandidatesText(latestText);
+    if (candidates.length > 0 || /暂无|无航班|没有找到|出错了|异常/.test(latestText)) {
+      return latestText;
+    }
+
+    await page.waitForTimeout(1_000);
+  }
+
+  return latestText || page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
+}
+
 async function clickVisibleText(page: BrowserPage, text: string) {
   const targetText = JSON.stringify(text);
   const clicked = await page.evaluate<boolean>(`(() => {
@@ -13877,7 +14521,9 @@ async function clickVisibleText(page: BrowserPage, text: string) {
 
 async function selectCtripCity(page: BrowserPage, inputIndex: number, city: string) {
   const input = page.locator("input[placeholder=\"城市或机场\"]").nth(inputIndex);
+  await page.waitForTimeout(1_000);
   await input.click({ timeout: 10_000 });
+  await input.fill("");
   await input.fill(city);
   await page.waitForTimeout(1_000);
   await page.locator(".searchedCity").first().click({ timeout: 10_000 });
@@ -13961,6 +14607,29 @@ async function searchCtripSameFlightQuote(
   }
 }
 
+async function searchCtripFlightListing(
+  context: BrowserContext,
+  route: PilotRoute,
+  workPage?: BrowserPage
+): Promise<FlightListingResult> {
+  const page = workPage ?? await context.newPage();
+  await page.goto("https://ct.ctrip.com/online/home", { waitUntil: "domcontentloaded", timeout: 45_000 });
+  await page.waitForTimeout(3_000);
+  await selectCtripCity(page, 0, route.origin);
+  await selectCtripCity(page, 1, route.destination);
+  await selectCtripDate(page, route.travelDate);
+  await clickVisibleText(page, "因公出行");
+  await page.waitForLoadState?.("domcontentloaded", { timeout: 30_000 }).catch(() => undefined);
+  const bodyText = await waitForFlightListingText(page);
+  return {
+    platform: "携程商旅",
+    candidates: parseGenericFlightCandidatesText(bodyText),
+    page,
+    bodyText,
+    finalUrl: page.url()
+  };
+}
+
 async function searchZtripSameFlightQuote(
   context: BrowserContext,
   artifactDir: string,
@@ -14017,6 +14686,28 @@ async function searchZtripSameFlightQuote(
       error: errorText
     };
   }
+}
+
+async function searchZtripFlightListing(
+  context: BrowserContext,
+  route: PilotRoute,
+  workPage?: BrowserPage
+): Promise<FlightListingResult> {
+  const page = workPage ?? await context.newPage();
+  await page.goto(platformUrls.在途商旅, { waitUntil: "domcontentloaded", timeout: 45_000 });
+  await page.waitForLoadState?.("networkidle", { timeout: 15_000 }).catch(() => undefined);
+
+  const resultPage = route.scope === "国内"
+    ? await searchZtripFlightRoute(page, route, context)
+    : await searchZtripInternationalFlightRoute(page, route, context);
+  const bodyText = await waitForZtripFlightResultText(resultPage);
+  return {
+    platform: "在途商旅",
+    candidates: parseZtripFlightCandidatesText(bodyText),
+    page: resultPage,
+    bodyText,
+    finalUrl: resultPage.url()
+  };
 }
 
 function isAliFlightHomeUrl(urlValue: string) {
@@ -14383,4 +15074,37 @@ async function searchAliSameFlightQuote(
       error: errorText
     };
   }
+}
+
+async function searchAliFlightListing(
+  context: BrowserContext,
+  route: PilotRoute,
+  workPage?: BrowserPage
+): Promise<FlightListingResult> {
+  const page = workPage ?? await context.newPage();
+  const preExistingItineraryId = readAliItineraryIdFromUrl(page.url());
+  await page.goto("https://travel.alibtrip.com/index.html#/flight", { waitUntil: "domcontentloaded", timeout: 45_000 });
+  await page.waitForTimeout(3_000);
+
+  if (route.scope === "国际") {
+    const itineraryNo = await createAliFlightItineraryNo(context, page);
+    await navigateAliInternationalSearchList(context, page, route, itineraryNo);
+  } else {
+    const itineraryId = preExistingItineraryId ?? await createAliFlightItineraryNo(context, page);
+    await page.goto(buildAliSearchListUrl(page.url(), route, itineraryId), { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await page.waitForTimeout(5_000);
+  }
+
+  const bodyText = await waitForFlightListingText(page);
+  if (route.scope === "国际" && /出错了|异常/.test(bodyText) && !parseGenericFlightCandidatesText(bodyText).length) {
+    throw new Error(explainAliInternationalSubmitFailure(bodyText, ""));
+  }
+
+  return {
+    platform: "阿里商旅",
+    candidates: parseGenericFlightCandidatesText(bodyText),
+    page,
+    bodyText,
+    finalUrl: page.url()
+  };
 }
