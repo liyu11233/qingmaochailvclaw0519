@@ -70,7 +70,7 @@ describe("fake batch generation", () => {
     }
   });
 
-  it("selects the hotel default rate plan by completeness before display priority", () => {
+  it("selects the complete hotel default rate plan where Qingmao is lowest with the largest advantage", () => {
     const decision = resolveHotelDisplayDecision([
       hotelRatePlan("大床有早餐", [320, 330, 340, null]),
       hotelRatePlan("大床无早餐", [300, 310, 315, 305]),
@@ -78,7 +78,8 @@ describe("fake batch generation", () => {
       hotelRatePlan("双床无早餐", [280, 290, null, null])
     ]);
 
-    expect(decision.defaultRatePlan).toBe("大床无早餐");
+    expect(decision.defaultRatePlan).toBe("双床有早餐");
+    expect(decision.defaultRatePlanReason).toContain("青猫差旅最低价且优势最大");
     expect(decision.salesDisplayEligible).toBe(true);
     expect(decision.completeRatePlanCount).toBe(2);
   });

@@ -193,16 +193,17 @@ describe("export artifacts", () => {
     expect(hotelHtml).toContain("首旅如家");
     expect(hotelHtml).toContain("酒店数量");
     expect(hotelHtml).toContain("主对比口径");
-    expect(hotelHtml).toContain("当前选择口径");
+    expect(hotelHtml).toContain("青猫差旅为最低价且优势最大");
     expect(hotelHtml).toContain("大床有早餐");
     expect(hotelHtml).toContain("双床有早餐");
-    expect(hotelHtml).toContain("hotel-photo.jpg");
+    expect(hotelHtml).toContain("hotel-identity");
+    expect(hotelHtml).not.toContain("hotel-photo.jpg");
     expect(existsSync(path.join(result.directory, "hotels", "index.html"))).toBe(true);
     expect(existsSync(path.join(result.directory, "assets", "flight-photo.jpg"))).toBe(true);
     expect(existsSync(path.join(result.directory, "assets", "hotel-photo.jpg"))).toBe(true);
   });
 
-  it("uses each hotel's most complete comparable rate plan as the default sales display", async () => {
+  it("uses each hotel's Qingmao-lowest complete rate plan as the default sales display", async () => {
     const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
     batch.samples = batch.samples.slice(0, 1);
     batch.sampleCount = 1;
