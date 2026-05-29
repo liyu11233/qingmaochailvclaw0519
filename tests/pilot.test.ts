@@ -2958,6 +2958,50 @@ CNY 260`);
     });
   });
 
+  it("keeps ali full-name search variants as detail candidates when the core landmark still matches", () => {
+    const rongguiCandidate = {
+      hotelName: "如家酒店·neo(顺德容桂天佑城店)",
+      level: "经济型",
+      score: "4.6",
+      area: "",
+      address: "顺德区容桂镇文华路19号",
+      price: 134,
+      rawText: ""
+    };
+    const qinghuiCandidate = {
+      hotelName: "如家精选酒店(佛山顺德清晖园店)",
+      level: "舒适型",
+      score: "4.8",
+      area: "",
+      address: "顺德区大良南国中路蚌岗巷5号",
+      price: 222,
+      rawText: ""
+    };
+
+    expect(
+      matchAliHotelListCandidateForDetail(
+        rongguiCandidate,
+        "如家·neo-容桂渔人码头天佑城店经济4.6很好1000+评价近天佑城(桂洲大道店)·文塔公园可开专票￥133起",
+        "佛山"
+      )
+    ).toMatchObject({
+      matched: true,
+      reason: "阿里列表候选：品牌+核心店名，待详情门牌确认",
+      sameHotelConfirmed: false
+    });
+    expect(
+      matchAliHotelListCandidateForDetail(
+        qinghuiCandidate,
+        "如家精选(佛山顺德大良清晖园店）舒适4.8很好1000+评价近清晖园·佛山顺德大良蚌岗巷可开专票￥222起",
+        "佛山"
+      )
+    ).toMatchObject({
+      matched: true,
+      reason: "阿里列表候选：品牌+核心店名，待详情门牌确认",
+      sameHotelConfirmed: false
+    });
+  });
+
   it("keeps ali airport landmark list cards as detail confirmation candidates even without door number", () => {
     const candidate = {
       hotelName: "如家商旅酒店(广州白云国际机场T2航站楼店)",

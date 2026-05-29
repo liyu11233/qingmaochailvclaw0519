@@ -2563,6 +2563,29 @@ function buildAliHotelDetailCoreKeywords(candidate: QingmaoHotelCandidate, query
   return buildAliHotelDetailCoreSignals(candidate, queryCity).allKeywords;
 }
 
+function buildAliHotelLooseDetailLandmarkTokens(candidate: QingmaoHotelCandidate, queryCity = "") {
+  const target = new Set<string>();
+  const addTailTokens = (value: string) => {
+    const normalized = stripAliHotelCoreNoise(value, queryCity);
+    const withoutWeak = withoutAliWeakLocationQualifiers(normalized);
+    const source = withoutWeak || normalized;
+    const compactLandmarkPattern = /([\u4e00-\u9fa5A-Za-z0-9]{2,12}(?:园|城|湾|码头))/g;
+    for (const match of source.matchAll(compactLandmarkPattern)) {
+      const fullToken = stripAliHotelCoreNoise(match[1] ?? "", queryCity);
+      const tailLengths = fullToken.endsWith("码头") ? [4, 5, 6] : [3, 4, 5];
+      for (const length of tailLengths) {
+        if (fullToken.length < length) continue;
+        const tailToken = fullToken.slice(-length);
+        if (isMeaningfulAliCoreKeyword(tailToken)) target.add(tailToken);
+      }
+    }
+  };
+
+  addTailTokens(aliHotelBracketText(candidate.hotelName));
+  addTailTokens(candidate.hotelName);
+  return Array.from(target);
+}
+
 function aliHotelKeywordMatched(keyword: string, normalizedCardName: string, normalizedCard: string) {
   return normalizedCardName.includes(keyword) || normalizedCard.includes(keyword);
 }
@@ -2687,9 +2710,12 @@ export function matchAliHotelListCandidateForDetail(candidate: QingmaoHotelCandi
   const primaryCoreMatched = coreSignals.primaryKeywords.some((keyword) => aliHotelKeywordMatched(keyword, normalizedCardName, normalizedCard));
   const strongLandmarkMatched = coreSignals.strongLandmarks.some((keyword) => aliHotelKeywordMatched(keyword, normalizedCardName, normalizedCard));
   const auxiliaryMatchedCount = coreSignals.auxiliaryKeywords.filter((keyword) => aliHotelKeywordMatched(keyword, normalizedCardName, normalizedCard)).length;
+  const looseDetailLandmarkMatched = buildAliHotelLooseDetailLandmarkTokens(candidate, queryCity)
+    .some((keyword) => aliHotelKeywordMatched(keyword, normalizedCardName, normalizedCard));
   const coreNameMatched = exactNameMatched
     || primaryCoreMatched
     || strongLandmarkMatched
+    || looseDetailLandmarkMatched
     || Boolean(normalizedRoadKeyword && normalizedCard.includes(normalizedRoadKeyword))
     || auxiliaryMatchedCount >= 2;
   const strictMatch = matchHotelByBrandCoreCityDoorNumber(candidate, text, queryCity);
@@ -2716,6 +2742,7 @@ export function matchAliHotelListCandidateForDetail(candidate: QingmaoHotelCandi
     coreNameMatched,
     primaryCoreMatched,
     strongLandmarkMatched,
+    looseDetailLandmarkMatched,
     auxiliaryMatchedCount,
     exactNameMatched,
     cityMatched,
