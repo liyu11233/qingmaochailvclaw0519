@@ -47,6 +47,16 @@ export type HotelGroup = "如家集团" | "锦江集团" | "华住集团" | "东
 
 export type HotelRatePlanLabel = "大床无早餐" | "大床有早餐" | "双床无早餐" | "双床有早餐";
 
+export type HotelCoverImageStatus = "saved" | "missing" | "failed";
+
+export interface HotelCoverImageFields {
+  coverImageUrl?: string;
+  coverImagePath?: string;
+  coverImageSource?: PlatformName;
+  coverImageStatus?: HotelCoverImageStatus;
+  coverImageFailureReason?: string;
+}
+
 export interface HotelRatePlan {
   label: HotelRatePlanLabel;
   quotes: PlatformQuote[];
@@ -55,7 +65,7 @@ export interface HotelRatePlan {
   missingPlatforms?: PlatformName[];
 }
 
-export interface HotelSample {
+export interface HotelSample extends HotelCoverImageFields {
   id: string;
   group: HotelGroup;
   brand: string;
@@ -89,7 +99,7 @@ export interface FlightSummary {
   sampleId: string;
   lowestPlatform: PlatformName | "";
   qingmaoGap: number | null;
-  comparisonBasis: "highestCompetitor" | "averageCompetitor" | "unavailable";
+  comparisonBasis: "lowestCompetitor" | "betweenCompetitors" | "highestCompetitor" | "unavailable";
   comparisonLabel: string;
   availablePlatformCount: number;
   evidenceCount: number;
@@ -99,7 +109,7 @@ export interface FlightSummary {
 export interface PriceComparisonSummary {
   lowestPlatform: PlatformName | "";
   qingmaoGap: number | null;
-  comparisonBasis: "highestCompetitor" | "averageCompetitor" | "unavailable";
+  comparisonBasis: "lowestCompetitor" | "betweenCompetitors" | "highestCompetitor" | "unavailable";
   comparisonLabel: string;
   conclusion: string;
   competitorCount: number;

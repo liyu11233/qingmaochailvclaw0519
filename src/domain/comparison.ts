@@ -11,7 +11,9 @@ function availableQuotes(quotes: PlatformQuote[]) {
 }
 
 function formatGap(gap: number) {
-  return `${Math.abs(gap)}元`;
+  const value = Math.abs(gap);
+  const normalized = Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
+  return `${normalized}元`;
 }
 
 export function summarizeQuoteSet(quotes: PlatformQuote[]): PriceComparisonSummary {
@@ -21,7 +23,7 @@ export function summarizeQuoteSet(quotes: PlatformQuote[]): PriceComparisonSumma
   const qingmaoPrice = qingmao?.available ? qingmao.price : null;
   const lowestOverall = [...available].sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity))[0];
 
-  if (typeof qingmaoPrice !== "number" || !competitors.length) {
+  if (typeof qingmaoPrice !== "number" || competitors.length < 3) {
     return {
       lowestPlatform: "",
       qingmaoGap: null,
@@ -34,24 +36,37 @@ export function summarizeQuoteSet(quotes: PlatformQuote[]): PriceComparisonSumma
 
   const competitorPrices = competitors.map((quote) => quote.price ?? 0);
   const competitorCount = competitors.length;
-  const qingmaoIsLowest = available.every((quote) => quote.platform === "青猫差旅" || qingmaoPrice <= (quote.price ?? Infinity));
-  const basis = qingmaoIsLowest ? "highestCompetitor" : "averageCompetitor";
-  const referencePrice = qingmaoIsLowest
-    ? Math.max(...competitorPrices)
-    : Math.round(competitorPrices.reduce((sum, price) => sum + price, 0) / competitorCount);
-  const qingmaoGap = qingmaoPrice - referencePrice;
-  const targetLabel = basis === "highestCompetitor" ? `另外${competitorCount}家平台最高价` : `另外${competitorCount}家平台平均价`;
+  const lowestCompetitorPrice = Math.min(...competitorPrices);
+  const highestCompetitorPrice = Math.max(...competitorPrices);
+  const qingmaoVsLowest = qingmaoPrice - lowestCompetitorPrice;
+  const qingmaoVsHighest = qingmaoPrice - highestCompetitorPrice;
+  let basis: PriceComparisonSummary["comparisonBasis"] = "lowestCompetitor";
+  let qingmaoGap = qingmaoVsLowest;
   let conclusion = "";
   let comparisonLabel = "";
 
-  if (qingmaoGap < 0) {
-    comparisonLabel = `对比${targetLabel}低了${formatGap(qingmaoGap)}`;
+  if (qingmaoPrice <= lowestCompetitorPrice) {
+    basis = "lowestCompetitor";
+    qingmaoGap = qingmaoVsLowest;
+    if (qingmaoGap < 0) {
+      comparisonLabel = `对比另外${competitorCount}家平台最低价低了${formatGap(qingmaoGap)}`;
+    } else {
+      comparisonLabel = `与另外${competitorCount}家平台最低价持平`;
+    }
     conclusion = `青猫差旅${comparisonLabel}。`;
-  } else if (qingmaoGap === 0) {
-    comparisonLabel = `对比${targetLabel}持平`;
+  } else if (qingmaoPrice >= highestCompetitorPrice) {
+    basis = "highestCompetitor";
+    qingmaoGap = qingmaoVsHighest;
+    if (qingmaoGap > 0) {
+      comparisonLabel = `对比另外${competitorCount}家平台最高价高了${formatGap(qingmaoGap)}`;
+    } else {
+      comparisonLabel = `与另外${competitorCount}家平台最高价持平`;
+    }
     conclusion = `青猫差旅${comparisonLabel}。`;
   } else {
-    comparisonLabel = `对比${targetLabel}高了${formatGap(qingmaoGap)}`;
+    basis = "betweenCompetitors";
+    qingmaoGap = qingmaoVsLowest;
+    comparisonLabel = `对比另外${competitorCount}家平台最低价高了${formatGap(qingmaoVsLowest)}，但比另外${competitorCount}家平台最高价低了${formatGap(qingmaoVsHighest)}`;
     conclusion = `青猫差旅${comparisonLabel}。`;
   }
 

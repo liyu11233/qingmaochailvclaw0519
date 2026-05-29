@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { summarizeFlight, summarizeQuoteSet } from "../../src/domain/comparison";
 import {
+  analyzeHotelRatePlanCompleteness,
   HOTEL_DISPLAY_RATE_PLAN_PRIORITY,
   resolveHotelDisplayDecision,
   resolveHotelPrimaryRatePlan
@@ -28,6 +29,14 @@ const GROUP_LABEL: Record<HotelGroup, string> = {
 };
 const GROUP_ORDER: HotelGroup[] = ["如家集团", "华住集团", "锦江集团", "东呈集团", "亚朵集团"];
 const STATIC_ASSET_DIR = path.join(process.cwd(), "server", "assets");
+const DEFAULT_RATE_PLAN_KEY = "__default";
+
+interface HotelMetricSummary {
+  hotelCount: number;
+  lowestPrice: number | null;
+  averageSaving: number | null;
+  qingmaoLowestShare: number;
+}
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] ?? char);
@@ -82,11 +91,16 @@ function gapClass(gap: number | null) {
   return "higher";
 }
 
+function formatGapAmount(gap: number) {
+  const value = Math.abs(gap);
+  return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
+}
+
 function gapLabel(gap: number | null) {
   if (gap === null) return "暂无可比价";
-  if (gap < 0) return `低${Math.abs(gap)}元`;
+  if (gap < 0) return `低${formatGapAmount(gap)}元`;
   if (gap === 0) return "持平";
-  return `高${gap}元`;
+  return `高${formatGapAmount(gap)}元`;
 }
 
 function renderSavingBadge(gap: number | null, comparisonLabel: string) {
@@ -97,7 +111,7 @@ function renderSavingBadge(gap: number | null, comparisonLabel: string) {
     return `<span class="saving-main neutral">持平</span><small>${escapeHtml(comparisonLabel)}</small>`;
   }
   const prefix = gap < 0 ? "低" : "高";
-  return `<span class="saving-main"><em>${prefix}</em><b>${Math.abs(gap)}</b><em>元</em></span><small>${escapeHtml(comparisonLabel)}</small>`;
+  return `<span class="saving-main"><em>${prefix}</em><b>${formatGapAmount(gap)}</b><em>元</em></span><small>${escapeHtml(comparisonLabel)}</small>`;
 }
 
 function sharedHead(title: string) {
@@ -350,6 +364,64 @@ function renderHotelSummary(hotels: HotelSample[]) {
   };
 }
 
+function isCompleteRatePlan(ratePlan: HotelSample["ratePlans"][number]) {
+  return analyzeHotelRatePlanCompleteness(ratePlan).isFourPlatformComplete;
+}
+
+function scopedRatePlan(hotel: HotelSample, planKey: string) {
+  if (planKey === DEFAULT_RATE_PLAN_KEY) {
+    return primaryRatePlan(hotel);
+  }
+
+  return hotel.ratePlans.find((ratePlan) => ratePlan.label === planKey);
+}
+
+function summarizeHotelMetrics(hotels: HotelSample[], planKey: string): HotelMetricSummary {
+  const completePlans = hotels
+    .map((hotel) => scopedRatePlan(hotel, planKey))
+    .filter((ratePlan): ratePlan is HotelSample["ratePlans"][number] => Boolean(ratePlan))
+    .filter(isCompleteRatePlan);
+  const prices = completePlans.flatMap((ratePlan) =>
+    ratePlan.quotes.flatMap((quote) => (quote.available && typeof quote.price === "number" ? [quote.price] : []))
+  );
+  const summaries = completePlans.map((ratePlan) => summarizeQuoteSet(ratePlan.quotes));
+  const savings = summaries.flatMap((summary) => (summary.lowestPlatform === "青猫差旅" && typeof summary.qingmaoGap === "number" && summary.qingmaoGap < 0 ? [Math.abs(summary.qingmaoGap)] : []));
+  const qingmaoLowestCount = summaries.filter((summary) => summary.lowestPlatform === "青猫差旅").length;
+
+  return {
+    hotelCount: completePlans.length,
+    lowestPrice: prices.length ? Math.min(...prices) : null,
+    averageSaving: savings.length ? Math.round(savings.reduce((sum, value) => sum + value, 0) / savings.length) : null,
+    qingmaoLowestShare: completePlans.length ? Math.round((qingmaoLowestCount / completePlans.length) * 1000) / 10 : 0
+  };
+}
+
+function buildHotelMetricsByGroup(hotels: HotelSample[], groups: HotelGroup[], rateLabels: string[]) {
+  const planKeys = [DEFAULT_RATE_PLAN_KEY, ...rateLabels];
+
+  return Object.fromEntries(
+    groups.map((group) => {
+      const groupHotels = hotels.filter((hotel) => hotel.group === group);
+      return [
+        group,
+        Object.fromEntries(planKeys.map((planKey) => [planKey, summarizeHotelMetrics(groupHotels, planKey)]))
+      ];
+    })
+  );
+}
+
+function safeJson(value: unknown) {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
+}
+
+function formatNullableMoney(value: number | null, emptyLabel: string) {
+  return typeof value === "number" ? `¥${value} 起` : emptyLabel;
+}
+
+function initialMetric(metrics: Record<string, Record<string, HotelMetricSummary>>, group: HotelGroup | undefined) {
+  return group ? metrics[group]?.[DEFAULT_RATE_PLAN_KEY] ?? null : null;
+}
+
 function renderCompactRatePlan(ratePlan: HotelSample["ratePlans"][number]) {
   return `<div class="hotel-rate-mini">
     <strong>${escapeHtml(ratePlan.label)}</strong>
@@ -361,16 +433,19 @@ function renderCompactRatePlan(ratePlan: HotelSample["ratePlans"][number]) {
 }
 
 function renderHotelCard(hotel: HotelSample, index: number) {
-  return `<article class="hotel-record">
-    <div class="hotel-rank">${index + 1}</div>
-    <section class="hotel-identity" aria-label="${escapeHtml(hotel.hotelName)}">
+  const coverImage = hotel.coverImageStatus === "saved" && hotel.coverImagePath
+    ? `<figure class="hotel-photo"><img src="../covers/${escapeHtml(hotel.id)}/hotel-cover.jpg" alt="${escapeHtml(hotel.hotelName)}酒店封面图" /><figcaption>${escapeHtml(hotel.brand)}</figcaption></figure>`
+    : `<section class="hotel-identity" aria-label="${escapeHtml(hotel.hotelName)}">
       <div class="hotel-identity-brand">
         <span>${escapeHtml(hotel.group.replace("集团", ""))}</span>
         <strong>${escapeHtml(hotel.brand)}</strong>
       </div>
       <p>${escapeHtml(hotel.city)} · ${hotel.nights} 间夜</p>
       <small>${escapeHtml(String(hotel.completeRatePlanCount ?? 0))} 个完整可比口径</small>
-    </section>
+    </section>`;
+  return `<article class="hotel-record">
+    <div class="hotel-rank">${index + 1}</div>
+    ${coverImage}
     <section class="hotel-content">
       ${hotel.ratePlans.map((ratePlan) => renderHotelPlanView(hotel, ratePlan.label)).join("")}
     </section>
@@ -409,12 +484,13 @@ function renderHotels(batch: CollectionBatch) {
   const displayTime = formatDisplayTime(batch.generatedAt);
   const hotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
   const groups = GROUP_ORDER.filter((group) => hotels.some((hotel) => hotel.group === group));
-  const allSummary = renderHotelSummary(hotels);
   const defaultGroup = groups[0];
   const defaultHotels = hotels.filter((hotel) => hotel.group === defaultGroup);
   const checkIn = hotels[0]?.checkInDate ?? "";
   const checkOut = hotels[0]?.checkOutDate ?? "";
   const rateLabels = HOTEL_DISPLAY_RATE_PLAN_PRIORITY.filter((label) => hotels.some((hotel) => hotel.ratePlans.some((ratePlan) => ratePlan.label === label)));
+  const hotelMetrics = buildHotelMetricsByGroup(hotels, groups, rateLabels);
+  const firstMetric = initialMetric(hotelMetrics, defaultGroup);
   const tabs = groups
     .map((group, index) => `<button type="button" class="${index === 0 ? "active" : ""}" data-group="${escapeHtml(group)}">${escapeHtml(GROUP_LABEL[group])}</button>`)
     .join("");
@@ -451,19 +527,48 @@ ${sharedHead("酒店价格对比")}
       </div>
     </section>
     <section class="hotel-metrics">
-      <div><span>酒店数量</span><strong>${defaultHotels.length || hotels.length} 家</strong></div>
-      <div><span>当前口径最低价</span><strong>¥${allSummary.lowest} 起</strong></div>
-      <div><span>平均可节省</span><strong>¥${allSummary.avgSaving} 起</strong></div>
-      <div><span>最优平台占比</span><strong>青猫差旅 ${allSummary.qingmaoShare}%</strong></div>
+      <div><span>酒店数量</span><strong data-metric="hotel-count">${firstMetric?.hotelCount ?? (defaultHotels.length || hotels.length)} 家</strong><small data-metric="coverage-note">当前集团可展示</small></div>
+      <div><span>当前口径最低价</span><strong data-metric="lowest-price">${formatNullableMoney(firstMetric?.lowestPrice ?? null, "暂无完整价格")}</strong></div>
+      <div><span>平均可节省</span><strong data-metric="average-saving">${formatNullableMoney(firstMetric?.averageSaving ?? null, "暂无优势")}</strong></div>
+      <div><span>青猫最低占比</span><strong data-metric="qingmao-share">青猫差旅 ${firstMetric?.qingmaoLowestShare ?? 0}%</strong></div>
       <div><span>价格单位</span><strong>元 / 1 间夜</strong></div>
     </section>
     <p class="hotel-hint">以下价格为 1 间夜；推荐口径优先展示青猫差旅为最低价且优势最大的床型早餐口径，其他 3 种口径保留在同一张卡片内。</p>
     ${panels}
     <footer class="hotel-footer">以上价格为平台可订最低价的展示结果，实际预订以各平台实时价格为准。</footer>
   </main>
+  <script type="application/json" id="hotel-metrics-data">${safeJson(hotelMetrics)}</script>
   <script>
+    const hotelMetrics = JSON.parse(document.getElementById('hotel-metrics-data')?.textContent || '{}');
     const buttons = Array.from(document.querySelectorAll('.hotel-tabs button'));
     const panels = Array.from(document.querySelectorAll('.hotel-group-panel'));
+    const metricNodes = {
+      hotelCount: document.querySelector('[data-metric="hotel-count"]'),
+      lowestPrice: document.querySelector('[data-metric="lowest-price"]'),
+      averageSaving: document.querySelector('[data-metric="average-saving"]'),
+      qingmaoShare: document.querySelector('[data-metric="qingmao-share"]'),
+      coverageNote: document.querySelector('[data-metric="coverage-note"]')
+    };
+    function moneyMetric(value, emptyLabel) {
+      return typeof value === 'number' ? '¥' + value + ' 起' : emptyLabel;
+    }
+    function activeGroup() {
+      return document.querySelector('.hotel-tabs button.active')?.dataset.group || '';
+    }
+    function activePlan() {
+      return document.querySelector('.rate-selector button.active')?.dataset.plan || '${DEFAULT_RATE_PLAN_KEY}';
+    }
+    function updateHotelMetrics() {
+      const group = activeGroup();
+      const plan = activePlan();
+      const metrics = hotelMetrics[group]?.[plan] || hotelMetrics[group]?.['${DEFAULT_RATE_PLAN_KEY}'];
+      if (!metrics) return;
+      metricNodes.hotelCount.textContent = metrics.hotelCount + ' 家';
+      metricNodes.lowestPrice.textContent = moneyMetric(metrics.lowestPrice, '暂无完整价格');
+      metricNodes.averageSaving.textContent = moneyMetric(metrics.averageSaving, '暂无优势');
+      metricNodes.qingmaoShare.textContent = '青猫差旅 ' + metrics.qingmaoLowestShare + '%';
+      metricNodes.coverageNote.textContent = plan === '${DEFAULT_RATE_PLAN_KEY}' ? '当前集团可展示' : '当前口径完整可比';
+    }
     buttons.forEach(button => {
       button.addEventListener('click', () => {
         buttons.forEach(item => item.classList.remove('active'));
@@ -471,31 +576,26 @@ ${sharedHead("酒店价格对比")}
         button.classList.add('active');
         const target = button.dataset.group;
         panels.find(panel => panel.dataset.group === target)?.classList.add('active');
+        updateHotelMetrics();
       });
     });
     const rateButtons = Array.from(document.querySelectorAll('.rate-selector button'));
     const planViews = Array.from(document.querySelectorAll('.hotel-plan-view'));
-	    rateButtons.forEach(button => {
-	      button.addEventListener('click', () => {
-	        rateButtons.forEach(item => item.classList.remove('active'));
-	        button.classList.add('active');
-	        const target = button.dataset.plan;
-	        planViews.forEach(view => {
-	          const useDefault = target === '__default';
-	          view.classList.toggle('active', useDefault ? view.dataset.default === 'true' : view.dataset.plan === target);
-	        });
-	      });
-	    });
+    rateButtons.forEach(button => {
+      button.addEventListener('click', () => {
+        rateButtons.forEach(item => item.classList.remove('active'));
+        button.classList.add('active');
+        const target = button.dataset.plan;
+        planViews.forEach(view => {
+          const useDefault = target === '${DEFAULT_RATE_PLAN_KEY}';
+          view.classList.toggle('active', useDefault ? view.dataset.default === 'true' : view.dataset.plan === target);
+        });
+        updateHotelMetrics();
+      });
+    });
+    updateHotelMetrics();
   </script>
 </body>
-</html>`;
-}
-
-function renderEvidencePlaceholder(title: string, quote: PlatformQuote) {
-  return `<!doctype html>
-<html lang="zh-CN">
-<head><meta charset="UTF-8" /><title>${escapeHtml(title)}</title><style>body{font-family:Arial,sans-serif;margin:40px;color:#10233f}main{max-width:760px;border:1px solid #d8e2ef;padding:28px}span{color:#667085}strong{font-size:36px;color:#0e8f7a}</style></head>
-<body><main><span>网页快照占位</span><h1>${escapeHtml(title)}</h1><strong>${escapeHtml(formatPrice(quote))}</strong><p>真实采集时这里会替换为平台网页截图或网页快照。当前为阶段 2 假数据闭环。</p></main></body>
 </html>`;
 }
 
@@ -581,11 +681,10 @@ function renderHotelCoverSvg() {
 }
 
 function renderBaseStyles() {
-  return `:root{--ink:#10233f;--muted:#667085;--line:#d8e2ef;--teal:#0e8f7a;--green:#3fd081;--blue:#2f8cff;--orange:#ff971e;--purple:#8b5cf6}*{box-sizing:border-box}body{margin:0;font-family:Avenir Next,PingFang SC,Microsoft YaHei,sans-serif;letter-spacing:0}.eyebrow{margin:0 0 12px;color:var(--green);font-weight:900}.home-page{background:#f5f7fb;color:var(--ink)}.home-topbar{height:70px;background:#061421;color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 46px}.home-brand{color:#fff;text-decoration:none;display:flex;flex-direction:column;line-height:1}.home-brand strong{font-size:24px}.home-brand span{font-size:11px;color:#b8cad8}.home-topbar nav{display:flex;gap:40px}.home-topbar nav a,.home-topbar nav strong{color:#fff;text-decoration:none;font-weight:900;padding:24px 0}.home-topbar nav strong{border-bottom:3px solid var(--green)}.home-shell{width:min(1360px,calc(100% - 64px));margin:0 auto;padding:44px 0 56px}.home-hero{display:grid;grid-template-columns:1fr 360px;gap:40px;align-items:center;padding:10px 0 22px}.home-copy h1{margin:0;font-size:58px;line-height:1;color:#061421}.home-copy p{font-size:20px;color:#334155}.home-rules{display:flex;gap:18px;align-items:center;color:#334155;font-weight:900}.home-rules i{width:1px;height:18px;background:#cbd5e1}.home-stamp,.home-metrics div,.home-feature-card,.home-benefits{background:#fff;border:1px solid var(--line);box-shadow:0 18px 48px rgba(16,35,63,.08)}.home-stamp{padding:22px;border-radius:10px}.home-stamp span,.home-metrics span{display:block;color:var(--muted);font-size:13px;font-weight:900}.home-stamp strong{display:block;margin-top:8px;font-size:30px;color:#087044}.home-stamp small,.home-stamp em{display:block;margin-top:10px;color:#475569;font-style:normal}.home-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin:20px 0;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}.home-metrics div{box-shadow:none;border:0;border-right:1px solid var(--line);padding:24px 34px}.home-metrics strong{display:block;font-size:38px;color:#087044}.home-feature-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:24px;margin-top:18px}.home-feature-card{display:grid;grid-template-columns:236px minmax(0,1fr);gap:20px;border-radius:10px;padding:22px;text-decoration:none}.home-feature-card h2{font-size:32px;margin:0 0 6px}.home-feature-card p{margin:0 0 12px;color:#475569;font-weight:800}.feature-visual{min-height:324px;border-radius:8px;background:#fff}.plane-visual{background:url('flight-cover.svg') center/contain no-repeat #fbfefd}.hotel-visual{background:url('hotel-cover.svg') center/contain no-repeat #fbfefd}.mini-board,.mini-table,.home-rate-preview{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px}.mini-board header,.mini-table header,.home-rate-preview header{font-weight:900;margin-bottom:10px}.mini-board header span,.mini-table header span,.home-rate-preview header span{float:right;color:#64748b}.mini-price,.mini-table div{display:grid;grid-template-columns:100px 1fr 80px;gap:10px;align-items:center;padding:6px 0}.mini-price i{height:14px;border-radius:999px;background:#dbeafe}.mini-price.qingmao i{background:var(--green)}.mini-price.ctrip i{background:var(--blue)}.mini-price.alibtrip i{background:var(--orange)}.mini-price.ztrip i{background:var(--purple)}.mini-table div{grid-template-columns:1fr auto}.home-rate-preview{padding:12px}.home-rate-preview header{font-size:15px;line-height:1.35}.home-rate-preview header span{font-size:13px}.rate-grid-head,.rate-grid-row{display:grid;grid-template-columns:1.15fr repeat(4,.85fr);gap:8px;align-items:center;border-bottom:1px solid #edf2f7;padding:7px 0}.rate-grid-head{color:#64748b;font-size:12px;font-weight:900}.rate-grid-row span{font-size:13px;font-weight:900}.rate-grid-row strong{font-size:13px;text-align:right}.rate-grid-row.more{border-bottom:0;color:#64748b}.home-feature-card small{display:block;color:#087044;font-weight:900;margin-top:12px;line-height:1.5}.home-feature-card a{display:block;margin-top:16px;background:#07814f;color:#fff;text-align:center;text-decoration:none;font-weight:900;padding:14px;border-radius:8px}.hotel-feature a{background:#087b86}.home-benefits{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-top:24px;border-radius:10px;padding:22px}.home-benefits div{padding:0 22px}.home-benefits strong{display:block;font-size:18px}.home-benefits span{color:#64748b}.flight-page{min-height:100vh;background:#020b12;color:#edf8ff}.flight-shell{width:min(1260px,calc(100% - 48px));margin:0 auto;padding:28px 0 54px}.dark-nav{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:26px}.dark-nav nav{display:flex;align-items:center;gap:22px}.dark-nav a,.dark-nav strong{color:#d9f7ee;text-decoration:none;font-weight:900}.dark-nav strong{border-bottom:2px solid var(--green);padding-bottom:10px}.dark-brand{font-size:24px}.flight-hero{min-height:250px;display:grid;grid-template-columns:1fr 420px;align-items:center;border-bottom:1px solid rgba(119,231,190,.28);position:relative}.flight-hero h1{font-size:56px;line-height:1.05;margin:0;text-shadow:0 8px 30px rgba(0,0,0,.45)}.flight-hero p{font-size:28px;color:#45e68f;font-weight:900}.compare-scope{background:rgba(9,40,46,.88);border:1px solid rgba(119,231,190,.28);border-radius:14px;padding:28px 30px;box-shadow:0 18px 60px rgba(0,0,0,.22)}.compare-scope span{display:block;color:#8fd8c7;font-weight:900;margin-bottom:8px}.compare-scope strong{display:block;color:#35e3ae;font-size:28px;margin-bottom:16px}.compare-scope ul{margin:0;padding-left:18px;color:#d9f7ee;line-height:1.9;font-weight:800}.flight-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:0;margin:28px 0 14px;border:1px solid rgba(142,206,232,.18);background:rgba(11,34,49,.9);border-radius:12px;overflow:hidden}.flight-stats div{padding:24px 30px;border-right:1px solid rgba(142,206,232,.16)}.flight-stats span{display:block;color:#9db5c6;font-weight:900}.flight-stats strong{display:block;color:#47d883;font-size:42px;margin:10px 0}.flight-stats small{color:#c7d7e1;font-size:16px}.flight-table-head,.flight-record{display:grid;grid-template-columns:280px 1fr 230px;gap:12px}.flight-table-head{background:rgba(14,41,58,.86);border-radius:10px;padding:13px 24px;margin-bottom:10px;color:#9db5c6;font-weight:900}.flight-list{display:grid;gap:10px}.flight-record{background:rgba(8,31,46,.92);border:1px solid rgba(142,206,232,.18);border-radius:12px;overflow:hidden}.flight-info,.flight-prices,.flight-advantage{padding:22px}.flight-info{border-right:1px solid rgba(142,206,232,.16)}.flight-info h2{margin:0 0 6px;font-size:27px}.flight-info p{margin:0 0 16px;color:#cbd7df;font-size:18px}.timeline{display:grid;grid-template-columns:1fr 22px 1fr;align-items:center;color:#eaf7ff}.timeline strong{display:block;color:#68dda8;font-size:13px}.timeline i{width:10px;height:70px;border-left:3px solid #56d990;display:block;margin:auto}.flight-info small{display:block;margin-top:12px;color:#a8bac7}.flight-price-row{display:grid;grid-template-columns:44px 112px 1fr 110px;gap:14px;align-items:center;margin:10px 0}.platform-mark{width:34px;height:34px;border-radius:12px;display:grid;place-items:center;font-weight:900;color:#06111a}.flight-price-row.qingmao .platform-mark{background:var(--green)}.flight-price-row.ctrip .platform-mark{background:var(--blue)}.flight-price-row.alibtrip .platform-mark{background:var(--orange)}.flight-price-row.ztrip .platform-mark{background:var(--purple)}.platform-name{font-weight:900}.price-bar{height:22px;background:rgba(255,255,255,.1);border-radius:999px;overflow:hidden}.price-bar i{height:100%;display:block;border-radius:999px}.qingmao .price-bar i{background:linear-gradient(90deg,#35c76f,#60e39b)}.ctrip .price-bar i{background:linear-gradient(90deg,#1675ea,#4fa5ff)}.alibtrip .price-bar i{background:linear-gradient(90deg,#ff850e,#ffb04a)}.ztrip .price-bar i{background:linear-gradient(90deg,#7c3aed,#a78bfa)}.flight-price-row strong{font-size:24px}.qingmao strong{color:var(--green)}.ctrip strong{color:var(--blue)}.alibtrip strong{color:var(--orange)}.ztrip strong{color:var(--purple)}.flight-advantage{border-left:1px solid rgba(142,206,232,.16);display:flex;flex-direction:column;justify-content:center;min-width:0}.flight-advantage span{font-size:30px;font-weight:900;color:#42dc83;white-space:nowrap}.flight-advantage.higher span{color:#ffb04a}.flight-advantage strong{margin:8px 0;color:#40df83}.flight-advantage small{color:#a8bac7;line-height:1.45}.hotel-page{background:#f7fafb;color:var(--ink)}.hotel-shell{width:min(1210px,calc(100% - 36px));margin:0 auto;padding:0 0 50px}.hotel-topbar{height:80px;display:flex;align-items:center;justify-content:space-between;background:#012b32;color:#fff;margin:0 calc((100vw - min(1210px,calc(100vw - 36px)))/-2);padding:0 calc((100vw - min(1210px,calc(100vw - 36px)))/2)}.brand{color:#fff;text-decoration:none;font-size:26px;font-weight:900}.hotel-topbar nav{display:flex;gap:22px}.hotel-topbar nav a{color:#d6eff0;text-decoration:none;font-weight:900;padding:28px 4px}.hotel-topbar nav a.active{border-bottom:3px solid #1fb8a8}.hotel-title{padding:28px 0 18px}.hotel-title h1{margin:0 0 20px;font-size:36px}.hotel-tabs{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:20px}.hotel-tabs button{border:0;background:#eef2f5;border-radius:8px 8px 0 0;color:#26384d;height:52px;font-weight:900;font-size:17px;cursor:pointer}.hotel-tabs button.active{background:#139b8c;color:#fff}.hotel-chips{display:flex;gap:12px;flex-wrap:wrap;align-items:center;background:#e9fbf9;border-radius:10px;padding:12px 16px;color:#235d64;font-weight:900}.rate-selector{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.rate-selector b{font-size:14px;color:#1b5961}.rate-selector button{border:1px solid #b7e4df;background:#fff;color:#235d64;border-radius:8px;padding:8px 10px;font-weight:900;cursor:pointer}.rate-selector button.active{background:#139b8c;color:#fff;border-color:#139b8c}.hotel-metrics{display:grid;grid-template-columns:1.1fr 1.2fr 1.1fr 1.4fr 1fr;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(16,35,63,.06);margin-bottom:18px}.hotel-metrics div{padding:20px 26px;border-right:1px solid var(--line)}.hotel-metrics span{display:block;color:var(--muted);font-weight:900}.hotel-metrics strong{display:block;margin-top:8px;color:#0e8f7a;font-size:22px}.hotel-hint,.hotel-footer{background:#e9fbf9;color:#235d64;border-radius:10px;text-align:center;padding:12px;font-weight:900}.hotel-group-panel{display:none}.hotel-group-panel.active{display:block}.hotel-records{display:grid;gap:16px;margin-top:18px}.hotel-record{position:relative;display:grid;grid-template-columns:300px 1fr;gap:22px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(16,35,63,.05);padding:16px}.hotel-rank{position:absolute;left:10px;top:10px;z-index:2;background:#0e9b91;color:#fff;border-radius:8px;font-size:24px;font-weight:900;width:42px;height:42px;display:grid;place-items:center}.hotel-photo{height:300px;margin:0;border-radius:8px;position:relative;overflow:hidden;background:#17324b}.hotel-photo img{width:100%;height:100%;object-fit:cover;display:block}.hotel-photo:after{content:"";position:absolute;left:0;right:0;bottom:0;height:42%;background:linear-gradient(180deg,transparent,rgba(0,0,0,.68))}.hotel-photo figcaption{position:absolute;left:22px;bottom:22px;z-index:2;color:#fff;font-size:22px;font-weight:900}.hotel-identity{min-height:300px;margin:0;border-radius:8px;position:relative;overflow:hidden;background:#07343b;color:#fff;padding:58px 22px 22px;display:flex;flex-direction:column;justify-content:flex-end;gap:14px}.hotel-identity:before{content:"";position:absolute;inset:0;border:1px solid rgba(183,228,223,.35);border-radius:8px;pointer-events:none}.hotel-identity-brand,.hotel-identity p,.hotel-identity small{position:relative;z-index:1}.hotel-identity-brand span{display:inline-block;margin-bottom:10px;padding:6px 10px;border-radius:999px;background:rgba(31,184,168,.22);color:#b6fff1;font-size:13px;font-weight:900}.hotel-identity-brand strong{display:block;font-size:32px;line-height:1.08}.hotel-identity p{margin:0;color:#d4f4ef;font-weight:900}.hotel-identity small{color:#9ad8cf;font-weight:900}.hotel-content{min-width:0}.hotel-title-row{display:flex;justify-content:space-between;gap:16px;align-items:start;margin-bottom:10px;padding-right:244px;min-height:74px}.hotel-plan-view{display:none;position:relative}.hotel-plan-view.active{display:block}.hotel-plan-view .saving{position:absolute;right:0;top:-88px;margin:0}.hotel-title-row h2{margin:4px 0 6px;font-size:30px}.hotel-title-row p{margin:0;color:#637184;font-weight:800}.saving{width:224px;background:#eefaf3;border:1px solid #ccebd9;color:#0a8b57;border-radius:12px;padding:13px 12px;text-align:center;font-size:28px;line-height:1.08}.saving b{display:block;white-space:nowrap}.saving small{display:block;font-size:14px;margin-top:7px;line-height:1.25}.saving.higher{background:#fff7e8;color:#b45309}.hotel-primary-row{clear:both;display:grid;grid-template-columns:150px repeat(4,1fr);border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:14px}.room-type{display:grid;place-items:center;font-size:24px;font-weight:900;background:#fff}.hotel-platform-price{padding:14px 12px;text-align:center;border-left:1px solid var(--line)}.hotel-platform-price span{display:block;font-weight:900}.hotel-platform-price strong{display:block;margin-top:6px;font-size:26px}.hotel-platform-price.qingmao{background:#e8f7f0}.hotel-platform-price.ctrip{background:#eaf3ff}.hotel-platform-price.alibtrip{background:#fff4e2}.hotel-platform-price.ztrip{background:#f1ecff}.hotel-rate-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.hotel-rate-mini{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fbfcfe}.hotel-rate-mini strong{display:block;text-align:center;margin-bottom:8px}.hotel-rate-mini span{display:flex;justify-content:space-between;gap:6px;font-size:13px;line-height:1.5;font-weight:800}.hotel-rate-mini b{font-weight:900}@media(max-width:940px){.home-hero,.entry-grid,.home-metrics,.flight-hero,.flight-stats,.flight-table-head,.flight-record,.hotel-record,.hotel-primary-row,.hotel-metrics{grid-template-columns:1fr}.compare-scope{display:none}.flight-table-head{display:none}.hotel-tabs{grid-template-columns:1fr 1fr}.hotel-rate-grid{grid-template-columns:1fr 1fr}.hotel-photo{height:220px}.hotel-identity{min-height:220px}.hotel-topbar{margin:0 -18px;padding:0 18px}.hotel-title-row{padding-right:0}.hotel-plan-view .saving{position:static;margin-bottom:12px}.saving{width:100%}}`;
 }
 
 function renderLayoutFixStyles() {
-  return `.home-feature-card{grid-template-columns:minmax(290px,.9fr) minmax(0,1.35fr);gap:28px;padding:26px;border-radius:8px;align-items:stretch}.home-feature-card>section{min-width:0;display:flex;flex-direction:column;justify-content:center}.home-feature-card h2{font-size:40px;line-height:1.05;margin-bottom:12px}.home-feature-card p{font-size:20px;margin-bottom:18px}.feature-photo{margin:0;min-height:366px;height:100%;border-radius:8px;overflow:hidden;position:relative;background:#e8eef2}.feature-photo img{width:100%;height:100%;display:block;object-fit:cover;filter:saturate(.92) contrast(.98)}.flight-photo img{object-position:58% center}.hotel-photo-real img{object-position:center}.feature-photo:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(6,20,33,.16))}.mini-board,.home-rate-preview{padding:16px}.mini-price{grid-template-columns:100px minmax(0,1fr) 76px}.mini-price .mini-bar{height:14px;border-radius:999px;background:#edf3f4;overflow:hidden}.mini-price .mini-bar i{display:block;height:100%;border-radius:999px}.mini-price.qingmao .mini-bar i{background:var(--green)}.mini-price.ctrip .mini-bar i{background:var(--blue)}.mini-price.alibtrip .mini-bar i{background:var(--orange)}.mini-price.ztrip .mini-bar i{background:var(--purple)}.compare-visual{height:218px;position:relative;border:1px solid rgba(119,231,190,.32);border-radius:18px;background:radial-gradient(circle at 78% 18%,rgba(67,220,131,.24),transparent 30%),linear-gradient(135deg,rgba(6,29,40,.98),rgba(8,59,61,.9));overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.24)}.compare-visual:before{content:"";position:absolute;inset:18px;border:1px solid rgba(137,232,198,.12);border-radius:16px}.compare-orbit{position:absolute;left:34px;right:34px;top:26px;height:126px;border:1px solid rgba(157,242,216,.24);border-radius:999px}.compare-orbit:before{content:"";position:absolute;left:44px;right:44px;top:50%;border-top:1px dashed rgba(191,232,220,.36);transform:translateY(-50%) rotate(-8deg)}.orbit-node{position:absolute;width:62px;height:62px;border-radius:50%;display:grid;place-items:center;font-size:15px;font-weight:900;color:#061421;box-shadow:0 10px 26px rgba(0,0,0,.25)}.orbit-node.qingmao{left:-12px;top:32px;background:#35d885}.orbit-node.ctrip{left:37%;top:-24px;background:#2f8cff;color:#fff}.orbit-node.alibtrip{right:-12px;top:32px;background:#ff971e;color:#fff}.orbit-node.ztrip{left:43%;bottom:-28px;background:#8b5cf6;color:#fff}.orbit-plane{position:absolute;left:0;top:0;width:34px;height:34px;animation:scanFlight 5.8s ease-in-out infinite}.orbit-plane:before{content:"";position:absolute;left:4px;top:15px;width:26px;height:5px;border-radius:999px;background:#dffaf0;box-shadow:0 0 18px rgba(63,208,129,.95);transform:rotate(-18deg)}.orbit-plane:after{content:"";position:absolute;left:13px;top:7px;width:9px;height:20px;background:#dffaf0;clip-path:polygon(50% 0,100% 100%,50% 74%,0 100%);transform:rotate(72deg)}.orbit-plane i{position:absolute;left:-30px;top:16px;width:34px;height:2px;border-radius:999px;background:linear-gradient(90deg,transparent,rgba(63,208,129,.8))}.compare-visual-copy{position:absolute;left:30px;right:30px;bottom:22px;display:flex;justify-content:space-between;align-items:flex-end;gap:18px}.compare-visual-copy strong{font-size:24px;color:#35e3ae}.compare-visual-copy span{color:#bfe8dc;font-weight:900}.hotel-title-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:24px;align-items:start;margin-bottom:22px;padding-right:0;min-height:104px}.hotel-plan-view .saving{position:static;right:auto;top:auto;margin:0}.saving{width:auto;min-width:360px;max-width:450px;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:7px;padding:15px 22px;text-align:left;line-height:1.08}.saving-main{display:flex;align-items:baseline;gap:2px;color:#078b52;font-weight:900;line-height:.95;white-space:nowrap}.saving-main b{font-size:48px;font-weight:1000;letter-spacing:0}.saving-main em{font-style:normal;font-size:30px;font-weight:900}.saving-main.neutral{font-size:32px}.saving small{display:block;margin-top:0;font-size:15px;font-weight:900;line-height:1.28;color:#078b52}.saving.higher .saving-main,.saving.higher small{color:#b45309}.hotel-primary-row{margin-top:0}@keyframes scanFlight{0%,100%{transform:translate(18px,72px) rotate(-10deg)}45%{transform:translate(275px,22px) rotate(8deg)}55%{transform:translate(300px,96px) rotate(150deg)}}@media(max-width:940px){.home-feature-card{grid-template-columns:1fr}.feature-photo{min-height:230px}.compare-visual{display:none}.hotel-title-row{grid-template-columns:1fr;min-height:auto}.saving{width:100%;min-width:0;max-width:none;flex-direction:column;text-align:center}.saving small{text-align:center}}`;
+  return `.home-feature-card{grid-template-columns:minmax(290px,.9fr) minmax(0,1.35fr);gap:28px;padding:26px;border-radius:8px;align-items:stretch}.home-feature-card>section{min-width:0;display:flex;flex-direction:column;justify-content:center}.home-feature-card h2{font-size:40px;line-height:1.05;margin-bottom:12px}.home-feature-card p{font-size:20px;margin-bottom:18px}.feature-photo{margin:0;min-height:366px;height:100%;border-radius:8px;overflow:hidden;position:relative;background:#e8eef2}.feature-photo img{width:100%;height:100%;display:block;object-fit:cover;filter:saturate(.92) contrast(.98)}.flight-photo img{object-position:58% center}.hotel-photo-real img{object-position:center}.feature-photo:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(6,20,33,.16))}.mini-board,.home-rate-preview{padding:16px}.mini-price{grid-template-columns:100px minmax(0,1fr) 76px}.mini-price .mini-bar{height:14px;border-radius:999px;background:#edf3f4;overflow:hidden}.mini-price .mini-bar i{display:block;height:100%;border-radius:999px}.mini-price.qingmao .mini-bar i{background:var(--green)}.mini-price.ctrip .mini-bar i{background:var(--blue)}.mini-price.alibtrip .mini-bar i{background:var(--orange)}.mini-price.ztrip .mini-bar i{background:var(--purple)}.compare-visual{height:218px;position:relative;border:1px solid rgba(119,231,190,.32);border-radius:18px;background:radial-gradient(circle at 78% 18%,rgba(67,220,131,.24),transparent 30%),linear-gradient(135deg,rgba(6,29,40,.98),rgba(8,59,61,.9));overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.24)}.compare-visual:before{content:"";position:absolute;inset:18px;border:1px solid rgba(137,232,198,.12);border-radius:16px}.compare-orbit{position:absolute;left:34px;right:34px;top:26px;height:126px;border:1px solid rgba(157,242,216,.24);border-radius:999px}.compare-orbit:before{content:"";position:absolute;left:44px;right:44px;top:50%;border-top:1px dashed rgba(191,232,220,.36);transform:translateY(-50%) rotate(-8deg)}.orbit-node{position:absolute;width:62px;height:62px;border-radius:50%;display:grid;place-items:center;font-size:15px;font-weight:900;color:#061421;box-shadow:0 10px 26px rgba(0,0,0,.25)}.orbit-node.qingmao{left:-12px;top:32px;background:#35d885}.orbit-node.ctrip{left:37%;top:-24px;background:#2f8cff;color:#fff}.orbit-node.alibtrip{right:-12px;top:32px;background:#ff971e;color:#fff}.orbit-node.ztrip{left:43%;bottom:-28px;background:#8b5cf6;color:#fff}.orbit-plane{position:absolute;left:0;top:0;width:34px;height:34px;animation:scanFlight 5.8s ease-in-out infinite}.orbit-plane:before{content:"";position:absolute;left:4px;top:15px;width:26px;height:5px;border-radius:999px;background:#dffaf0;box-shadow:0 0 18px rgba(63,208,129,.95);transform:rotate(-18deg)}.orbit-plane:after{content:"";position:absolute;left:13px;top:7px;width:9px;height:20px;background:#dffaf0;clip-path:polygon(50% 0,100% 100%,50% 74%,0 100%);transform:rotate(72deg)}.orbit-plane i{position:absolute;left:-30px;top:16px;width:34px;height:2px;border-radius:999px;background:linear-gradient(90deg,transparent,rgba(63,208,129,.8))}.compare-visual-copy{position:absolute;left:30px;right:30px;bottom:22px;display:flex;justify-content:space-between;align-items:flex-end;gap:18px}.compare-visual-copy strong{font-size:24px;color:#35e3ae}.compare-visual-copy span{color:#bfe8dc;font-weight:900}.hotel-metrics small{display:block;margin-top:7px;color:#64748b;font-size:12px;font-weight:900}.hotel-title-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:24px;align-items:start;margin-bottom:22px;padding-right:0;min-height:104px}.hotel-plan-view .saving{position:static;right:auto;top:auto;margin:0}.saving{width:auto;min-width:360px;max-width:450px;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:7px;padding:15px 22px;text-align:left;line-height:1.08}.saving-main{display:flex;align-items:baseline;gap:2px;color:#078b52;font-weight:900;line-height:.95;white-space:nowrap}.saving-main b{font-size:48px;font-weight:1000;letter-spacing:0}.saving-main em{font-style:normal;font-size:30px;font-weight:900}.saving-main.neutral{font-size:32px}.saving small{display:block;margin-top:0;font-size:15px;font-weight:900;line-height:1.28;color:#078b52}.saving.higher .saving-main,.saving.higher small{color:#b45309}.hotel-primary-row{margin-top:0}@keyframes scanFlight{0%,100%{transform:translate(18px,72px) rotate(-10deg)}45%{transform:translate(275px,22px) rotate(8deg)}55%{transform:translate(300px,96px) rotate(150deg)}}@media(max-width:940px){.home-feature-card{grid-template-columns:1fr}.feature-photo{min-height:230px}.compare-visual{display:none}.hotel-title-row{grid-template-columns:1fr;min-height:auto}.saving{width:100%;min-width:0;max-width:none;flex-direction:column;text-align:center}.saving small{text-align:center}}`;
 }
 
 function renderStyles() {
@@ -601,23 +700,12 @@ async function copyStaticAsset(packageDir: string, filename: string) {
   await fsp.copyFile(path.join(STATIC_ASSET_DIR, filename), path.join(packageDir, "assets", filename));
 }
 
-async function materializeEvidence(batch: CollectionBatch, outputDir: string, packageDir: string) {
-  const quotes = [
-    ...batch.samples.flatMap((sample) => sample.quotes),
-    ...(batch.hotels ?? []).flatMap((hotel) => hotel.ratePlans.flatMap((ratePlan) => ratePlan.quotes))
-  ];
-
-  for (const [index, quote] of quotes.entries()) {
-    if (!quote.evidencePath) continue;
-    const targetPath = path.join(packageDir, quote.evidencePath);
-    const sourcePath = path.join(outputDir, quote.evidencePath);
+async function materializeHotelCoverImages(batch: CollectionBatch, packageDir: string) {
+  for (const hotel of batch.hotels ?? []) {
+    if (hotel.coverImageStatus !== "saved" || !hotel.coverImagePath || !fs.existsSync(hotel.coverImagePath)) continue;
+    const targetPath = path.join(packageDir, "covers", hotel.id, "hotel-cover.jpg");
     await fsp.mkdir(path.dirname(targetPath), { recursive: true });
-    if (fs.existsSync(sourcePath)) {
-      await fsp.copyFile(sourcePath, targetPath);
-      continue;
-    }
-    const title = `${quote.platform} 证据 ${index + 1}`;
-    await fsp.writeFile(targetPath, renderEvidencePlaceholder(title, quote), "utf8");
+    await fsp.copyFile(hotel.coverImagePath, targetPath);
   }
 }
 
@@ -634,6 +722,7 @@ export async function exportOfflinePackage(batch: CollectionBatch, outputDir: st
   await fsp.mkdir(path.join(packageDir, "assets"), { recursive: true });
   await fsp.mkdir(path.join(packageDir, "flights"), { recursive: true });
   await fsp.mkdir(path.join(packageDir, "hotels"), { recursive: true });
+  await fsp.mkdir(path.join(packageDir, "covers"), { recursive: true });
 
   await writeFileEnsured(path.join(packageDir, "assets", "styles.css"), renderStyles());
   await copyStaticAsset(packageDir, "flight-photo.jpg");
@@ -641,7 +730,7 @@ export async function exportOfflinePackage(batch: CollectionBatch, outputDir: st
   await writeFileEnsured(path.join(packageDir, "index.html"), renderIndex(batch));
   await writeFileEnsured(path.join(packageDir, "flights", "index.html"), renderFlights(batch));
   await writeFileEnsured(path.join(packageDir, "hotels", "index.html"), renderHotels(batch));
-  await materializeEvidence(batch, outputDir, packageDir);
+  await materializeHotelCoverImages(batch, packageDir);
 
   await zipExec("zip", ["-qr", zipPath, packageName], { cwd: outputDir });
 

@@ -142,7 +142,7 @@ function stylePlatformPriceCells(row: ExcelJS.Row, quotes: PlatformQuote[], colu
 }
 
 function styleGapCell(cell: ExcelJS.Cell, gap: number | null) {
-  cell.numFmt = '[Color46]"高"0"元";[Color10]"低"0"元";"持平";@';
+  cell.numFmt = '[Color46]"高"#,##0.##"元";[Color10]"低"#,##0.##"元";"持平";@';
   cell.font = {
     bold: true,
     color: { argb: gap === null ? `FF${BRAND_BLUE}` : "FFFFFFFF" }
@@ -156,11 +156,11 @@ function styleGapCell(cell: ExcelJS.Cell, gap: number | null) {
 }
 
 function comparisonFormula(rowNumber: number) {
-  return `IF(OR(I${rowNumber}="",COUNT(J${rowNumber}:L${rowNumber})=0),"",IF(I${rowNumber}<=MIN(J${rowNumber}:L${rowNumber}),I${rowNumber}-MAX(J${rowNumber}:L${rowNumber}),I${rowNumber}-ROUND(AVERAGE(J${rowNumber}:L${rowNumber}),0)))`;
+  return `IF(OR(I${rowNumber}="",COUNT(J${rowNumber}:L${rowNumber})<3),"",IF(I${rowNumber}<=MIN(J${rowNumber}:L${rowNumber}),I${rowNumber}-MIN(J${rowNumber}:L${rowNumber}),IF(I${rowNumber}>=MAX(J${rowNumber}:L${rowNumber}),I${rowNumber}-MAX(J${rowNumber}:L${rowNumber}),I${rowNumber}-MIN(J${rowNumber}:L${rowNumber}))))`;
 }
 
 function hotelComparisonFormula(rowNumber: number) {
-  return `IF(OR(P${rowNumber}="",COUNT(Q${rowNumber}:S${rowNumber})=0),"",IF(P${rowNumber}<=MIN(Q${rowNumber}:S${rowNumber}),P${rowNumber}-MAX(Q${rowNumber}:S${rowNumber}),P${rowNumber}-ROUND(AVERAGE(Q${rowNumber}:S${rowNumber}),0)))`;
+  return `IF(OR(P${rowNumber}="",COUNT(Q${rowNumber}:S${rowNumber})<3),"",IF(P${rowNumber}<=MIN(Q${rowNumber}:S${rowNumber}),P${rowNumber}-MIN(Q${rowNumber}:S${rowNumber}),IF(P${rowNumber}>=MAX(Q${rowNumber}:S${rowNumber}),P${rowNumber}-MAX(Q${rowNumber}:S${rowNumber}),P${rowNumber}-MIN(Q${rowNumber}:S${rowNumber}))))`;
 }
 
 function platformEvidenceCode(platform: PlatformName) {

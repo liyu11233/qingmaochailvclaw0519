@@ -13,7 +13,7 @@ describe("dashboard view model", () => {
     expect(view.notHigherThanLowestCount).toBeGreaterThan(0);
     expect(view.higherThanLowestCount).toBeGreaterThan(0);
     expect(view.samples[0].routeLabel).toBe("广州-上海");
-    expect(view.samples[0].gapLabel).toBe("对比另外3家平台最高价低了103元");
+    expect(view.samples[0].gapLabel).toBe("对比另外3家平台最低价低了63元");
     expect(view.samples[0].gapTone).toBe("advantage");
   });
 

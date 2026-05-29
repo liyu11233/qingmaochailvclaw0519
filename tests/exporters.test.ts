@@ -103,16 +103,16 @@ describe("export artifacts", () => {
     expect(hotelDetailHeaderValues).toContain("在途原始房型名");
     expect(hotelDetailHeaderValues).toContain("青猫证据编号");
     expect(gapCell?.value).toMatchObject({
-      formula: 'IF(OR(I5="",COUNT(J5:L5)=0),"",IF(I5<=MIN(J5:L5),I5-MAX(J5:L5),I5-ROUND(AVERAGE(J5:L5),0)))',
-      result: -103
+      formula: 'IF(OR(I5="",COUNT(J5:L5)<3),"",IF(I5<=MIN(J5:L5),I5-MIN(J5:L5),IF(I5>=MAX(J5:L5),I5-MAX(J5:L5),I5-MIN(J5:L5))))',
+      result: -63
     });
     expect(hotelSummaryGapCell?.value).toMatchObject({
-      formula: 'IF(OR(I5="",COUNT(J5:L5)=0),"",IF(I5<=MIN(J5:L5),I5-MAX(J5:L5),I5-ROUND(AVERAGE(J5:L5),0)))',
-      result: -40
+      formula: 'IF(OR(I5="",COUNT(J5:L5)<3),"",IF(I5<=MIN(J5:L5),I5-MIN(J5:L5),IF(I5>=MAX(J5:L5),I5-MAX(J5:L5),I5-MIN(J5:L5))))',
+      result: -20
     });
     expect(hotelDetailGapCell?.value).toMatchObject({
-      formula: 'IF(OR(P5="",COUNT(Q5:S5)=0),"",IF(P5<=MIN(Q5:S5),P5-MAX(Q5:S5),P5-ROUND(AVERAGE(Q5:S5),0)))',
-      result: -40
+      formula: 'IF(OR(P5="",COUNT(Q5:S5)<3),"",IF(P5<=MIN(Q5:S5),P5-MIN(Q5:S5),IF(P5>=MAX(Q5:S5),P5-MAX(Q5:S5),P5-MIN(Q5:S5))))',
+      result: -20
     });
     expect(gapCell?.font).toMatchObject({ bold: true, color: { argb: "FFFFFFFF" } });
     expect(gapCell?.fill).toMatchObject({ fgColor: { argb: "FF0E8F7A" } });
@@ -124,8 +124,8 @@ describe("export artifacts", () => {
     expect(ctripPriceCell?.font?.bold).not.toBe(true);
     expect(ctripPriceCell?.font?.size).toBe(11);
     expect(flightSheet?.getRow(5).getCell(13).value).toBe("青猫差旅");
-    expect(flightSheet?.getRow(5).getCell(15).value).toContain("对比另外3家平台最高价低了103元");
-    expect(hotelSummarySheet?.getRow(5).getCell(15).value).toContain("对比另外3家平台最高价低了40元");
+    expect(flightSheet?.getRow(5).getCell(15).value).toContain("对比另外3家平台最低价低了63元");
+    expect(hotelSummarySheet?.getRow(5).getCell(15).value).toContain("对比另外3家平台最低价低了20元");
     expect(hotelDetailHeaderValues).toContain("归一口径");
     expect(hotelGroupDetailSheet?.getRow(5).values).toContain("大床有早餐");
     expect(hotelGroupDetailSheet?.actualRowCount).toBeGreaterThan(160);
@@ -180,7 +180,7 @@ describe("export artifacts", () => {
     expect(indexHtml).toContain("hotel-photo.jpg");
     expect(indexHtml).toContain("航班青猫低价");
     expect(indexHtml).toContain("酒店青猫低价");
-    expect(indexHtml).toContain("对比另外3家平台最高价");
+    expect(indexHtml).toContain("对比另外3家平台最低价");
     expect(indexHtml).not.toContain("开始采集");
     expect(flightHtml).not.toContain("查看网页截图");
     expect(hotelHtml).not.toContain("查看网页截图");
@@ -201,6 +201,107 @@ describe("export artifacts", () => {
     expect(existsSync(path.join(result.directory, "hotels", "index.html"))).toBe(true);
     expect(existsSync(path.join(result.directory, "assets", "flight-photo.jpg"))).toBe(true);
     expect(existsSync(path.join(result.directory, "assets", "hotel-photo.jpg"))).toBe(true);
+  });
+
+  it("keeps internal evidence out of the customer-facing offline web package", async () => {
+    const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
+    batch.samples = batch.samples.slice(0, 1);
+    batch.sampleCount = 1;
+    batch.successCount = 1;
+    batch.hotels = batch.hotels?.slice(0, 1);
+    const flightEvidencePath = batch.samples[0].quotes[0].evidencePath;
+    const hotelEvidencePath = batch.hotels![0].ratePlans[0].quotes[0].evidencePath;
+    await mkdir(path.dirname(path.join(outputDir, flightEvidencePath)), { recursive: true });
+    await mkdir(path.dirname(path.join(outputDir, hotelEvidencePath)), { recursive: true });
+    await writeFile(path.join(outputDir, flightEvidencePath), "flight evidence");
+    await writeFile(path.join(outputDir, hotelEvidencePath), "hotel evidence");
+
+    const result = await exportOfflinePackage(batch, outputDir);
+    const packageZip = await readFile(result.path);
+
+    expect(existsSync(path.join(outputDir, flightEvidencePath))).toBe(true);
+    expect(existsSync(path.join(outputDir, hotelEvidencePath))).toBe(true);
+    expect(existsSync(path.join(result.directory, flightEvidencePath))).toBe(false);
+    expect(existsSync(path.join(result.directory, hotelEvidencePath))).toBe(false);
+    expect(packageZip.includes(Buffer.from("evidence/"))).toBe(false);
+  });
+
+  it("renders hotel metrics by active group and rate plan", async () => {
+    const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
+    batch.samples = batch.samples.slice(0, 1);
+    batch.sampleCount = 1;
+    batch.successCount = 1;
+    batch.hotels = batch.hotels?.slice(0, 2);
+    batch.hotels![0] = {
+      ...batch.hotels![0],
+      group: "如家集团",
+      primaryRatePlan: "大床有早餐",
+      ratePlans: [
+        hotelRatePlan("大床有早餐", [100, 120, 130, 140]),
+        hotelRatePlan("大床无早餐", [null, 200, 210, 220])
+      ]
+    };
+    batch.hotels![1] = {
+      ...batch.hotels![1],
+      group: "锦江集团",
+      primaryRatePlan: "大床有早餐",
+      ratePlans: [
+        hotelRatePlan("大床有早餐", [400, 420, 430, 440]),
+        hotelRatePlan("大床无早餐", [390, 450, 460, 470])
+      ]
+    };
+
+    const result = await exportOfflinePackage(batch, outputDir);
+    const hotelHtml = await readFile(path.join(result.directory, "hotels", "index.html"), "utf8");
+    const metricsJson = hotelHtml.match(/<script type="application\/json" id="hotel-metrics-data">(.+?)<\/script>/s)?.[1] ?? "";
+    const metrics = JSON.parse(metricsJson) as Record<string, Record<string, { hotelCount: number; lowestPrice: number | null; averageSaving: number | null; qingmaoLowestShare: number }>>;
+
+    expect(hotelHtml).toContain('data-metric="hotel-count"');
+    expect(hotelHtml).toContain("updateHotelMetrics");
+    expect(metrics["如家集团"].__default).toMatchObject({
+      hotelCount: 1,
+      lowestPrice: 100,
+      averageSaving: 20,
+      qingmaoLowestShare: 100
+    });
+    expect(metrics["如家集团"]["大床无早餐"]).toMatchObject({
+      hotelCount: 0,
+      lowestPrice: null,
+      averageSaving: null,
+      qingmaoLowestShare: 0
+    });
+    expect(metrics["锦江集团"]["大床无早餐"]).toMatchObject({
+      hotelCount: 1,
+      lowestPrice: 390,
+      averageSaving: 60,
+      qingmaoLowestShare: 100
+    });
+  });
+
+  it("uses a saved hotel cover image in the offline hotel page when available", async () => {
+    const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
+    batch.samples = batch.samples.slice(0, 1);
+    batch.sampleCount = 1;
+    batch.successCount = 1;
+    batch.hotels = batch.hotels?.slice(0, 1);
+    const coverPath = path.join(outputDir, "covers", "hotel-cover.jpg");
+    await mkdir(path.dirname(coverPath), { recursive: true });
+    await writeFile(coverPath, ONE_PIXEL_PNG);
+    batch.hotels![0] = {
+      ...batch.hotels![0],
+      coverImageUrl: "https://example.com/hotel-cover.jpg",
+      coverImagePath: coverPath,
+      coverImageSource: "青猫差旅",
+      coverImageStatus: "saved"
+    };
+
+    const result = await exportOfflinePackage(batch, outputDir);
+    const hotelHtml = await readFile(path.join(result.directory, "hotels", "index.html"), "utf8");
+
+    expect(hotelHtml).toContain("hotel-cover");
+    expect(hotelHtml).toContain("covers/hotel-01/hotel-cover.jpg");
+    expect(hotelHtml).not.toContain("hotel-identity");
+    expect(existsSync(path.join(result.directory, "covers", "hotel-01", "hotel-cover.jpg"))).toBe(true);
   });
 
   it("uses each hotel's Qingmao-lowest complete rate plan as the default sales display", async () => {
