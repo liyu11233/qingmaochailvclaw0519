@@ -66,6 +66,11 @@ function formatHotelPrice(quote: PlatformQuote | undefined) {
   return quote && typeof quote.price === "number" ? `¥${quote.price.toLocaleString("zh-CN")}` : "暂无";
 }
 
+function evidenceHref(evidencePath: string | undefined) {
+  if (!evidencePath || evidencePath.startsWith("http://") || evidencePath.startsWith("https://") || evidencePath.startsWith("file://")) return "";
+  return `../${evidencePath.split(path.sep).join("/")}`;
+}
+
 function formatDuration(minutes: number) {
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
@@ -262,11 +267,13 @@ function renderFlightQuoteRows(quotes: PlatformQuote[]) {
   return quotes
     .map((quote) => {
       const width = scaledPriceBarWidth(quotes, quote);
+      const href = evidenceHref(quote.evidencePath);
       return `<div class="flight-price-row ${PLATFORM_CLASS[quote.platform]}">
         <span class="platform-mark">${escapeHtml(quote.platform.slice(0, 1))}</span>
         <span class="platform-name">${escapeHtml(quote.platform)}</span>
         <span class="price-bar"><i style="width:${width}%"></i></span>
         <strong>${escapeHtml(formatPrice(quote))}</strong>
+        ${href ? `<a class="evidence-link" href="${escapeHtml(href)}" target="_blank" rel="noreferrer">截图</a>` : `<span class="evidence-link disabled">暂无</span>`}
       </div>`;
     })
     .join("");
@@ -473,6 +480,7 @@ function renderHotelPlanView(hotel: HotelSample, activeLabel: string) {
           .map((quote) => `<div class="hotel-platform-price ${quote ? PLATFORM_CLASS[quote.platform] : ""}">
             <span>${escapeHtml(quote?.platform ?? "平台")}</span>
             <strong>${escapeHtml(formatHotelPrice(quote))}</strong>
+            ${quote && evidenceHref(quote.evidencePath) ? `<a href="${escapeHtml(evidenceHref(quote.evidencePath))}" target="_blank" rel="noreferrer">截图</a>` : `<small>暂无截图</small>`}
           </div>`)
           .join("")}
       </div>
@@ -709,6 +717,35 @@ async function materializeHotelCoverImages(batch: CollectionBatch, packageDir: s
   }
 }
 
+function allEvidencePaths(batch: CollectionBatch) {
+  const paths = new Map<string, string>();
+  for (const sample of batch.samples) {
+    for (const quote of sample.quotes) {
+      if (quote.evidencePath) paths.set(quote.evidencePath, (quote as PlatformQuote & { sourceEvidencePath?: string }).sourceEvidencePath ?? quote.evidencePath);
+    }
+  }
+  for (const hotel of batch.hotels ?? []) {
+    for (const ratePlan of hotel.ratePlans) {
+      for (const quote of ratePlan.quotes) {
+        if (quote.evidencePath) paths.set(quote.evidencePath, (quote as PlatformQuote & { sourceEvidencePath?: string }).sourceEvidencePath ?? quote.evidencePath);
+      }
+    }
+  }
+  return [...paths.entries()].map(([targetPath, sourcePath]) => ({ targetPath, sourcePath }));
+}
+
+async function materializeEvidenceFiles(batch: CollectionBatch, packageDir: string) {
+  const projectRoot = process.cwd();
+  for (const evidence of allEvidencePaths(batch)) {
+    if (evidence.targetPath.startsWith("http://") || evidence.targetPath.startsWith("https://") || evidence.targetPath.startsWith("file://")) continue;
+    const sourcePath = path.isAbsolute(evidence.sourcePath) ? evidence.sourcePath : path.join(projectRoot, evidence.sourcePath);
+    if (!fs.existsSync(sourcePath)) continue;
+    const targetPath = path.join(packageDir, evidence.targetPath);
+    await fsp.mkdir(path.dirname(targetPath), { recursive: true });
+    await fsp.copyFile(sourcePath, targetPath);
+  }
+}
+
 export async function exportOfflinePackage(batch: CollectionBatch, outputDir: string) {
   await fsp.mkdir(outputDir, { recursive: true });
 
@@ -731,6 +768,7 @@ export async function exportOfflinePackage(batch: CollectionBatch, outputDir: st
   await writeFileEnsured(path.join(packageDir, "flights", "index.html"), renderFlights(batch));
   await writeFileEnsured(path.join(packageDir, "hotels", "index.html"), renderHotels(batch));
   await materializeHotelCoverImages(batch, packageDir);
+  await materializeEvidenceFiles(batch, packageDir);
 
   await zipExec("zip", ["-qr", zipPath, packageName], { cwd: outputDir });
 

@@ -156,11 +156,11 @@ function styleGapCell(cell: ExcelJS.Cell, gap: number | null) {
 }
 
 function comparisonFormula(rowNumber: number) {
-  return `IF(OR(I${rowNumber}="",COUNT(J${rowNumber}:L${rowNumber})<3),"",IF(I${rowNumber}<=MIN(J${rowNumber}:L${rowNumber}),I${rowNumber}-MIN(J${rowNumber}:L${rowNumber}),IF(I${rowNumber}>=MAX(J${rowNumber}:L${rowNumber}),I${rowNumber}-MAX(J${rowNumber}:L${rowNumber}),I${rowNumber}-MIN(J${rowNumber}:L${rowNumber}))))`;
+  return `IF(OR(I${rowNumber}="",COUNT(J${rowNumber}:L${rowNumber})<3),"",IF(I${rowNumber}<=MIN(J${rowNumber}:L${rowNumber}),I${rowNumber}-MAX(J${rowNumber}:L${rowNumber}),I${rowNumber}-AVERAGE(J${rowNumber}:L${rowNumber})))`;
 }
 
 function hotelComparisonFormula(rowNumber: number) {
-  return `IF(OR(P${rowNumber}="",COUNT(Q${rowNumber}:S${rowNumber})<3),"",IF(P${rowNumber}<=MIN(Q${rowNumber}:S${rowNumber}),P${rowNumber}-MIN(Q${rowNumber}:S${rowNumber}),IF(P${rowNumber}>=MAX(Q${rowNumber}:S${rowNumber}),P${rowNumber}-MAX(Q${rowNumber}:S${rowNumber}),P${rowNumber}-MIN(Q${rowNumber}:S${rowNumber}))))`;
+  return `IF(OR(P${rowNumber}="",COUNT(Q${rowNumber}:S${rowNumber})<3),"",IF(P${rowNumber}<=MIN(Q${rowNumber}:S${rowNumber}),P${rowNumber}-MAX(Q${rowNumber}:S${rowNumber}),P${rowNumber}-AVERAGE(Q${rowNumber}:S${rowNumber})))`;
 }
 
 function platformEvidenceCode(platform: PlatformName) {
