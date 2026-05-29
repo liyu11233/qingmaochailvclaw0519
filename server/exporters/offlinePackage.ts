@@ -30,6 +30,7 @@ const GROUP_LABEL: Record<HotelGroup, string> = {
 const GROUP_ORDER: HotelGroup[] = ["如家集团", "华住集团", "锦江集团", "东呈集团", "亚朵集团"];
 const STATIC_ASSET_DIR = path.join(process.cwd(), "server", "assets");
 const DEFAULT_RATE_PLAN_KEY = "__default";
+const INCLUDE_EVIDENCE_IN_SALES_PACKAGE = false;
 
 interface HotelMetricSummary {
   hotelCount: number;
@@ -67,6 +68,7 @@ function formatHotelPrice(quote: PlatformQuote | undefined) {
 }
 
 function evidenceHref(evidencePath: string | undefined) {
+  if (!INCLUDE_EVIDENCE_IN_SALES_PACKAGE) return "";
   if (!evidencePath || evidencePath.startsWith("http://") || evidencePath.startsWith("https://") || evidencePath.startsWith("file://")) return "";
   return `../${evidencePath.split(path.sep).join("/")}`;
 }
@@ -245,7 +247,7 @@ ${rootHead("青猫差旅价格对比离线包")}
         <figure class="feature-photo hotel-photo-real"><img src="assets/hotel-photo.jpg" alt="酒店建筑实拍图" /></figure>
         <section>
           <h2>酒店价格</h2>
-          <p>集团切换与六种口径价格对比</p>
+          <p>集团切换与四种口径价格对比</p>
           ${featuredHotel ? renderHomeHotelRatePreview(featuredHotel) : `<div class="mini-table"><header>酒店样本</header></div>`}
           <small>${featuredHotelSummary && featuredHotelSummary.qingmaoGap !== null ? `随机展示青猫低价酒店：${escapeHtml(featuredHotelSummary.comparisonLabel)}` : "随机展示青猫低价酒店"}</small>
           <a href="hotels/index.html">查看酒店比价</a>
@@ -273,7 +275,7 @@ function renderFlightQuoteRows(quotes: PlatformQuote[]) {
         <span class="platform-name">${escapeHtml(quote.platform)}</span>
         <span class="price-bar"><i style="width:${width}%"></i></span>
         <strong>${escapeHtml(formatPrice(quote))}</strong>
-        ${href ? `<a class="evidence-link" href="${escapeHtml(href)}" target="_blank" rel="noreferrer">截图</a>` : `<span class="evidence-link disabled">暂无</span>`}
+        ${href ? `<a class="evidence-link" href="${escapeHtml(href)}" target="_blank" rel="noreferrer">截图</a>` : `<span class="evidence-link disabled">内部留存</span>`}
       </div>`;
     })
     .join("");
@@ -442,14 +444,7 @@ function renderCompactRatePlan(ratePlan: HotelSample["ratePlans"][number]) {
 function renderHotelCard(hotel: HotelSample, index: number) {
   const coverImage = hotel.coverImageStatus === "saved" && hotel.coverImagePath
     ? `<figure class="hotel-photo"><img src="../covers/${escapeHtml(hotel.id)}/hotel-cover.jpg" alt="${escapeHtml(hotel.hotelName)}酒店封面图" /><figcaption>${escapeHtml(hotel.brand)}</figcaption></figure>`
-    : `<section class="hotel-identity" aria-label="${escapeHtml(hotel.hotelName)}">
-      <div class="hotel-identity-brand">
-        <span>${escapeHtml(hotel.group.replace("集团", ""))}</span>
-        <strong>${escapeHtml(hotel.brand)}</strong>
-      </div>
-      <p>${escapeHtml(hotel.city)} · ${hotel.nights} 间夜</p>
-      <small>${escapeHtml(String(hotel.completeRatePlanCount ?? 0))} 个完整可比口径</small>
-    </section>`;
+    : `<figure class="hotel-photo"><img src="../assets/hotel-photo.jpg" alt="${escapeHtml(hotel.hotelName)}酒店展示图" /><figcaption>${escapeHtml(hotel.brand)}</figcaption></figure>`;
   return `<article class="hotel-record">
     <div class="hotel-rank">${index + 1}</div>
     ${coverImage}
@@ -480,7 +475,7 @@ function renderHotelPlanView(hotel: HotelSample, activeLabel: string) {
           .map((quote) => `<div class="hotel-platform-price ${quote ? PLATFORM_CLASS[quote.platform] : ""}">
             <span>${escapeHtml(quote?.platform ?? "平台")}</span>
             <strong>${escapeHtml(formatHotelPrice(quote))}</strong>
-            ${quote && evidenceHref(quote.evidencePath) ? `<a href="${escapeHtml(evidenceHref(quote.evidencePath))}" target="_blank" rel="noreferrer">截图</a>` : `<small>暂无截图</small>`}
+            ${quote && evidenceHref(quote.evidencePath) ? `<a href="${escapeHtml(evidenceHref(quote.evidencePath))}" target="_blank" rel="noreferrer">截图</a>` : `<small>内部留存</small>`}
           </div>`)
           .join("")}
       </div>
@@ -689,10 +684,11 @@ function renderHotelCoverSvg() {
 }
 
 function renderBaseStyles() {
+  return fs.readFileSync(path.join(STATIC_ASSET_DIR, "offline-base.css"), "utf8");
 }
 
 function renderLayoutFixStyles() {
-  return `.home-feature-card{grid-template-columns:minmax(290px,.9fr) minmax(0,1.35fr);gap:28px;padding:26px;border-radius:8px;align-items:stretch}.home-feature-card>section{min-width:0;display:flex;flex-direction:column;justify-content:center}.home-feature-card h2{font-size:40px;line-height:1.05;margin-bottom:12px}.home-feature-card p{font-size:20px;margin-bottom:18px}.feature-photo{margin:0;min-height:366px;height:100%;border-radius:8px;overflow:hidden;position:relative;background:#e8eef2}.feature-photo img{width:100%;height:100%;display:block;object-fit:cover;filter:saturate(.92) contrast(.98)}.flight-photo img{object-position:58% center}.hotel-photo-real img{object-position:center}.feature-photo:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(6,20,33,.16))}.mini-board,.home-rate-preview{padding:16px}.mini-price{grid-template-columns:100px minmax(0,1fr) 76px}.mini-price .mini-bar{height:14px;border-radius:999px;background:#edf3f4;overflow:hidden}.mini-price .mini-bar i{display:block;height:100%;border-radius:999px}.mini-price.qingmao .mini-bar i{background:var(--green)}.mini-price.ctrip .mini-bar i{background:var(--blue)}.mini-price.alibtrip .mini-bar i{background:var(--orange)}.mini-price.ztrip .mini-bar i{background:var(--purple)}.compare-visual{height:218px;position:relative;border:1px solid rgba(119,231,190,.32);border-radius:18px;background:radial-gradient(circle at 78% 18%,rgba(67,220,131,.24),transparent 30%),linear-gradient(135deg,rgba(6,29,40,.98),rgba(8,59,61,.9));overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.24)}.compare-visual:before{content:"";position:absolute;inset:18px;border:1px solid rgba(137,232,198,.12);border-radius:16px}.compare-orbit{position:absolute;left:34px;right:34px;top:26px;height:126px;border:1px solid rgba(157,242,216,.24);border-radius:999px}.compare-orbit:before{content:"";position:absolute;left:44px;right:44px;top:50%;border-top:1px dashed rgba(191,232,220,.36);transform:translateY(-50%) rotate(-8deg)}.orbit-node{position:absolute;width:62px;height:62px;border-radius:50%;display:grid;place-items:center;font-size:15px;font-weight:900;color:#061421;box-shadow:0 10px 26px rgba(0,0,0,.25)}.orbit-node.qingmao{left:-12px;top:32px;background:#35d885}.orbit-node.ctrip{left:37%;top:-24px;background:#2f8cff;color:#fff}.orbit-node.alibtrip{right:-12px;top:32px;background:#ff971e;color:#fff}.orbit-node.ztrip{left:43%;bottom:-28px;background:#8b5cf6;color:#fff}.orbit-plane{position:absolute;left:0;top:0;width:34px;height:34px;animation:scanFlight 5.8s ease-in-out infinite}.orbit-plane:before{content:"";position:absolute;left:4px;top:15px;width:26px;height:5px;border-radius:999px;background:#dffaf0;box-shadow:0 0 18px rgba(63,208,129,.95);transform:rotate(-18deg)}.orbit-plane:after{content:"";position:absolute;left:13px;top:7px;width:9px;height:20px;background:#dffaf0;clip-path:polygon(50% 0,100% 100%,50% 74%,0 100%);transform:rotate(72deg)}.orbit-plane i{position:absolute;left:-30px;top:16px;width:34px;height:2px;border-radius:999px;background:linear-gradient(90deg,transparent,rgba(63,208,129,.8))}.compare-visual-copy{position:absolute;left:30px;right:30px;bottom:22px;display:flex;justify-content:space-between;align-items:flex-end;gap:18px}.compare-visual-copy strong{font-size:24px;color:#35e3ae}.compare-visual-copy span{color:#bfe8dc;font-weight:900}.hotel-metrics small{display:block;margin-top:7px;color:#64748b;font-size:12px;font-weight:900}.hotel-title-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:24px;align-items:start;margin-bottom:22px;padding-right:0;min-height:104px}.hotel-plan-view .saving{position:static;right:auto;top:auto;margin:0}.saving{width:auto;min-width:360px;max-width:450px;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:7px;padding:15px 22px;text-align:left;line-height:1.08}.saving-main{display:flex;align-items:baseline;gap:2px;color:#078b52;font-weight:900;line-height:.95;white-space:nowrap}.saving-main b{font-size:48px;font-weight:1000;letter-spacing:0}.saving-main em{font-style:normal;font-size:30px;font-weight:900}.saving-main.neutral{font-size:32px}.saving small{display:block;margin-top:0;font-size:15px;font-weight:900;line-height:1.28;color:#078b52}.saving.higher .saving-main,.saving.higher small{color:#b45309}.hotel-primary-row{margin-top:0}@keyframes scanFlight{0%,100%{transform:translate(18px,72px) rotate(-10deg)}45%{transform:translate(275px,22px) rotate(8deg)}55%{transform:translate(300px,96px) rotate(150deg)}}@media(max-width:940px){.home-feature-card{grid-template-columns:1fr}.feature-photo{min-height:230px}.compare-visual{display:none}.hotel-title-row{grid-template-columns:1fr;min-height:auto}.saving{width:100%;min-width:0;max-width:none;flex-direction:column;text-align:center}.saving small{text-align:center}}`;
+  return `.evidence-link{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(95,211,161,.36);border-radius:999px;padding:4px 10px;color:#d9f7ee;text-decoration:none;font-weight:900;font-size:12px}.evidence-link:hover{background:rgba(63,208,129,.14)}.evidence-link.disabled{opacity:.48}.hotel-platform-price a{display:inline-flex;margin-top:8px;border:1px solid rgba(16,35,63,.12);border-radius:999px;padding:4px 10px;color:#235d64;text-decoration:none;font-weight:900;font-size:12px}.hotel-platform-price small{display:block;margin-top:8px;color:#64748b;font-weight:800}.flight-price-row{grid-template-columns:44px 112px 1fr 110px 54px}.hotel-metrics small{display:block;margin-top:7px;color:#64748b;font-size:12px;font-weight:900}`;
 }
 
 function renderStyles() {
@@ -768,7 +764,9 @@ export async function exportOfflinePackage(batch: CollectionBatch, outputDir: st
   await writeFileEnsured(path.join(packageDir, "flights", "index.html"), renderFlights(batch));
   await writeFileEnsured(path.join(packageDir, "hotels", "index.html"), renderHotels(batch));
   await materializeHotelCoverImages(batch, packageDir);
-  await materializeEvidenceFiles(batch, packageDir);
+  if (INCLUDE_EVIDENCE_IN_SALES_PACKAGE) {
+    await materializeEvidenceFiles(batch, packageDir);
+  }
 
   await zipExec("zip", ["-qr", zipPath, packageName], { cwd: outputDir });
 

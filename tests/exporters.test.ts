@@ -182,8 +182,10 @@ describe("export artifacts", () => {
     expect(indexHtml).toContain("酒店青猫低价");
     expect(indexHtml).toContain("对比另外3家平台");
     expect(indexHtml).not.toContain("开始采集");
-    expect(flightHtml).toContain("截图");
-    expect(hotelHtml).toContain("截图");
+    expect(flightHtml).not.toContain("href=\"../evidence/");
+    expect(hotelHtml).not.toContain("href=\"../evidence/");
+    expect(flightHtml).toContain("内部留存");
+    expect(hotelHtml).toContain("内部留存");
     expect(flightHtml).toContain("青猫差旅航班价格对比");
     expect(flightHtml).toContain("平台价格对比");
     expect(flightHtml).toContain("在途商旅");
@@ -196,8 +198,8 @@ describe("export artifacts", () => {
     expect(hotelHtml).toContain("青猫差旅为最低价且优势最大");
     expect(hotelHtml).toContain("大床有早餐");
     expect(hotelHtml).toContain("双床有早餐");
-    expect(hotelHtml).toContain("hotel-identity");
-    expect(hotelHtml).not.toContain("hotel-photo.jpg");
+    expect(hotelHtml).toContain("hotel-photo.jpg");
+    expect(hotelHtml).not.toContain("hotel-identity");
     expect(existsSync(path.join(result.directory, "hotels", "index.html"))).toBe(true);
     expect(existsSync(path.join(result.directory, "assets", "flight-photo.jpg"))).toBe(true);
     expect(existsSync(path.join(result.directory, "assets", "hotel-photo.jpg"))).toBe(true);
