@@ -82,6 +82,7 @@ import {
   buildHotelSingleAllRatePlansReviewHtml,
   buildHotelScaleValidationInput,
   buildInitialHotelScaleValidationResult,
+  collectHotelCoverImageFromPage,
   evaluateHotelScaleValidationEvidence,
   getHotelScaleValidationGroupSearchKeywords,
   isHotelRateLineExcludedByBedAssignment,
@@ -2582,6 +2583,44 @@ CNY 260`);
     });
     expect(result.groups.map((group) => group.targetCount)).toEqual([1, 1, 1, 0, 0]);
     expect(result.groups.map((group) => group.unattemptedCount)).toEqual([1, 1, 1, 0, 0]);
+  });
+
+  it("extracts and saves a hotel cover image from a detail page", async () => {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "hotel-cover-"));
+    const page = {
+      evaluate: vi.fn(async (_script: string, arg?: string) => {
+        if (arg) {
+          return "data:image/jpeg;base64,aG90ZWwtY292ZXI=";
+        }
+        return "https://img.example.com/hotel-cover.jpg";
+      })
+    } as unknown as Parameters<typeof collectHotelCoverImageFromPage>[0];
+
+    const result = await collectHotelCoverImageFromPage(page, runDir, "青猫差旅");
+
+    expect(result).toMatchObject({
+      coverImageUrl: "https://img.example.com/hotel-cover.jpg",
+      coverImagePath: path.join(runDir, "hotel-cover.jpg"),
+      coverImageSource: "青猫差旅",
+      coverImageStatus: "saved"
+    });
+    expect(fs.existsSync(path.join(runDir, "hotel-cover.jpg"))).toBe(true);
+  });
+
+  it("marks hotel cover image as missing when a detail page has no usable image", async () => {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "hotel-cover-"));
+    const page = {
+      evaluate: vi.fn(async () => null)
+    } as unknown as Parameters<typeof collectHotelCoverImageFromPage>[0];
+
+    const result = await collectHotelCoverImageFromPage(page, runDir, "青猫差旅");
+
+    expect(result).toMatchObject({
+      coverImageSource: "青猫差旅",
+      coverImageStatus: "missing",
+      coverImageFailureReason: "详情页未找到可用酒店封面图"
+    });
+    expect(fs.existsSync(path.join(runDir, "hotel-cover.jpg"))).toBe(false);
   });
 
   it("builds a human-readable hotel diagnostic review page with inline screenshots", () => {

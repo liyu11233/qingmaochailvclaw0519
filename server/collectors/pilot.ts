@@ -4,7 +4,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { FIXED_ROUTES, INTERNATIONAL_FALLBACK_ROUTES } from "../../src/domain/fakeBatch";
-import type { CollectionBatch, FlightSample, PlatformName, PlatformQuote, RouteConfig, RouteScope } from "../../src/domain/types";
+import type { CollectionBatch, FlightSample, HotelCoverImageFields, PlatformName, PlatformQuote, RouteConfig, RouteScope } from "../../src/domain/types";
 
 type PilotStatus = "idle" | "login-browser-open" | "running" | "completed" | "failed";
 type PilotOutcome = "needs-config" | "opened" | "reachable" | "login-required" | "failed";
@@ -269,6 +269,7 @@ export interface HotelMainRateQuote {
   diagnosisPath?: string;
   rawText?: string;
   durationMs?: number;
+  coverImage?: HotelCoverImageFields;
   error?: string;
 }
 
@@ -420,6 +421,11 @@ export interface HotelScaleValidationEvidenceInput {
   qingmaoEvidence?: HotelScaleValidationQingmaoEvidence;
   excludedRateRows?: HotelScaleValidationExcludedRateRow[];
   evidenceSaveFailed?: boolean;
+  coverImageUrl?: string;
+  coverImagePath?: string;
+  coverImageSource?: PlatformName;
+  coverImageStatus?: "saved" | "missing" | "failed";
+  coverImageFailureReason?: string;
 }
 
 export interface HotelScaleValidationEvidenceResult {
@@ -7795,7 +7801,7 @@ async function runHotelMainRateForQuery(
   onProgress?: (message: string) => void,
   shouldSkipCandidate?: (candidate: QingmaoHotelCandidate) => string | null,
   runOptions: { stopOnFirstCompetitorFailure?: boolean; competitorOrder?: PlatformName[] } = {}
-): Promise<{ status: "completed" | "partial"; selectedCandidate: QingmaoHotelCandidate; quotes: HotelMainRateQuote[]; message: string; skipped: string[]; attemptsUsed: number; failurePlatform?: PlatformName }> {
+): Promise<{ status: "completed" | "partial"; selectedCandidate: QingmaoHotelCandidate; quotes: HotelMainRateQuote[]; message: string; skipped: string[]; attemptsUsed: number; failurePlatform?: PlatformName; coverImage?: HotelCoverImageFields }> {
   await fsp.mkdir(artifactDir, { recursive: true });
   let selectedCandidate: QingmaoHotelCandidate | null = null;
   let qingmaoQuote: HotelMainRateQuote | null = null;
@@ -7993,6 +7999,88 @@ function hotelScaleValidationRunId(date: Date) {
 async function writeJsonArtifact(filePath: string, value: unknown) {
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
   await fsp.writeFile(filePath, JSON.stringify(value, null, 2), "utf8");
+}
+
+interface HotelCoverImagePage {
+  evaluate<T, Arg = unknown>(pageFunction: string | ((arg: Arg) => T), arg?: Arg): Promise<T>;
+}
+
+function parseDataUrl(dataUrl: string) {
+  const match = /^data:[^;]+;base64,(.+)$/i.exec(dataUrl);
+  return match ? Buffer.from(match[1], "base64") : null;
+}
+
+export async function collectHotelCoverImageFromPage(
+  page: HotelCoverImagePage,
+  artifactDir: string,
+  source: PlatformName
+): Promise<HotelCoverImageFields> {
+  const coverImageUrl = await page.evaluate<string | null>(`(() => {
+    const images = Array.from(document.images || [])
+      .map((image) => ({
+        src: image.currentSrc || image.src || "",
+        width: image.naturalWidth || image.width || 0,
+        height: image.naturalHeight || image.height || 0,
+        alt: image.alt || "",
+        visible: Boolean(image.offsetWidth || image.offsetHeight || image.getClientRects().length)
+      }))
+      .filter((image) => image.src && image.visible && image.width >= 180 && image.height >= 120)
+      .filter((image) => !/logo|icon|avatar|sprite|二维码|qrcode/i.test(image.src + " " + image.alt))
+      .sort((left, right) => (right.width * right.height) - (left.width * left.height));
+    return images[0]?.src || null;
+  })()`).catch(() => null);
+
+  if (!coverImageUrl) {
+    return {
+      coverImageSource: source,
+      coverImageStatus: "missing",
+      coverImageFailureReason: "详情页未找到可用酒店封面图"
+    };
+  }
+
+  try {
+    const dataUrl = await page.evaluate<string | null>(`(async (src) => {
+      const response = await fetch(src, { credentials: "include" });
+      if (!response.ok) return null;
+      const blob = await response.blob();
+      return await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(String(reader.result || ""));
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+    })`, coverImageUrl);
+    const image = dataUrl ? parseDataUrl(dataUrl) : null;
+    if (!image?.length) {
+      throw new Error("图片下载为空");
+    }
+    const coverImagePath = path.join(artifactDir, "hotel-cover.jpg");
+    await fsp.mkdir(path.dirname(coverImagePath), { recursive: true });
+    await fsp.writeFile(coverImagePath, image);
+    return {
+      coverImageUrl,
+      coverImagePath,
+      coverImageSource: source,
+      coverImageStatus: "saved"
+    };
+  } catch (error) {
+    return {
+      coverImageUrl,
+      coverImageSource: source,
+      coverImageStatus: "failed",
+      coverImageFailureReason: errorMessage(error)
+    };
+  }
+}
+
+function selectHotelCoverImage(quotes: HotelMainRateQuote[]): HotelCoverImageFields {
+  const candidates = quotes.map((quote) => quote.coverImage).filter(Boolean) as HotelCoverImageFields[];
+  const saved = ["青猫差旅", "携程商旅", "阿里商旅"]
+    .map((platform) => candidates.find((image) => image.coverImageSource === platform && image.coverImageStatus === "saved"))
+    .find(Boolean);
+  return saved ?? candidates.find((image) => image.coverImageStatus === "failed")
+    ?? candidates.find((image) => image.coverImageStatus === "missing")
+    ?? { coverImageStatus: "missing", coverImageFailureReason: "未执行酒店封面图采集" };
 }
 
 function buildHotelScaleValidationPathRecordsFromQuotes(quotes: HotelMainRateQuote[], sampleStartedAtMs: number): HotelScaleValidationPathRecord[] {
@@ -8817,6 +8905,7 @@ async function collectQingmaoHotelAllRatePlanQuotes(
   await clickQingmaoHotelCandidateDetail(listFrame, candidate, clickIndex);
   const qingmaoFrame = await waitForQingmaoHotelDetailFrame(qingmaoPage, candidate.hotelName);
   let bodyText = await waitForQingmaoHotelDetailAnyRateText(qingmaoFrame, candidate.hotelName);
+  const coverImage = await collectHotelCoverImageFromPage(qingmaoFrame, artifactDir, "青猫差旅");
   const quotes: HotelMainRateQuote[] = [];
 
   for (const [index, ratePlan] of HOTEL_RATE_PLAN_LABELS.entries()) {
@@ -8841,6 +8930,7 @@ async function collectQingmaoHotelAllRatePlanQuotes(
         ...selectedRate,
         finalUrl: qingmaoFrame.url(),
         screenshotPath: evidencePath,
+        coverImage: index === 0 ? coverImage : undefined,
         durationMs: index === 0 ? Date.now() - startedAt : 0
       }
       : {
@@ -8852,6 +8942,7 @@ async function collectQingmaoHotelAllRatePlanQuotes(
         ratePlan,
         finalUrl: qingmaoFrame.url(),
         screenshotPath: evidencePath,
+        coverImage: index === 0 ? coverImage : undefined,
         rawText: bodyText.slice(0, 1200),
         durationMs: index === 0 ? Date.now() - startedAt : 0,
         error: `青猫无${ratePlan}`
@@ -8872,6 +8963,7 @@ async function collectCtripHotelAllRatePlanQuotes(
   try {
     await openCtripHotelDetailByHotel(page, query, candidate);
     const bodyText = await waitForCtripHotelDetailRooms(page);
+    const coverImage = await collectHotelCoverImageFromPage(page, artifactDir, "携程商旅");
     const quotes: HotelMainRateQuote[] = [];
     for (const [index, ratePlan] of HOTEL_RATE_PLAN_LABELS.entries()) {
       const rates = parseCtripHotelMainRatesText(bodyText, ratePlan);
@@ -8886,7 +8978,7 @@ async function collectCtripHotelAllRatePlanQuotes(
         rawText: selectedRate?.rawText ?? excludedRows[0]?.rawText
       });
       quotes.push(selectedRate
-        ? { ...selectedRate, finalUrl: page.url(), screenshotPath: evidencePath, durationMs: index === 0 ? Date.now() - startedAt : 0 }
+        ? { ...selectedRate, finalUrl: page.url(), screenshotPath: evidencePath, coverImage: index === 0 ? coverImage : undefined, durationMs: index === 0 ? Date.now() - startedAt : 0 }
         : {
           platform: "携程商旅",
           status: "not-found",
@@ -8896,6 +8988,7 @@ async function collectCtripHotelAllRatePlanQuotes(
           ratePlan,
           finalUrl: page.url(),
           screenshotPath: evidencePath,
+          coverImage: index === 0 ? coverImage : undefined,
           durationMs: index === 0 ? Date.now() - startedAt : 0,
           rawText: excludedRows[0]?.rawText,
           error: excludedRows.length
@@ -8958,6 +9051,7 @@ async function collectAliHotelAllRatePlanQuotes(
     if (lastError) throw new Error(lastError);
     if (!detailPage) throw new Error("阿里商旅同酒店详情页未打开");
 
+    const coverImage = await collectHotelCoverImageFromPage(detailPage, artifactDir, "阿里商旅");
     const quotes: HotelMainRateQuote[] = [];
     for (const [index, ratePlan] of HOTEL_RATE_PLAN_LABELS.entries()) {
       const rates = parseAliHotelMainRatesText(bodyText, ratePlan);
@@ -8975,7 +9069,7 @@ async function collectAliHotelAllRatePlanQuotes(
         rawText: selectedRate?.rawText ?? fallbackRawText
       });
       if (selectedRate) {
-        quotes.push({ ...selectedRate, finalUrl: detailPage.url(), screenshotPath: evidencePath, durationMs: index === 0 ? Date.now() - startedAt : 0 });
+        quotes.push({ ...selectedRate, finalUrl: detailPage.url(), screenshotPath: evidencePath, coverImage: index === 0 ? coverImage : undefined, durationMs: index === 0 ? Date.now() - startedAt : 0 });
         continue;
       }
       const status = hotelPlatformNoRateStatus("阿里商旅", Boolean(detailRoomsRead?.stable));
@@ -8997,6 +9091,7 @@ async function collectAliHotelAllRatePlanQuotes(
         ratePlan,
         finalUrl: detailPage.url(),
         screenshotPath: evidencePath,
+        coverImage: index === 0 ? coverImage : undefined,
         diagnosisPath: sidecarPath,
         durationMs: index === 0 ? Date.now() - startedAt : 0,
         rawText: fallbackRawText,
@@ -9119,7 +9214,7 @@ async function runHotelAllRatePlansForQuery(
   maxAttempts: number,
   onProgress?: (message: string) => void,
   shouldSkipCandidate?: (candidate: QingmaoHotelCandidate) => string | null
-): Promise<{ status: "completed" | "partial"; selectedCandidate: QingmaoHotelCandidate; quotes: HotelMainRateQuote[]; message: string; skipped: string[]; attemptsUsed: number; failurePlatform?: PlatformName }> {
+): Promise<{ status: "completed" | "partial"; selectedCandidate: QingmaoHotelCandidate; quotes: HotelMainRateQuote[]; message: string; skipped: string[]; attemptsUsed: number; failurePlatform?: PlatformName; coverImage?: HotelCoverImageFields }> {
   await fsp.mkdir(artifactDir, { recursive: true });
   const skipped: string[] = [];
   let attemptsUsed = 0;
@@ -9195,6 +9290,7 @@ async function runHotelAllRatePlansForQuery(
         status: completeRatePlans.length ? "completed" : "partial",
         selectedCandidate: candidate,
         quotes,
+        coverImage: selectHotelCoverImage(quotes),
         message: completeRatePlans.length
           ? `${candidate.hotelName} 已形成 ${completeRatePlans.length} 个四平台完整口径：${completeRatePlans.join("、")}`
           : sawSameHotelFailure
@@ -10450,6 +10546,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
                     screenshotPath: unavailable?.screenshotPath,
                     diagnosisPath: unavailable?.diagnosisPath,
                     pageTextSummary: buildHotelScalePageTextSummary(result.quotes),
+                    ...result.coverImage,
                     pathRecords,
                     aliEvidence: unavailable?.platform === "阿里商旅" ? await collectAliScaleEvidencePaths(sampleArtifactDir) : undefined,
                     excludedRateRows: excludedRateRows.length ? excludedRateRows : undefined,
