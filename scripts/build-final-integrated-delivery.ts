@@ -15,6 +15,9 @@ const OUTPUT_ROOT = path.join(PROJECT_ROOT, "outputs", "current");
 const FLIGHT_BATCH_PATH = "/tmp/qingmao-real-full-shared-allowed.json";
 const HOTEL_TRACE_PATH = path.join(OUTPUT_ROOT, "delivery-drafts", "hotel-client-draft-2026-05-29-111801", "internal-trace.json");
 const FINAL_ID = "batch-2026-05-30-024928-flight-hotel-integrated";
+const DELIVERY_FOLDER_NAME = "qingmao-price-comparison-2026-05-30";
+const CUSTOMER_WORKBOOK_NAME = "qingmao-travel-price-comparison.xlsx";
+const OFFLINE_WEB_FOLDER_NAME = "offline-web";
 const RATE_LABELS: HotelRatePlanLabel[] = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"];
 const PLATFORMS: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"];
 
@@ -143,28 +146,79 @@ function buildBatch(): CollectionBatch {
   };
 }
 
+async function writeReadme(deliveryDir: string) {
+  const content = [
+    "青猫差旅第二版交付包",
+    "",
+    "打开方式：",
+    `1. 打开 ${OFFLINE_WEB_FOLDER_NAME}/index.html 查看离线网页展示。`,
+    `2. 打开 ${CUSTOMER_WORKBOOK_NAME} 查看 Excel 复核表。`,
+    "",
+    "说明：",
+    "- 本包为轻量交付包，可离线打开，不依赖本地服务。",
+    "- 本次未重新采集数据，仅基于现有航班与酒店结果重新整理交付物。",
+    "- 客户轻量包默认不包含全量网页截图证据。",
+    "- 需要内部复核时，请按 Excel 中的证据编号回到本机采集结果目录调取截图或网页快照。",
+    "",
+    "数据来源：",
+    "- 航班来源批次：batch-2026-05-30-024928-real-full。",
+    "- 酒店来源批次：hotel-scale-validation-2026-05-28-222300。"
+  ].join("\n");
+  await fsp.writeFile(path.join(deliveryDir, "README.txt"), content, "utf8");
+}
+
+function toOutputUrl(filePath: string) {
+  const relativePath = path.relative(path.join(PROJECT_ROOT, "outputs"), filePath);
+  return `/outputs/${relativePath.split(path.sep).map(encodeURIComponent).join("/")}`;
+}
+
+async function writeCurrentState(batch: CollectionBatch, workbookPath: string, offlinePackagePath: string) {
+  await fsp.writeFile(
+    path.join(OUTPUT_ROOT, "current-state.json"),
+    JSON.stringify(
+      {
+        batch,
+        artifacts: {
+          excel: toOutputUrl(workbookPath),
+          offlinePackage: toOutputUrl(offlinePackagePath)
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+}
+
 async function main() {
   const batch = buildBatch();
-  const deliveryDir = path.join(OUTPUT_ROOT, `final-integrated-delivery-${FINAL_ID}`);
+  const deliveryDir = path.join(OUTPUT_ROOT, DELIVERY_FOLDER_NAME);
   await fsp.rm(deliveryDir, { recursive: true, force: true });
   await fsp.mkdir(deliveryDir, { recursive: true });
 
   const workbook = await exportBatchWorkbook(batch, deliveryDir);
   const offlinePackage = await exportOfflinePackage(batch, deliveryDir);
+  const customerWorkbookPath = path.join(deliveryDir, CUSTOMER_WORKBOOK_NAME);
+  const offlineWebDir = path.join(deliveryDir, OFFLINE_WEB_FOLDER_NAME);
+
+  await fsp.rename(workbook.path, customerWorkbookPath);
+  await fsp.rename(offlinePackage.directory, offlineWebDir);
+  await writeReadme(deliveryDir);
 
   const finalZip = path.join(OUTPUT_ROOT, `青猫差旅第二版正式交付包-航班酒店一体化-2026-05-30.zip`);
   await fsp.rm(finalZip, { force: true });
   await fsp.rm(offlinePackage.path, { force: true });
   await zipExec("zip", ["-qr", finalZip, path.basename(deliveryDir)], { cwd: OUTPUT_ROOT });
+  await writeCurrentState(batch, customerWorkbookPath, finalZip);
 
-  console.log(JSON.stringify({
+  process.stdout.write(`${JSON.stringify({
     deliveryDir,
     finalZip,
-    workbook,
-    offlinePackage,
+    workbook: { ...workbook, path: customerWorkbookPath, filename: CUSTOMER_WORKBOOK_NAME },
+    offlinePackage: { ...offlinePackage, directory: offlineWebDir, filename: OFFLINE_WEB_FOLDER_NAME },
     flightCount: batch.samples.length,
     hotelCount: batch.hotels?.length ?? 0
-  }, null, 2));
+  }, null, 2)}\n`);
 }
 
 await main();

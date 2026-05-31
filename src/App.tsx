@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  Building2,
   CalendarDays,
   CircleCheckBig,
   Clock3,
@@ -17,13 +18,15 @@ import {
   Trash2
 } from "lucide-react";
 import type { CollectionBatch } from "./domain/types";
-import { type ArtifactLinks, buildDashboardView } from "./ui/viewModel";
+import { type ArtifactLinks, type QuoteView, buildDashboardView, comparisonPlatforms } from "./ui/viewModel";
 
 interface StatusResponse {
   hasBatch: boolean;
   batchId: string | null;
   generatedAt: string | null;
   sampleCount: number;
+  flightCount: number;
+  hotelCount: number;
   successCount: number;
   failedCount: number;
   artifacts: ArtifactLinks | null;
@@ -428,6 +431,26 @@ function estimateProgress(elapsedMs: number, estimateMs: number) {
   return Math.min(94, Math.max(8, Math.round((elapsedMs / estimateMs) * 100)));
 }
 
+function platformHeadClass(platform: string) {
+  const classes: Record<string, string> = {
+    青猫差旅: "qingmao-head",
+    携程商旅: "ctrip-head",
+    阿里商旅: "ali-head",
+    在途商旅: "ztrip-head"
+  };
+  return classes[platform] ?? "";
+}
+
+function platformPriceClass(quote: QuoteView) {
+  const classes: Record<string, string> = {
+    青猫差旅: "qingmao-cell",
+    携程商旅: "ctrip-cell",
+    阿里商旅: "ali-cell",
+    在途商旅: "ztrip-cell"
+  };
+  return classes[quote.platform] ?? "";
+}
+
 async function readJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const data = await response.json().catch(() => ({}));
@@ -473,6 +496,7 @@ export function App() {
   const [realCollecting, setRealCollecting] = useState(false);
   const [internationalCollecting, setInternationalCollecting] = useState(false);
   const [fullCollecting, setFullCollecting] = useState(false);
+  const [regeneratingArtifacts, setRegeneratingArtifacts] = useState(false);
   const [pilot, setPilot] = useState<PilotResult | null>(null);
   const [qingmaoCandidates, setQingmaoCandidates] = useState<QingmaoCandidateProbeResult | null>(null);
   const [sameFlightComparison, setSameFlightComparison] = useState<SameFlightComparisonProbeResult | null>(null);
@@ -492,10 +516,12 @@ export function App() {
     if (!view) return [];
     return scope === "全部" ? view.samples : view.samples.filter((sample) => sample.scope === scope);
   }, [scope, view]);
+  const flightCount = status?.flightCount ?? batch?.samples.length ?? 0;
+  const hotelCount = status?.hotelCount ?? batch?.hotels?.length ?? 0;
   const [collectionStartedAt, setCollectionStartedAt] = useState<number | null>(null);
   const [progressNow, setProgressNow] = useState(Date.now());
   const serverOperation = status?.activeOperation ?? null;
-  const isCollectionRunning = collecting || realCollecting || internationalCollecting || fullCollecting;
+  const isCollectionRunning = collecting || realCollecting || internationalCollecting || fullCollecting || regeneratingArtifacts;
   const isOperationRunning = isCollectionRunning || Boolean(serverOperation);
   const operationLocked = isOperationRunning || Boolean(pilotBusy);
   const localCollectionLabel = fullCollecting
@@ -506,17 +532,21 @@ export function App() {
         ? "国际真实采集"
         : collecting
           ? "模拟采集"
-          : "";
+          : regeneratingArtifacts
+            ? "重新生成交付包"
+            : "";
   const runningCollectionLabel = localCollectionLabel || serverOperation?.label || "";
   const serverStartedAt = serverOperation ? Date.parse(serverOperation.startedAt) : Number.NaN;
   const runningStartedAt = collectionStartedAt ?? (Number.isNaN(serverStartedAt) ? null : serverStartedAt);
   const runningIsFull = runningCollectionLabel.includes("完整真实采集");
   const runningIsSegment = runningCollectionLabel.includes("国内真实采集") || runningCollectionLabel.includes("国际真实采集");
-  const runningEstimateText = runningIsFull ? "预计 10-18 分钟" : runningIsSegment ? "预计 5-10 分钟" : "预计 10 秒内";
-  const runningEstimateMs = runningIsFull ? 15 * 60 * 1000 : runningIsSegment ? 8 * 60 * 1000 : 10 * 1000;
+  const runningIsRegeneratingArtifacts = runningCollectionLabel.includes("重新生成交付包");
+  const runningEstimateText = runningIsFull ? "预计 10-18 分钟" : runningIsSegment ? "预计 5-10 分钟" : runningIsRegeneratingArtifacts ? "预计 30 秒内" : "预计 10 秒内";
+  const runningEstimateMs = runningIsFull ? 15 * 60 * 1000 : runningIsSegment ? 8 * 60 * 1000 : runningIsRegeneratingArtifacts ? 30 * 1000 : 10 * 1000;
   const runningElapsedMs = runningStartedAt ? progressNow - runningStartedAt : 0;
   const runningProgress = isOperationRunning ? estimateProgress(runningElapsedMs, runningEstimateMs) : 0;
   const fullCollectionRunning = fullCollecting || serverOperation?.label === "完整真实采集";
+  const artifactRegenerationRunning = regeneratingArtifacts || serverOperation?.label === "重新生成交付包";
 
   function markCollectionStart() {
     const startedAt = Date.now();
@@ -649,6 +679,28 @@ export function App() {
       setCollectionResult({ tone: "failed", title: "完整真实采集失败", detail: message });
     } finally {
       setFullCollecting(false);
+      setCollectionStartedAt(null);
+      void refreshStatus().catch(() => undefined);
+    }
+  }
+
+  async function regenerateArtifacts() {
+    markCollectionStart();
+    setRegeneratingArtifacts(true);
+    setError("");
+
+    try {
+      const result = await readJson<BatchResponse>("/api/artifacts/regenerate", { method: "POST" });
+      setBatch(result.batch);
+      setArtifacts(result.artifacts);
+      setCollectionResult({ tone: "success", title: "交付包已重新生成", detail: "未重新采集数据，已基于当前批次重新生成 Excel 和离线网页包。" });
+      await refreshStatus();
+    } catch (regenerationError) {
+      const message = regenerationError instanceof Error ? regenerationError.message : "交付包重新生成失败";
+      setError(message);
+      setCollectionResult({ tone: "failed", title: "交付包重新生成失败", detail: message });
+    } finally {
+      setRegeneratingArtifacts(false);
       setCollectionStartedAt(null);
       void refreshStatus().catch(() => undefined);
     }
@@ -834,19 +886,20 @@ export function App() {
       <section className="command-band">
         <div className="command-copy">
           <p className="eyebrow">Manual Collection Console</p>
-          <h1>航班比价采集台</h1>
+          <h1>航班酒店比价管理台</h1>
           <p>
-            先人工登录四个平台，再由系统随机抽取未来 3 天后的航班，生成同航班价格对比、Excel 和离线网页包。
+            先人工登录四个平台，再由系统采集航班和酒店价格；如果只是调整交付物，可直接重新生成 Excel 和离线网页包，不需要重新采集。
           </p>
         </div>
 
         <div className="command-panel" aria-label="采集操作">
           <div className="panel-state">
             <span>{loading ? "正在读取状态" : status?.hasBatch ? "已有当前批次" : "暂无当前批次"}</span>
-            <strong>{status?.sampleCount ?? 0} 条样本</strong>
+            <strong>{flightCount} 条航班</strong>
+            <small>酒店：{hotelCount} 家</small>
             <small>最近采集：{formatDateTime(status?.generatedAt ?? null)}</small>
           </div>
-          <p className="operation-note">日常只需要先登录并保持浏览器打开，再连接当前窗口，最后开始完整真实采集。</p>
+          <p className="operation-note">日常先登录并保持浏览器打开，再连接当前窗口，最后开始完整真实采集；如果已有批次，只调整 Excel 或离线包时，直接点“重新生成交付包”。</p>
           <button className="ghost-button active-link" type="button" onClick={openPilotLogin} disabled={operationLocked}>
             <LogIn size={18} />
             {pilotBusy === "login" ? "正在打开" : "打开登录浏览器"}
@@ -883,7 +936,7 @@ export function App() {
                 <span style={{ width: `${runningProgress}%` }} />
               </div>
               <p>
-                {runningEstimateText}。系统正在通过已登录浏览器后台采集，期间已锁定连接和后台探测按钮，避免重复点击导致连接失败。
+                {runningEstimateText}。{runningIsRegeneratingArtifacts ? "系统正在基于当前批次重新整理 Excel 和离线网页包，不会重新访问平台。" : "系统正在通过已登录浏览器后台采集，期间已锁定连接和后台探测按钮，避免重复点击导致连接失败。"}
               </p>
             </div>
           ) : null}
@@ -896,6 +949,10 @@ export function App() {
               <p>{collectionResult.detail}</p>
             </div>
           ) : null}
+          <button className="ghost-button active-link artifact-refresh-button" type="button" onClick={regenerateArtifacts} disabled={!batch || operationLocked || loading}>
+            <RefreshCw size={17} className={artifactRegenerationRunning ? "spin" : ""} />
+            {artifactRegenerationRunning ? "正在重新生成交付包" : "重新生成交付包"}
+          </button>
           <div className="download-row">
             <DownloadButton href={artifacts?.excel ?? null} icon={<FileSpreadsheet size={17} />} label="导出 Excel" />
             <DownloadButton href={artifacts?.offlinePackage ?? null} icon={<ImageIcon size={17} />} label="离线网页包" />
@@ -1335,23 +1392,23 @@ export function App() {
           <section className="metric-grid" aria-label="采集结果概览">
             <div className="metric-item">
               <span>总样本</span>
-              <strong>{view.sampleCount}</strong>
-              <small>国内 {view.domesticCount} / 国际 {view.internationalCount}</small>
+              <strong>{view.flightCount + view.hotelCount}</strong>
+              <small>航班 {view.flightCount} / 酒店 {view.hotelCount}</small>
             </div>
             <div className="metric-item">
               <span>青猫低于竞品</span>
-              <strong>{view.advantageCount}</strong>
-              <small>需要在客户现场放大展示</small>
+              <strong>{view.advantageCount + view.hotelAdvantageCount}</strong>
+              <small>航班 {view.advantageCount} / 酒店 {view.hotelAdvantageCount}</small>
             </div>
             <div className="metric-item">
               <span>青猫高于对比口径</span>
-              <strong>{view.higherThanLowestCount}</strong>
-              <small>弱提示，内部复盘即可</small>
+              <strong>{view.higherThanLowestCount + view.hotelHigherThanLowestCount}</strong>
+              <small>航班 {view.higherThanLowestCount} / 酒店 {view.hotelHigherThanLowestCount}</small>
             </div>
             <div className="metric-item">
               <span>证据入口</span>
               <strong>{view.evidenceCount}</strong>
-              <small>每条记录绑定三平台</small>
+              <small>航班与酒店四平台留痕</small>
             </div>
           </section>
 
@@ -1388,6 +1445,7 @@ export function App() {
                   <col className="platform-column" />
                   <col className="platform-column" />
                   <col className="platform-column" />
+                  <col className="platform-column" />
                   <col className="gap-column" />
                   <col className="conclusion-column" />
                 </colgroup>
@@ -1395,9 +1453,9 @@ export function App() {
                   <tr>
                     <th>航线</th>
                     <th>航班</th>
-                    <th><span className="platform-head qingmao-head">青猫差旅</span></th>
-                    <th><span className="platform-head ctrip-head">携程商旅</span></th>
-                    <th><span className="platform-head ali-head">阿里商旅</span></th>
+                    {comparisonPlatforms.map((platform) => (
+                      <th key={platform}><span className={`platform-head ${platformHeadClass(platform)}`}>{platform}</span></th>
+                    ))}
                     <th>青猫差额</th>
                     <th>结论</th>
                   </tr>
@@ -1423,7 +1481,7 @@ export function App() {
                           key={quote.platform}
                           className={[
                             "platform-price-cell",
-                            quote.isQingmao ? "qingmao-cell" : quote.platform === "携程商旅" ? "ctrip-cell" : "ali-cell",
+                            platformPriceClass(quote),
                             quote.available ? "available" : "unavailable"
                           ].join(" ")}
                         >
@@ -1449,6 +1507,94 @@ export function App() {
               </table>
             </div>
           </section>
+
+          {view.hotels.length > 0 ? (
+            <section className="data-section hotel-data-section">
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow"><span className="section-dot hotel-dot" /> Hotel Batch</p>
+                  <h2>酒店采集明细</h2>
+                  <p className="section-subtitle">按默认展示口径呈现四平台酒店价格，销售交付包和 Excel 也按这个口径生成</p>
+                  <div className="section-meta">
+                    <span><Building2 size={15} /> 酒店 {view.hotelCount} 家</span>
+                    <span>默认口径：优先完整可比、青猫优势最大的房型早餐组合</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="table-frame">
+                <table className="batch-table hotel-table">
+                  <colgroup>
+                    <col className="hotel-column" />
+                    <col className="hotel-rate-column" />
+                    <col className="platform-column" />
+                    <col className="platform-column" />
+                    <col className="platform-column" />
+                    <col className="platform-column" />
+                    <col className="gap-column" />
+                    <col className="conclusion-column" />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>酒店</th>
+                      <th>日期 / 口径</th>
+                      {comparisonPlatforms.map((platform) => (
+                        <th key={platform}><span className={`platform-head ${platformHeadClass(platform)}`}>{platform}</span></th>
+                      ))}
+                      <th>青猫差额</th>
+                      <th>结论</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {view.hotels.map((hotel) => (
+                      <tr key={hotel.id}>
+                        <td>
+                          <div className="route-cell hotel-cell">
+                            <span className="route-icon hotel-icon"><Building2 size={16} /></span>
+                            <div>
+                              <b>{hotel.hotelName}</b>
+                              <span>{hotel.group} / {hotel.brand} / {hotel.city}</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <b>{hotel.primaryRatePlanLabel}</b>
+                          <span>{hotel.stayLabel}</span>
+                          <span>{hotel.nightsLabel} / 完整口径 {hotel.completeRatePlanCount} 个</span>
+                        </td>
+                        {hotel.quotes.map((quote) => (
+                          <td
+                            key={quote.platform}
+                            className={[
+                              "platform-price-cell",
+                              platformPriceClass(quote),
+                              quote.available ? "available" : "unavailable"
+                            ].join(" ")}
+                          >
+                            <b>{quote.priceLabel}</b>
+                            {quote.status !== quote.priceLabel ? <span>{quote.status}</span> : null}
+                          </td>
+                        ))}
+                        <td className={`gap-cell ${hotel.gapTone}`}>
+                          <b className="gap-badge">{hotel.gapLabel}</b>
+                          <span>最低价平台：{hotel.lowestPlatform}</span>
+                        </td>
+                        <td>
+                          <div className={`conclusion-cell ${hotel.gapTone}`}>
+                            {hotel.salesDisplayEligible ? <CircleCheckBig size={16} /> : <AlertTriangle size={16} />}
+                            <span>
+                              {hotel.conclusion}
+                              <small>{hotel.salesDisplayReason}</small>
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
 
           <section className="trace-strip">
             <Clock3 size={18} />

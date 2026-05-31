@@ -255,7 +255,7 @@ ${rootHead("青猫差旅价格对比离线包")}
       <aside class="home-stamp">
         <span>数据更新时间</span>
         <strong>${escapeHtml(displayTime)}</strong>
-        <small>当前为 ${escapeHtml(displayTime)} 采集数据</small>
+        <small>数据整理时间：${escapeHtml(displayTime)}</small>
         <em>离线网页包 / 不依赖本地服务</em>
       </aside>
     </section>
@@ -362,7 +362,7 @@ ${sharedHead("航班价格对比")}
     </header>
     <header class="flight-hero">
       <div>
-        <p class="eyebrow">当前为 ${escapeHtml(displayTime)} 采集数据</p>
+        <p class="eyebrow">数据整理时间：${escapeHtml(displayTime)}</p>
         <h1>青猫差旅航班价格对比</h1>
         <p>同一航班 · 同一日期 · 同一舱位</p>
       </div>
@@ -555,7 +555,7 @@ ${sharedHead("酒店价格对比")}
       <h1>青猫差旅酒店价格对比</h1>
       <div class="hotel-tabs" role="tablist">${tabs}</div>
       <div class="hotel-chips">
-        <span>当前为 ${escapeHtml(displayTime)} 采集数据</span>
+        <span>数据整理时间：${escapeHtml(displayTime)}</span>
         <span>入住 ${escapeHtml(checkIn)} · 离店 ${escapeHtml(checkOut)} · 1 间夜</span>
         <span>同一酒店 · 同一日期 · 同一床型早餐口径</span>
         <div class="rate-selector" aria-label="选择主对比口径">

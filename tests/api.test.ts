@@ -37,9 +37,9 @@ describe("management API", () => {
     return createApp({
       ...options,
       exporters: {
-        ...options.exporters,
         workbook: exportTestWorkbook,
-        offlinePackage: exportTestOfflinePackage
+        offlinePackage: exportTestOfflinePackage,
+        ...options.exporters
       }
     });
   }
@@ -65,6 +65,35 @@ describe("management API", () => {
     expect(status.body.hasBatch).toBe(true);
     expect(status.body.successCount).toBe(20);
     expect(status.body.failedCount).toBe(0);
+    expect(status.body.flightCount).toBe(20);
+    expect(status.body.hotelCount).toBe(40);
+  });
+
+  it("regenerates delivery artifacts from the current batch without starting collection", async () => {
+    const outputDir = await createTempOutputDir();
+    const workbook = vi.fn(exportTestWorkbook);
+    const offlinePackage = vi.fn(exportTestOfflinePackage);
+    const app = createTestApp({ outputDir, exporters: { workbook, offlinePackage } });
+
+    const emptyRegeneration = await request(app).post("/api/artifacts/regenerate").expect(400);
+    expect(emptyRegeneration.body.error).toContain("还没有可用批次");
+    expect(workbook).not.toHaveBeenCalled();
+    expect(offlinePackage).not.toHaveBeenCalled();
+
+    const collect = await request(app).post("/api/collect").expect(200);
+    expect(workbook).toHaveBeenCalledTimes(1);
+    expect(offlinePackage).toHaveBeenCalledTimes(1);
+
+    const regenerated = await request(app).post("/api/artifacts/regenerate").expect(200);
+    expect(regenerated.body.batch.id).toBe(collect.body.batch.id);
+    expect(regenerated.body.artifacts.excel).toMatch(/\.xlsx$/);
+    expect(regenerated.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(workbook).toHaveBeenCalledTimes(2);
+    expect(offlinePackage).toHaveBeenCalledTimes(2);
+
+    const status = await request(app).get("/api/status").expect(200);
+    expect(status.body.batchId).toBe(collect.body.batch.id);
+    expect(status.body.artifacts.excel).toBe(regenerated.body.artifacts.excel);
   });
 
   it("restores the latest persisted batch after the server restarts", async () => {

@@ -31,6 +31,7 @@ const PLATFORM_STYLE: Record<PlatformName, { fill: string; font: string; code: s
 };
 
 const RATE_PLAN_ORDER: HotelRatePlanLabel[] = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"];
+const DELIVERY_NOTE = "第二版交付版：Excel 不内嵌网页截图；客户轻量包默认不包含全量截图证据，内部复核时可按证据编号回到本机采集结果目录追溯。";
 
 function money(value: number | null | undefined) {
   return typeof value === "number" ? value : "";
@@ -100,7 +101,7 @@ function addTitle(sheet: ExcelJS.Worksheet, title: string, subtitle: string, col
 
   sheet.mergeCells(3, 1, 3, columns);
   const noteCell = sheet.getCell(3, 1);
-  noteCell.value = note ?? "第二版验收版：不内嵌图片，网页截图证据保存在离线网页包证据目录中，Excel 只保留索引、路径和复核字段。";
+  noteCell.value = note ?? DELIVERY_NOTE;
   noteCell.font = { size: 10, color: { argb: `FF${BRAND_TEAL}` }, bold: true };
   noteCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEAF7F5" } };
   noteCell.alignment = { vertical: "middle", wrapText: true };
@@ -204,7 +205,7 @@ function hotelSalesDisplayReason(hotel: HotelSample) {
 
 function addOverviewSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const sheet = workbook.addWorksheet("总览页", { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
-  addTitle(sheet, "青猫差旅价格对比总览", `数据时间：${formatDateTime(batch.generatedAt)}。批次：${batch.id}`, 8);
+  addTitle(sheet, "青猫差旅价格对比总览", `数据整理时间：${formatDateTime(batch.generatedAt)}。批次：${batch.id}`, 8);
 
   const hotelSamples = batch.hotels ?? [];
   const hotelRateRows = hotelSamples.reduce((sum, hotel) => sum + hotel.ratePlans.length, 0);
@@ -220,7 +221,7 @@ function addOverviewSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
     ["酒店口径行", hotelRateRows, "每家酒店最多 4 个房型早餐口径"],
     ["航班青猫低价", countByGap(flightSummaries, (gap) => gap < 0), "青猫低于对比口径"],
     ["酒店青猫低价", countByGap(hotelPrimarySummaries, (gap) => gap < 0), "按酒店推荐口径统计"],
-    ["失败记录", batch.failureNotes?.length ?? 0, "候选放弃、平台缺失和批次异常"]
+    ["批次说明", batch.failureNotes?.length ?? 0, "来源批次、替换和补位说明"]
   ];
 
   summaryRows.forEach((values, index) => {
@@ -263,7 +264,7 @@ function addOverviewSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
 
 function addFlightSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const sheet = workbook.addWorksheet("航班汇总页", { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
-  addTableShell(sheet, "航班四平台价格对比", `数据时间：${formatDateTime(batch.generatedAt)}。同一日期、同一航班号、经济舱口径。`, 16, [
+  addTableShell(sheet, "航班四平台价格对比", `数据整理时间：${formatDateTime(batch.generatedAt)}。同一日期、同一航班号、经济舱口径。`, 16, [
     "序号",
     "国内/国际",
     "航线",
@@ -337,7 +338,7 @@ function addFlightSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
 
 function addHotelSummarySheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const sheet = workbook.addWorksheet("酒店汇总页", { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
-  addTableShell(sheet, "酒店默认展示口径价格对比", `数据时间：${formatDateTime(batch.generatedAt)}。每家酒店默认展示当前最完整、最可比的口径；至少 1 个口径四平台完整才进入销售主展示。`, 17, [
+  addTableShell(sheet, "酒店默认展示口径价格对比", `数据整理时间：${formatDateTime(batch.generatedAt)}。每家酒店默认展示当前最完整、最可比的口径；至少 1 个口径四平台完整才进入销售主展示。`, 17, [
     "序号",
     "集团",
     "品牌",
@@ -418,7 +419,7 @@ function addHotelSummarySheet(workbook: ExcelJS.Workbook, batch: CollectionBatch
 
 function addHotelGroupDetailSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const sheet = workbook.addWorksheet("酒店集团明细页", { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
-  addTableShell(sheet, "酒店集团与房型口径明细", `数据时间：${formatDateTime(batch.generatedAt)}。销售明细只展示至少 1 个口径四平台完整的酒店，并保留每家酒店 4 个口径。`, 27, [
+  addTableShell(sheet, "酒店集团与房型口径明细", `数据整理时间：${formatDateTime(batch.generatedAt)}。销售明细只展示至少 1 个口径四平台完整的酒店，并保留每家酒店 4 个口径。`, 27, [
     "序号",
     "集团",
     "品牌",
@@ -541,7 +542,7 @@ function addHotelGroupDetailSheet(workbook: ExcelJS.Workbook, batch: CollectionB
 
 function addFlightEvidenceSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const sheet = workbook.addWorksheet("航班网页截图索引页", { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
-  addTableShell(sheet, "航班网页截图索引", "用于按证据编号定位离线网页包中的平台网页截图或网页快照。", 12, [
+  addTableShell(sheet, "航班网页截图索引", "用于按证据编号定位本机采集结果目录中的平台网页截图或网页快照。", 11, [
     "证据编号",
     "样本序号",
     "国内/国际",
@@ -551,7 +552,6 @@ function addFlightEvidenceSheet(workbook: ExcelJS.Workbook, batch: CollectionBat
     "平台",
     "状态",
     "价格",
-    "证据相对路径",
     "来源页面",
     "说明"
   ]);
@@ -570,7 +570,6 @@ function addFlightEvidenceSheet(workbook: ExcelJS.Workbook, batch: CollectionBat
         platform,
         quote?.status ?? "采集失败",
         money(quote?.price),
-        quote?.evidencePath ?? "",
         quote?.sourceUrl ?? "",
         quote?.available ? "可复核" : quote?.missingReason || quote?.status || "暂无"
       ]);
@@ -580,13 +579,13 @@ function addFlightEvidenceSheet(workbook: ExcelJS.Workbook, batch: CollectionBat
     });
   });
 
-  sheet.columns = [{ width: 14 }, { width: 10 }, { width: 10 }, { width: 18 }, { width: 13 }, { width: 12 }, { width: 13 }, { width: 12 }, { width: 12 }, { width: 46 }, { width: 36 }, { width: 20 }];
-  sheet.autoFilter = `A${HEADER_ROW}:L${sheet.rowCount}`;
+  sheet.columns = [{ width: 14 }, { width: 10 }, { width: 10 }, { width: 18 }, { width: 13 }, { width: 12 }, { width: 13 }, { width: 12 }, { width: 12 }, { width: 36 }, { width: 20 }];
+  sheet.autoFilter = `A${HEADER_ROW}:K${sheet.rowCount}`;
 }
 
 function addHotelEvidenceSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const sheet = workbook.addWorksheet("酒店网页截图索引页", { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
-  addTableShell(sheet, "酒店网页截图索引", "用于按证据编号定位酒店、口径和平台对应的网页截图或网页快照。", 14, [
+  addTableShell(sheet, "酒店网页截图索引", "用于按证据编号定位本机采集结果目录中的酒店、口径和平台对应网页截图或网页快照。", 13, [
     "证据编号",
     "酒店序号",
     "集团",
@@ -598,7 +597,6 @@ function addHotelEvidenceSheet(workbook: ExcelJS.Workbook, batch: CollectionBatc
     "平台",
     "状态",
     "价格",
-    "证据相对路径",
     "来源页面",
     "说明"
   ]);
@@ -621,7 +619,6 @@ function addHotelEvidenceSheet(workbook: ExcelJS.Workbook, batch: CollectionBatc
           platform,
           quote?.status ?? "采集失败",
           money(quote?.price),
-          quote?.evidencePath ?? "",
           quote?.sourceUrl ?? "",
           quote?.available ? "可复核" : quote?.missingReason || quote?.status || "暂无"
         ]);
@@ -632,8 +629,8 @@ function addHotelEvidenceSheet(workbook: ExcelJS.Workbook, batch: CollectionBatc
     });
   });
 
-  sheet.columns = [{ width: 16 }, { width: 10 }, { width: 13 }, { width: 10 }, { width: 28 }, { width: 13 }, { width: 13 }, { width: 12 }, { width: 13 }, { width: 12 }, { width: 12 }, { width: 50 }, { width: 36 }, { width: 20 }];
-  sheet.autoFilter = `A${HEADER_ROW}:N${sheet.rowCount}`;
+  sheet.columns = [{ width: 16 }, { width: 10 }, { width: 13 }, { width: 10 }, { width: 28 }, { width: 13 }, { width: 13 }, { width: 12 }, { width: 13 }, { width: 12 }, { width: 12 }, { width: 36 }, { width: 20 }];
+  sheet.autoFilter = `A${HEADER_ROW}:M${sheet.rowCount}`;
 }
 
 function addInternalTraceSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
@@ -732,7 +729,7 @@ function addFailureSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
 
   const records: Array<[string, string, string, string, string, string, string, string]> = [];
   for (const note of batch.failureNotes ?? []) {
-    records.push(["批次", batch.id, "", "", "采集失败", note, "", ""]);
+    records.push(["批次说明", batch.id, "", "", "说明", note, "", ""]);
   }
 
   batch.samples.forEach((sample) => {

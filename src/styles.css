@@ -360,6 +360,11 @@ td span {
   margin-top: 10px;
 }
 
+.artifact-refresh-button {
+  width: 100%;
+  margin-top: 12px;
+}
+
 .ghost-button {
   border: 1px solid var(--line-strong);
   background: var(--paper);
@@ -912,7 +917,7 @@ table {
 }
 
 .batch-table {
-  min-width: 1450px;
+  min-width: 1600px;
   table-layout: fixed;
 }
 
@@ -922,6 +927,14 @@ table {
 
 .batch-table .flight-column {
   width: 230px;
+}
+
+.batch-table .hotel-column {
+  width: 360px;
+}
+
+.batch-table .hotel-rate-column {
+  width: 220px;
 }
 
 .batch-table .platform-column {
@@ -1025,7 +1038,12 @@ tbody tr:hover td {
 }
 
 .ali-cell {
+  background: #fffdf9;
+}
+
+.ztrip-cell {
   border-right: 1px solid var(--line-strong);
+  background: #fbf9ff;
 }
 
 td:not(.qingmao-cell) b {
@@ -1070,6 +1088,11 @@ td:not(.qingmao-cell) b {
   box-shadow: 0 0 0 4px rgba(242, 117, 17, 0.12);
 }
 
+.ztrip-head::before {
+  background: #6d28d9;
+  box-shadow: 0 0 0 4px rgba(109, 40, 217, 0.12);
+}
+
 .route-cell {
   display: flex;
   align-items: center;
@@ -1101,6 +1124,38 @@ td:not(.qingmao-cell) b {
   background: #f8fbff;
   color: #23365c;
   box-shadow: 0 4px 12px rgba(16, 26, 51, 0.08);
+}
+
+.hotel-data-section {
+  margin-top: 22px;
+}
+
+.hotel-dot {
+  background: var(--amber);
+}
+
+.hotel-icon {
+  border-radius: 8px;
+  color: var(--qingmao);
+}
+
+.hotel-table .route-cell {
+  align-items: flex-start;
+}
+
+.hotel-table .route-cell b,
+.hotel-table .route-cell span:not(.route-icon) {
+  white-space: normal;
+}
+
+.hotel-table .route-cell b {
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.hotel-table td span {
+  display: block;
+  line-height: 1.45;
 }
 
 .good {
@@ -1168,6 +1223,17 @@ td:not(.qingmao-cell) b {
 
 .conclusion-cell.higher svg {
   color: #7f8aa1;
+}
+
+.conclusion-cell span {
+  display: grid;
+  gap: 6px;
+}
+
+.conclusion-cell small {
+  color: var(--muted);
+  font-weight: 650;
+  line-height: 1.45;
 }
 
 .trace-strip {

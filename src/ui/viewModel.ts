@@ -1,10 +1,13 @@
-import { summarizeFlight } from "../domain/comparison";
-import type { CollectionBatch, FlightSample, PlatformQuote } from "../domain/types";
+import { summarizeFlight, summarizeQuoteSet } from "../domain/comparison";
+import { analyzeHotelRatePlanCompleteness, resolveHotelDisplayDecision, resolveHotelPrimaryRatePlan } from "../domain/hotelRatePlans";
+import type { CollectionBatch, FlightSample, HotelRatePlan, HotelSample, PlatformName, PlatformQuote } from "../domain/types";
 
 export interface ArtifactLinks {
   excel: string;
   offlinePackage: string;
 }
+
+export const comparisonPlatforms: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"];
 
 export interface QuoteView {
   platform: PlatformQuote["platform"];
@@ -34,6 +37,26 @@ export interface SampleView {
   conclusion: string;
 }
 
+export interface HotelView {
+  id: string;
+  group: HotelSample["group"];
+  brand: string;
+  hotelName: string;
+  city: string;
+  stayLabel: string;
+  nightsLabel: string;
+  primaryRatePlanLabel: string;
+  completeRatePlanCount: number;
+  salesDisplayEligible: boolean;
+  salesDisplayReason: string;
+  quotes: QuoteView[];
+  lowestPlatform: string;
+  qingmaoGap: number | null;
+  gapLabel: string;
+  gapTone: SampleView["gapTone"];
+  conclusion: string;
+}
+
 export interface DashboardView {
   batchId: string;
   generatedAt: string;
@@ -46,9 +69,14 @@ export interface DashboardView {
   neutralCount: number;
   notHigherThanLowestCount: number;
   higherThanLowestCount: number;
+  flightCount: number;
+  hotelCount: number;
+  hotelAdvantageCount: number;
+  hotelHigherThanLowestCount: number;
   evidenceCount: number;
   failureNotes: string[];
   samples: SampleView[];
+  hotels: HotelView[];
 }
 
 const moneyFormatter = new Intl.NumberFormat("zh-CN");
@@ -70,6 +98,23 @@ function gapTone(gap: number | null): SampleView["gapTone"] {
   return "higher";
 }
 
+function quoteByPlatform(quotes: PlatformQuote[], platform: PlatformName) {
+  return quotes.find((quote) => quote.platform === platform);
+}
+
+function buildQuoteView(quotes: PlatformQuote[], platform: PlatformName): QuoteView {
+  const quote = quoteByPlatform(quotes, platform);
+
+  return {
+    platform,
+    priceLabel: quote ? formatMoney(quote.price, quote.status) : "采集失败",
+    status: quote?.status ?? "采集失败",
+    evidencePath: quote?.evidencePath ?? "",
+    isQingmao: platform === "青猫差旅",
+    available: quote?.available ?? false
+  };
+}
+
 export function buildSampleView(sample: FlightSample): SampleView {
   const summary = summarizeFlight(sample);
   const transferLabel = sample.directType === "中转" && sample.transferCity ? `中转${sample.transferCity}` : sample.directType;
@@ -85,14 +130,7 @@ export function buildSampleView(sample: FlightSample): SampleView {
     directType: sample.directType,
     transferLabel,
     durationLabel: formatDuration(sample.durationMinutes),
-    quotes: sample.quotes.map((quote) => ({
-      platform: quote.platform,
-      priceLabel: formatMoney(quote.price, quote.status),
-      status: quote.status,
-      evidencePath: quote.evidencePath,
-      isQingmao: quote.platform === "青猫差旅",
-      available: quote.available
-    })),
+    quotes: comparisonPlatforms.map((platform) => buildQuoteView(sample.quotes, platform)),
     lowestPlatform: summary.lowestPlatform || "无",
     qingmaoGap: summary.qingmaoGap,
     gapLabel: summary.comparisonLabel,
@@ -101,8 +139,44 @@ export function buildSampleView(sample: FlightSample): SampleView {
   };
 }
 
+function fallbackRatePlan(): HotelRatePlan {
+  return {
+    label: "大床有早餐",
+    quotes: []
+  };
+}
+
+export function buildHotelView(hotel: HotelSample): HotelView {
+  const primary = resolveHotelPrimaryRatePlan(hotel) ?? fallbackRatePlan();
+  const displayDecision = resolveHotelDisplayDecision(hotel.ratePlans);
+  const completeness = analyzeHotelRatePlanCompleteness(primary);
+  const summary = summarizeQuoteSet(primary.quotes);
+  const completeRatePlanCount = hotel.completeRatePlanCount ?? displayDecision.completeRatePlanCount;
+
+  return {
+    id: hotel.id,
+    group: hotel.group,
+    brand: hotel.brand,
+    hotelName: hotel.hotelName,
+    city: hotel.city,
+    stayLabel: `${hotel.checkInDate} 至 ${hotel.checkOutDate}`,
+    nightsLabel: `${hotel.nights} 间夜`,
+    primaryRatePlanLabel: primary.label,
+    completeRatePlanCount,
+    salesDisplayEligible: hotel.salesDisplayEligible ?? displayDecision.salesDisplayEligible,
+    salesDisplayReason: hotel.salesDisplayReason ?? displayDecision.salesDisplayReason,
+    quotes: comparisonPlatforms.map((platform) => buildQuoteView(primary.quotes, platform)),
+    lowestPlatform: summary.lowestPlatform || "无",
+    qingmaoGap: summary.qingmaoGap,
+    gapLabel: summary.comparisonLabel,
+    gapTone: gapTone(summary.qingmaoGap),
+    conclusion: completeness.isFourPlatformComplete ? summary.conclusion : `${primary.label}当前只有 ${completeness.pricedPlatformCount} 个平台有可比价格。`
+  };
+}
+
 export function buildDashboardView(batch: CollectionBatch): DashboardView {
   const samples = batch.samples.map(buildSampleView);
+  const hotels = (batch.hotels ?? []).map(buildHotelView);
 
   return {
     batchId: batch.id,
@@ -116,8 +190,14 @@ export function buildDashboardView(batch: CollectionBatch): DashboardView {
     neutralCount: samples.filter((sample) => sample.gapTone === "neutral").length,
     notHigherThanLowestCount: samples.filter((sample) => sample.qingmaoGap !== null && sample.qingmaoGap <= 0).length,
     higherThanLowestCount: samples.filter((sample) => sample.qingmaoGap !== null && sample.qingmaoGap > 0).length,
-    evidenceCount: samples.reduce((count, sample) => count + sample.quotes.filter((quote) => quote.evidencePath).length, 0),
+    flightCount: samples.length,
+    hotelCount: hotels.length,
+    hotelAdvantageCount: hotels.filter((hotel) => hotel.gapTone === "advantage").length,
+    hotelHigherThanLowestCount: hotels.filter((hotel) => hotel.gapTone === "higher").length,
+    evidenceCount: samples.reduce((count, sample) => count + sample.quotes.filter((quote) => quote.evidencePath).length, 0)
+      + hotels.reduce((count, hotel) => count + hotel.quotes.filter((quote) => quote.evidencePath).length, 0),
     failureNotes: batch.failureNotes ?? [],
-    samples
+    samples,
+    hotels
   };
 }

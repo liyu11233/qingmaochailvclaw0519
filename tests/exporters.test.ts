@@ -128,6 +128,8 @@ describe("export artifacts", () => {
     expect(hotelSummarySheet?.getRow(5).getCell(15).value).toContain("对比另外3家平台最低价低了20元");
     expect(hotelDetailHeaderValues).toContain("归一口径");
     expect(hotelGroupDetailSheet?.getRow(5).values).toContain("大床有早餐");
+    expect(flightEvidenceSheet?.getRow(4).values).not.toContain("证据相对路径");
+    expect(hotelEvidenceSheet?.getRow(4).values).not.toContain("证据相对路径");
     expect(hotelGroupDetailSheet?.actualRowCount).toBeGreaterThan(160);
     expect(flightEvidenceSheet?.actualRowCount).toBeGreaterThan(80);
     expect(hotelEvidenceSheet?.actualRowCount).toBeGreaterThan(640);
@@ -157,7 +159,26 @@ describe("export artifacts", () => {
     const hotelEvidenceSheet = workbook.getWorksheet("酒店网页截图索引页");
     expect(flightEvidenceSheet).toBeDefined();
     expect(hotelEvidenceSheet).toBeDefined();
-    expect(flightEvidenceSheet?.getRow(5).values).toContain("screenshots/embedded-qingmao.png");
+    expect(flightEvidenceSheet?.getRow(4).values).not.toContain("证据相对路径");
+    expect(flightEvidenceSheet?.getRow(5).values).not.toContain("screenshots/embedded-qingmao.png");
+  }, 15_000);
+
+  it("marks batch-level notes as source notes instead of collection failures", async () => {
+    const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
+    batch.samples = batch.samples.slice(0, 1);
+    batch.hotels = [];
+    batch.sampleCount = 1;
+    batch.successCount = 1;
+    batch.failureNotes = ["航班来源批次：batch-source，四平台完整样本 20 条。"];
+
+    const result = await exportBatchWorkbook(batch, outputDir);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(result.path);
+    const failureSheet = workbook.getWorksheet("失败记录页");
+
+    expect(failureSheet?.getRow(5).values).toContain("批次说明");
+    expect(failureSheet?.getRow(5).values).toContain("说明");
+    expect(failureSheet?.getRow(5).values).not.toContain("采集失败");
   }, 15_000);
 
   it("exports a customer-facing offline web package with flights and hotels", async () => {

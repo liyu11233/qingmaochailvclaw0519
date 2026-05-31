@@ -713,6 +713,8 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       batchId: state.batch?.id ?? null,
       generatedAt: state.batch?.generatedAt ?? null,
       sampleCount: state.batch?.sampleCount ?? 0,
+      flightCount: state.batch?.samples.length ?? 0,
+      hotelCount: state.batch?.hotels?.length ?? 0,
       successCount: state.batch?.successCount ?? 0,
       failedCount: state.batch?.failedCount ?? 0,
       artifacts: state.artifacts,
@@ -759,6 +761,21 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       const offlinePackage = await offlinePackageExporter(batch, outputDir);
 
       return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+    });
+  });
+
+  app.post("/api/artifacts/regenerate", async (_req, res, next) => {
+    await runExclusiveOperation("重新生成交付包", res, next, async () => {
+      const currentBatch = state.batch;
+      if (!currentBatch) {
+        res.status(400);
+        return { error: "还没有可用批次，不能重新生成交付包。" };
+      }
+
+      const excel = await workbookExporter(currentBatch, outputDir);
+      const offlinePackage = await offlinePackageExporter(currentBatch, outputDir);
+
+      return setCurrentBatchArtifacts(currentBatch, excel.path, offlinePackage.path);
     });
   });
 
