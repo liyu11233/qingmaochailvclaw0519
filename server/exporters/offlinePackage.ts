@@ -99,8 +99,7 @@ function gapClass(gap: number | null) {
 }
 
 function formatGapAmount(gap: number) {
-  const value = Math.abs(gap);
-  return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
+  return String(Math.round(Math.abs(gap)));
 }
 
 function gapLabel(gap: number | null) {
@@ -119,6 +118,40 @@ function renderSavingBadge(gap: number | null, comparisonLabel: string) {
   }
   const prefix = gap < 0 ? "低" : "高";
   return `<span class="saving-main"><em>${prefix}</em><b>${formatGapAmount(gap)}</b><em>元</em></span><small>${escapeHtml(comparisonLabel)}</small>`;
+}
+
+function highestCompetitorComparisonLabel(quotes: PlatformQuote[]) {
+  const qingmao = quoteByPlatform(quotes, "青猫差旅");
+  const competitors = PLATFORMS
+    .filter((platform) => platform !== "青猫差旅")
+    .map((platform) => quoteByPlatform(quotes, platform))
+    .filter((quote): quote is PlatformQuote => {
+      if (!quote) return false;
+      return quote.available && typeof quote.price === "number";
+    });
+
+  if (!qingmao?.available || typeof qingmao.price !== "number" || competitors.length < 3) {
+    return "暂无完整可比价格";
+  }
+
+  const highestCompetitorPrice = Math.max(...competitors.map((quote) => quote.price as number));
+  const gap = qingmao.price - highestCompetitorPrice;
+  if (gap < 0) return `对比另外${competitors.length}家平台最高价低了${formatGapAmount(gap)}元`;
+  if (gap > 0) return `对比另外${competitors.length}家平台最高价高了${formatGapAmount(gap)}元`;
+  return `与另外${competitors.length}家平台最高价持平`;
+}
+
+function salesComparisonLabel(quotes: PlatformQuote[], summary: { qingmaoGap: number | null; comparisonLabel: string }) {
+  return summary.qingmaoGap !== null && summary.qingmaoGap > 0
+    ? highestCompetitorComparisonLabel(quotes)
+    : summary.comparisonLabel;
+}
+
+function renderFlightAdvantageHeadline(gap: number | null) {
+  if (gap === null) return "";
+  if (gap < 0) return "<strong>青猫价格更优</strong>";
+  if (gap === 0) return "<strong>价格持平</strong>";
+  return "";
 }
 
 function sharedHead(title: string) {
@@ -275,7 +308,7 @@ function renderFlightQuoteRows(quotes: PlatformQuote[]) {
         <span class="platform-name">${escapeHtml(quote.platform)}</span>
         <span class="price-bar"><i style="width:${width}%"></i></span>
         <strong>${escapeHtml(formatPrice(quote))}</strong>
-        ${href ? `<a class="evidence-link" href="${escapeHtml(href)}" target="_blank" rel="noreferrer">截图</a>` : `<span class="evidence-link disabled">内部留存</span>`}
+        ${href ? `<a class="evidence-link" href="${escapeHtml(href)}" target="_blank" rel="noreferrer">截图</a>` : ""}
       </div>`;
     })
     .join("");
@@ -290,9 +323,11 @@ function renderFlights(batch: CollectionBatch) {
   const gaps = advantageSamples.map((sample) => Math.abs(summarizeFlight(sample).qingmaoGap ?? 0));
   const averageAdvantage = gaps.length ? Math.round(gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length) : 0;
   const maxAdvantageSample = advantageSamples.sort((a, b) => Math.abs(summarizeFlight(b).qingmaoGap ?? 0) - Math.abs(summarizeFlight(a).qingmaoGap ?? 0))[0];
+  const maxAdvantage = Math.abs(summarizeFlight(maxAdvantageSample ?? batch.samples[0]).qingmaoGap ?? 0);
   const cards = batch.samples
     .map((sample) => {
       const summary = summarizeFlight(sample);
+      const displayComparisonLabel = salesComparisonLabel(sample.quotes, summary);
       return `<article class="flight-record">
         <section class="flight-info">
           <h2>${escapeHtml(sample.origin)} - ${escapeHtml(sample.destination)}</h2>
@@ -309,8 +344,8 @@ function renderFlights(batch: CollectionBatch) {
         </section>
         <section class="flight-advantage ${gapClass(summary.qingmaoGap)}">
           <span>${escapeHtml(gapLabel(summary.qingmaoGap))}</span>
-          <strong>${summary.qingmaoGap !== null && summary.qingmaoGap <= 0 ? "青猫价格更优" : "需结合企业协议价复核"}</strong>
-          <small>${escapeHtml(summary.comparisonLabel)}</small>
+          ${renderFlightAdvantageHeadline(summary.qingmaoGap)}
+          <small>${escapeHtml(displayComparisonLabel)}</small>
         </section>
       </article>`;
     })
@@ -347,8 +382,8 @@ ${sharedHead("航班价格对比")}
     </header>
     <section class="flight-stats">
       <div><span>青猫价格更优航班</span><strong>${advantageSamples.length} / ${batch.samples.length}</strong><small>${batch.samples.length ? Math.round((advantageSamples.length / batch.samples.length) * 100) : 0}%</small></div>
-      <div><span>平均价格优势</span><strong>¥${averageAdvantage}</strong><small>按最新对比口径</small></div>
-      <div><span>最高价格优势</span><strong>¥${Math.abs(summarizeFlight(maxAdvantageSample ?? batch.samples[0]).qingmaoGap ?? 0)}</strong><small>${maxAdvantageSample ? `${maxAdvantageSample.origin}-${maxAdvantageSample.destination} ${maxAdvantageSample.flightNo}` : "暂无"}</small></div>
+      <div><span>平均优势金额</span><strong>¥${averageAdvantage}</strong><small>按竞品最低价口径</small></div>
+      <div><span>最大优势金额</span><strong>¥${formatGapAmount(maxAdvantage)}</strong><small>${maxAdvantageSample ? `${maxAdvantageSample.origin}-${maxAdvantageSample.destination} ${maxAdvantageSample.flightNo}` : "暂无"}</small></div>
     </section>
     <div class="flight-table-head"><span>航班信息</span><span>平台价格对比（含税价）</span><span>价格优势</span></div>
     <section class="flight-list">${cards}</section>
@@ -424,7 +459,7 @@ function safeJson(value: unknown) {
 }
 
 function formatNullableMoney(value: number | null, emptyLabel: string) {
-  return typeof value === "number" ? `¥${value} 起` : emptyLabel;
+  return typeof value === "number" ? `¥${Math.round(value)} 起` : emptyLabel;
 }
 
 function initialMetric(metrics: Record<string, Record<string, HotelMetricSummary>>, group: HotelGroup | undefined) {
@@ -457,6 +492,7 @@ function renderHotelCard(hotel: HotelSample, index: number) {
 function renderHotelPlanView(hotel: HotelSample, activeLabel: string) {
   const primary = hotel.ratePlans.find((ratePlan) => ratePlan.label === activeLabel) ?? primaryRatePlan(hotel);
   const summary = summarizeQuoteSet(primary.quotes);
+  const displayComparisonLabel = salesComparisonLabel(primary.quotes, summary);
   const secondaryPlans = hotel.ratePlans.filter((ratePlan) => ratePlan.label !== primary.label);
   const primaryQuotes = PLATFORMS.map((platform) => quoteByPlatform(primary.quotes, platform));
   const isDefault = primary.label === primaryRatePlan(hotel).label;
@@ -467,7 +503,7 @@ function renderHotelPlanView(hotel: HotelSample, activeLabel: string) {
           <h2>${escapeHtml(hotel.hotelName)}</h2>
           <p>${escapeHtml(hotel.city)} · 入住 ${escapeHtml(hotel.checkInDate)} · 离店 ${escapeHtml(hotel.checkOutDate)} · ${hotel.nights} 间夜</p>
         </div>
-        <strong class="saving ${gapClass(summary.qingmaoGap)}">${renderSavingBadge(summary.qingmaoGap, summary.comparisonLabel)}</strong>
+        <strong class="saving ${gapClass(summary.qingmaoGap)}">${renderSavingBadge(summary.qingmaoGap, displayComparisonLabel)}</strong>
       </header>
       <div class="hotel-primary-row">
         <div class="room-type">${escapeHtml(primary.label)}</div>
@@ -475,7 +511,7 @@ function renderHotelPlanView(hotel: HotelSample, activeLabel: string) {
           .map((quote) => `<div class="hotel-platform-price ${quote ? PLATFORM_CLASS[quote.platform] : ""}">
             <span>${escapeHtml(quote?.platform ?? "平台")}</span>
             <strong>${escapeHtml(formatHotelPrice(quote))}</strong>
-            ${quote && evidenceHref(quote.evidencePath) ? `<a href="${escapeHtml(evidenceHref(quote.evidencePath))}" target="_blank" rel="noreferrer">截图</a>` : `<small>内部留存</small>`}
+            ${quote && evidenceHref(quote.evidencePath) ? `<a href="${escapeHtml(evidenceHref(quote.evidencePath))}" target="_blank" rel="noreferrer">截图</a>` : ""}
           </div>`)
           .join("")}
       </div>
@@ -536,7 +572,7 @@ ${sharedHead("酒店价格对比")}
       <div><span>青猫最低占比</span><strong data-metric="qingmao-share">青猫差旅 ${firstMetric?.qingmaoLowestShare ?? 0}%</strong></div>
       <div><span>价格单位</span><strong>元 / 1 间夜</strong></div>
     </section>
-    <p class="hotel-hint">以下价格为 1 间夜；推荐口径优先展示青猫差旅为最低价且优势最大的床型早餐口径，其他 3 种口径保留在同一张卡片内。</p>
+    <p class="hotel-hint">以下价格为 1 间夜；系统优先展示当前最具价格优势且四平台可比的床型早餐口径，其他口径收在同一张卡片内。</p>
     ${panels}
     <footer class="hotel-footer">以上价格为平台可订最低价的展示结果，实际预订以各平台实时价格为准。</footer>
   </main>
@@ -553,7 +589,7 @@ ${sharedHead("酒店价格对比")}
       coverageNote: document.querySelector('[data-metric="coverage-note"]')
     };
     function moneyMetric(value, emptyLabel) {
-      return typeof value === 'number' ? '¥' + value + ' 起' : emptyLabel;
+      return typeof value === 'number' ? '¥' + Math.round(value) + ' 起' : emptyLabel;
     }
     function activeGroup() {
       return document.querySelector('.hotel-tabs button.active')?.dataset.group || '';
@@ -678,7 +714,7 @@ function renderHotelCoverSvg() {
     <rect width="48" height="42" rx="6" fill="none" stroke="#0f8b84" stroke-width="7"/>
     <path d="M11 16h26M11 28h26" stroke="#0f8b84" stroke-width="7" stroke-linecap="round"/>
     <text x="78" y="16" font-family="Arial,'PingFang SC',sans-serif" font-size="24" font-weight="800" fill="#10233f">明细对比</text>
-    <text x="78" y="52" font-family="Arial,'PingFang SC',sans-serif" font-size="19" font-weight="700" fill="#647184">六种口径价格对比</text>
+    <text x="78" y="52" font-family="Arial,'PingFang SC',sans-serif" font-size="19" font-weight="700" fill="#647184">四种口径价格对比</text>
   </g>
 </svg>`;
 }
@@ -688,7 +724,7 @@ function renderBaseStyles() {
 }
 
 function renderLayoutFixStyles() {
-  return `.evidence-link{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(95,211,161,.36);border-radius:999px;padding:4px 10px;color:#d9f7ee;text-decoration:none;font-weight:900;font-size:12px}.evidence-link:hover{background:rgba(63,208,129,.14)}.evidence-link.disabled{opacity:.48}.hotel-platform-price a{display:inline-flex;margin-top:8px;border:1px solid rgba(16,35,63,.12);border-radius:999px;padding:4px 10px;color:#235d64;text-decoration:none;font-weight:900;font-size:12px}.hotel-platform-price small{display:block;margin-top:8px;color:#64748b;font-weight:800}.flight-price-row{grid-template-columns:44px 112px 1fr 110px 54px}.hotel-metrics small{display:block;margin-top:7px;color:#64748b;font-size:12px;font-weight:900}`;
+  return `.evidence-link{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(95,211,161,.36);border-radius:999px;padding:4px 10px;color:#d9f7ee;text-decoration:none;font-weight:900;font-size:12px}.evidence-link:hover{background:rgba(63,208,129,.14)}.hotel-platform-price a{display:inline-flex;margin-top:8px;border:1px solid rgba(16,35,63,.12);border-radius:999px;padding:4px 10px;color:#235d64;text-decoration:none;font-weight:900;font-size:12px}.flight-price-row{grid-template-columns:44px 112px 1fr 110px}.hotel-rate-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:stretch}.hotel-rate-mini{min-height:auto;padding:10px 12px}.hotel-rate-mini span{font-size:12px;line-height:1.35}.hotel-metrics small{display:block;margin-top:7px;color:#64748b;font-size:12px;font-weight:900}`;
 }
 
 function renderStyles() {

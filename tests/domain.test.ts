@@ -70,16 +70,16 @@ describe("fake batch generation", () => {
     }
   });
 
-  it("selects the complete hotel default rate plan where Qingmao is lowest with the largest advantage", () => {
+  it("selects the complete hotel default rate plan where Qingmao has the largest advantage over the lowest competitor", () => {
     const decision = resolveHotelDisplayDecision([
       hotelRatePlan("大床有早餐", [320, 330, 340, null]),
       hotelRatePlan("大床无早餐", [300, 310, 315, 305]),
-      hotelRatePlan("双床有早餐", [350, 360, 370, 355]),
+      hotelRatePlan("双床有早餐", [350, 390, 370, 380]),
       hotelRatePlan("双床无早餐", [280, 290, null, null])
     ]);
 
     expect(decision.defaultRatePlan).toBe("双床有早餐");
-    expect(decision.defaultRatePlanReason).toContain("青猫差旅最低价且优势最大");
+    expect(decision.defaultRatePlanReason).toContain("对比竞品最低价优势最大");
     expect(decision.salesDisplayEligible).toBe(true);
     expect(decision.completeRatePlanCount).toBe(2);
   });
@@ -111,18 +111,18 @@ describe("fake batch generation", () => {
 });
 
 describe("flight comparison summary", () => {
-  it("compares Qingmao against the highest competitor price when Qingmao is lowest", () => {
+  it("always compares Qingmao against the lowest competitor price when Qingmao is lowest", () => {
     const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
     const summary = summarizeFlight(batch.samples[0]);
 
     expect(summary.lowestPlatform).toBe("青猫差旅");
-    expect(summary.qingmaoGap).toBe(-103);
-    expect(summary.comparisonBasis).toBe("highestCompetitor");
-    expect(summary.conclusion).toContain("对比另外3家平台最高价低了103元");
+    expect(summary.qingmaoGap).toBe(-63);
+    expect(summary.comparisonBasis).toBe("lowestCompetitor");
+    expect(summary.conclusion).toContain("对比另外3家平台最低价低了63元");
     expect(summary.evidenceCount).toBe(4);
   });
 
-  it("compares Qingmao against the average competitor price when Qingmao is between competitors", () => {
+  it("always compares Qingmao against the lowest competitor price when Qingmao is between competitors", () => {
     const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
     const sample = {
       ...batch.samples[0],
@@ -140,12 +140,12 @@ describe("flight comparison summary", () => {
     const summary = summarizeFlight(sample);
 
     expect(summary.lowestPlatform).toBe("携程商旅");
-    expect(summary.qingmaoGap).toBeCloseTo(23.333333333333343);
-    expect(summary.comparisonBasis).toBe("betweenCompetitors");
-    expect(summary.conclusion).toContain("对比另外3家平台平均价高了23.33元");
+    expect(summary.qingmaoGap).toBe(70);
+    expect(summary.comparisonBasis).toBe("lowestCompetitor");
+    expect(summary.conclusion).toContain("对比另外3家平台最低价高了70元");
   });
 
-  it("compares Qingmao against the average competitor price when Qingmao is highest", () => {
+  it("always compares Qingmao against the lowest competitor price when Qingmao is highest", () => {
     const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
     const sample = {
       ...batch.samples[0],
@@ -163,9 +163,9 @@ describe("flight comparison summary", () => {
     const summary = summarizeFlight(sample);
 
     expect(summary.lowestPlatform).toBe("携程商旅");
-    expect(summary.qingmaoGap).toBeCloseTo(40);
-    expect(summary.comparisonBasis).toBe("highestCompetitor");
-    expect(summary.conclusion).toContain("对比另外3家平台平均价高了40元");
+    expect(summary.qingmaoGap).toBe(70);
+    expect(summary.comparisonBasis).toBe("lowestCompetitor");
+    expect(summary.conclusion).toContain("对比另外3家平台最低价高了70元");
   });
 
   it("keeps missing same-flight quotes out of the lowest-price calculation", () => {

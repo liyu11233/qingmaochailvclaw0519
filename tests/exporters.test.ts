@@ -103,16 +103,16 @@ describe("export artifacts", () => {
     expect(hotelDetailHeaderValues).toContain("在途原始房型名");
     expect(hotelDetailHeaderValues).toContain("青猫证据编号");
     expect(gapCell?.value).toMatchObject({
-      formula: 'IF(OR(I5="",COUNT(J5:L5)<3),"",IF(I5<=MIN(J5:L5),I5-MAX(J5:L5),I5-AVERAGE(J5:L5)))',
-      result: -103
+      formula: 'IF(OR(I5="",COUNT(J5:L5)<3),"",I5-MIN(J5:L5))',
+      result: -63
     });
     expect(hotelSummaryGapCell?.value).toMatchObject({
-      formula: 'IF(OR(I5="",COUNT(J5:L5)<3),"",IF(I5<=MIN(J5:L5),I5-MAX(J5:L5),I5-AVERAGE(J5:L5)))',
-      result: -40
+      formula: 'IF(OR(I5="",COUNT(J5:L5)<3),"",I5-MIN(J5:L5))',
+      result: -20
     });
     expect(hotelDetailGapCell?.value).toMatchObject({
-      formula: 'IF(OR(P5="",COUNT(Q5:S5)<3),"",IF(P5<=MIN(Q5:S5),P5-MAX(Q5:S5),P5-AVERAGE(Q5:S5)))',
-      result: -40
+      formula: 'IF(OR(P5="",COUNT(Q5:S5)<3),"",P5-MIN(Q5:S5))',
+      result: -20
     });
     expect(gapCell?.font).toMatchObject({ bold: true, color: { argb: "FFFFFFFF" } });
     expect(gapCell?.fill).toMatchObject({ fgColor: { argb: "FF0E8F7A" } });
@@ -124,8 +124,8 @@ describe("export artifacts", () => {
     expect(ctripPriceCell?.font?.bold).not.toBe(true);
     expect(ctripPriceCell?.font?.size).toBe(11);
     expect(flightSheet?.getRow(5).getCell(13).value).toBe("青猫差旅");
-    expect(flightSheet?.getRow(5).getCell(15).value).toContain("对比另外3家平台最高价低了103元");
-    expect(hotelSummarySheet?.getRow(5).getCell(15).value).toContain("对比另外3家平台最高价低了40元");
+    expect(flightSheet?.getRow(5).getCell(15).value).toContain("对比另外3家平台最低价低了63元");
+    expect(hotelSummarySheet?.getRow(5).getCell(15).value).toContain("对比另外3家平台最低价低了20元");
     expect(hotelDetailHeaderValues).toContain("归一口径");
     expect(hotelGroupDetailSheet?.getRow(5).values).toContain("大床有早餐");
     expect(hotelGroupDetailSheet?.actualRowCount).toBeGreaterThan(160);
@@ -163,6 +163,18 @@ describe("export artifacts", () => {
   it("exports a customer-facing offline web package with flights and hotels", async () => {
     const batch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
     batch.samples = batch.samples.slice(0, 4);
+    batch.samples[0] = {
+      ...batch.samples[0],
+      quotes: batch.samples[0].quotes.map((quote) =>
+        quote.platform === "青猫差旅"
+          ? { ...quote, price: 160 }
+          : quote.platform === "携程商旅"
+            ? { ...quote, price: 90 }
+            : quote.platform === "阿里商旅"
+              ? { ...quote, price: 120 }
+              : { ...quote, price: 200 }
+      )
+    };
     batch.sampleCount = 4;
     batch.successCount = 4;
     batch.hotels = batch.hotels?.slice(0, 10);
@@ -184,18 +196,21 @@ describe("export artifacts", () => {
     expect(indexHtml).not.toContain("开始采集");
     expect(flightHtml).not.toContain("href=\"../evidence/");
     expect(hotelHtml).not.toContain("href=\"../evidence/");
-    expect(flightHtml).toContain("内部留存");
-    expect(hotelHtml).toContain("内部留存");
+    expect(flightHtml).not.toContain("内部留存");
+    expect(hotelHtml).not.toContain("内部留存");
     expect(flightHtml).toContain("青猫差旅航班价格对比");
     expect(flightHtml).toContain("平台价格对比");
     expect(flightHtml).toContain("在途商旅");
     expect(flightHtml).toContain("compare-visual");
-    expect(flightHtml).not.toContain("青猫最低时对比另外三家最高价");
+    expect(flightHtml).toContain("按竞品最低价口径");
+    expect(flightHtml).toContain("高70元");
+    expect(flightHtml).toContain("对比另外3家平台最高价低了40元");
+    expect(flightHtml).not.toContain("需结合企业协议价复核");
     expect(hotelHtml).toContain("酒店价格对比");
     expect(hotelHtml).toContain("首旅如家");
     expect(hotelHtml).toContain("酒店数量");
     expect(hotelHtml).toContain("主对比口径");
-    expect(hotelHtml).toContain("青猫差旅为最低价且优势最大");
+    expect(hotelHtml).toContain("最具价格优势且四平台可比");
     expect(hotelHtml).toContain("大床有早餐");
     expect(hotelHtml).toContain("双床有早餐");
     expect(hotelHtml).toContain("hotel-photo.jpg");
@@ -263,7 +278,7 @@ describe("export artifacts", () => {
     expect(metrics["如家集团"].__default).toMatchObject({
       hotelCount: 1,
       lowestPrice: 100,
-      averageSaving: 40,
+      averageSaving: 20,
       qingmaoLowestShare: 100
     });
     expect(metrics["如家集团"]["大床无早餐"]).toMatchObject({
@@ -275,7 +290,7 @@ describe("export artifacts", () => {
     expect(metrics["锦江集团"]["大床无早餐"]).toMatchObject({
       hotelCount: 1,
       lowestPrice: 390,
-      averageSaving: 80,
+      averageSaving: 60,
       qingmaoLowestShare: 100
     });
   });

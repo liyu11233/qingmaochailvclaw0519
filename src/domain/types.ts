@@ -99,7 +99,7 @@ export interface FlightSummary {
   sampleId: string;
   lowestPlatform: PlatformName | "";
   qingmaoGap: number | null;
-  comparisonBasis: "lowestCompetitor" | "betweenCompetitors" | "highestCompetitor" | "unavailable";
+  comparisonBasis: "lowestCompetitor" | "unavailable";
   comparisonLabel: string;
   availablePlatformCount: number;
   evidenceCount: number;
@@ -109,7 +109,7 @@ export interface FlightSummary {
 export interface PriceComparisonSummary {
   lowestPlatform: PlatformName | "";
   qingmaoGap: number | null;
-  comparisonBasis: "lowestCompetitor" | "betweenCompetitors" | "highestCompetitor" | "unavailable";
+  comparisonBasis: "lowestCompetitor" | "unavailable";
   comparisonLabel: string;
   conclusion: string;
   competitorCount: number;

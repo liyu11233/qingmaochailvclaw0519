@@ -59,11 +59,12 @@ function qingmaoLowestAdvantage(ratePlan: HotelRatePlan) {
   }
 
   const numericCompetitorPrices = competitorPrices as number[];
-  if (numericCompetitorPrices.some((price) => qingmaoPrice > price)) {
+  const lowestCompetitorPrice = Math.min(...numericCompetitorPrices);
+  if (qingmaoPrice > lowestCompetitorPrice) {
     return null;
   }
 
-  return Math.max(...numericCompetitorPrices) - qingmaoPrice;
+  return lowestCompetitorPrice - qingmaoPrice;
 }
 
 function qingmaoDisadvantage(ratePlan: HotelRatePlan) {
@@ -122,9 +123,9 @@ export function resolveHotelDisplayDecision(ratePlans: HotelRatePlan[]): HotelDi
     });
   const defaultPlan = qingmaoLowestPlans[0] ?? leastUnfavorablePlans[0] ?? completeRatePlans[0] ?? ranked[0];
   const defaultReason = qingmaoLowestPlans[0]
-    ? `${defaultPlan.ratePlan.label}为青猫差旅最低价且优势最大的完整口径`
+    ? `${defaultPlan.ratePlan.label}为青猫差旅对比竞品最低价优势最大的完整口径`
     : leastUnfavorablePlans[0]
-      ? `${defaultPlan.ratePlan.label}为四平台完整口径中青猫价差最小的展示口径`
+      ? `${defaultPlan.ratePlan.label}为四平台完整口径中青猫对比竞品最低价差额最小的展示口径`
       : completeRatePlans.length
         ? `${defaultPlan.ratePlan.label}为当前完整可比口径；同完整度时按展示优先级选择`
         : `${defaultPlan.ratePlan.label}为当前价格平台数最多的口径，但未达到四平台完整`;

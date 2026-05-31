@@ -75,11 +75,19 @@ function hotelQuote(rawQuotes: any[], platform: PlatformName, ratePlan: HotelRat
   } as PlatformQuote & { sourceEvidencePath?: string };
 }
 
+function hotelCoverSource(rawQuotes: any[]) {
+  const qingmaoCover = rawQuotes.find(
+    (quote) => quote.platform === "青猫差旅" && quote.screenshotPath && fs.existsSync(quote.screenshotPath)
+  );
+  return qingmaoCover?.screenshotPath ?? "";
+}
+
 function buildHotelSample(resultPath: string, index: number): HotelSample {
   const result = readJson<any>(resultPath);
   const candidate = result.selectedCandidate ?? {};
   const hotelName = candidate.hotelName ?? result.query?.keyword ?? `酒店-${index + 1}`;
   const hotelId = `hotel-${String(index + 1).padStart(2, "0")}`;
+  const coverImagePath = hotelCoverSource(result.quotes ?? []);
   const hotel: HotelSample = {
     id: hotelId,
     group: groupName(result.group),
@@ -90,6 +98,9 @@ function buildHotelSample(resultPath: string, index: number): HotelSample {
     checkOutDate: result.query?.checkOutDate ?? "",
     nights: result.query?.nights ?? 1,
     primaryRatePlan: "大床无早餐",
+    coverImagePath: coverImagePath || undefined,
+    coverImageSource: coverImagePath ? "青猫差旅" : undefined,
+    coverImageStatus: coverImagePath ? "saved" : "missing",
     ratePlans: RATE_LABELS.map((label) => ({
       label,
       quotes: PLATFORMS.map((platform) => hotelQuote(result.quotes ?? [], platform, label, hotelId))
