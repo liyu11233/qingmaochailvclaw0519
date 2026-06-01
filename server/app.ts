@@ -4,7 +4,8 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildFakeBatch } from "../src/domain/fakeBatch";
-import type { CollectionBatch } from "../src/domain/types";
+import { enrichHotelSampleDisplayDecision } from "../src/domain/hotelRatePlans";
+import type { CollectionBatch, HotelGroup, HotelRatePlanLabel, HotelSample, PlatformName, PlatformQuote, QuoteStatus } from "../src/domain/types";
 import {
   type AliHotelSingleVerifyInput,
   type AliHotelSingleVerifyResult,
@@ -14,6 +15,7 @@ import {
   type HotelAllRatePlanProbeResult,
   type HotelCalibrationInput,
   type HotelCalibrationResult,
+  type HotelMainRateQuote,
   type HotelScaleValidationInput,
   type HotelScaleValidationResult,
   type HotelGroupMainRateProbeResult,
@@ -99,7 +101,150 @@ function restoreArtifactState(value: unknown): ArtifactState | null {
 }
 
 const HOTEL_SINGLE_DIAGNOSIS_RATE_PLANS = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"] as const;
+const HOTEL_RATE_PLAN_LABELS: HotelRatePlanLabel[] = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"];
+const SECOND_VERSION_PLATFORMS: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"];
 const HOTEL_CALIBRATION_COMPETITOR_PLATFORMS = ["阿里商旅", "在途商旅", "携程商旅"] as const;
+
+function formatBatchTimestamp(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join("-") + "-" + [
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds())
+  ].join("");
+}
+
+function hotelGroupName(value: string | undefined): HotelGroup {
+  const map: Record<string, HotelGroup> = {
+    "首旅如家": "如家集团",
+    "如家集团": "如家集团",
+    "锦江": "锦江集团",
+    "锦江集团": "锦江集团",
+    "华住": "华住集团",
+    "华住集团": "华住集团",
+    "东呈": "东呈集团",
+    "东呈集团": "东呈集团",
+    "亚朵": "亚朵集团",
+    "亚朵集团": "亚朵集团",
+    "亚朵酒店": "亚朵集团"
+  };
+  return map[value ?? ""] ?? "东呈集团";
+}
+
+function hotelBrandName(group: string | undefined, hotelName: string) {
+  if (group === "首旅如家" || group === "如家集团") return "首旅如家";
+  if (group === "亚朵" || group === "亚朵集团" || group === "亚朵酒店") return "亚朵酒店";
+  if (group === "东呈" || group === "东呈集团") {
+    if (hotelName.includes("城市便捷")) return "城市便捷";
+    if (hotelName.includes("柏曼")) return "柏曼";
+    if (hotelName.includes("宜尚")) return "宜尚";
+  }
+  return group ?? "";
+}
+
+function quoteStatus(status: HotelMainRateQuote["status"] | undefined): QuoteStatus {
+  if (status === "available") return "可订";
+  if (status === "not-found" || status === "platform-no-rate") return "未展示";
+  if (status === "pending") return "未展示";
+  return "采集失败";
+}
+
+function buildHotelPlatformQuote(
+  rawQuotes: HotelMainRateQuote[],
+  platform: PlatformName,
+  ratePlan: HotelRatePlanLabel,
+  hotelId: string
+): PlatformQuote {
+  const raw = rawQuotes.find((quote) => quote.platform === platform && quote.ratePlan === ratePlan);
+  const available = raw?.status === "available" && typeof raw.price === "number";
+  const sourceEvidencePath = raw?.screenshotPath || raw?.diagnosisPath || "";
+  const extension = path.extname(sourceEvidencePath) || ".png";
+  const evidencePath = sourceEvidencePath
+    ? path.join("evidence", "hotels", hotelId, `${platform}-${ratePlan}${extension}`)
+    : "";
+
+  return {
+    platform,
+    price: available ? raw.price : null,
+    refundRule: "以平台页面展示及酒店规则为准",
+    baggageRule: "以平台页面展示及酒店规则为准",
+    available,
+    status: quoteStatus(raw?.status),
+    evidencePath,
+    sourceUrl: raw?.finalUrl ?? "",
+    rawHotelName: raw?.hotelName ?? "",
+    rawRoomName: raw?.roomType ?? "",
+    normalizedRoomLabel: ratePlan,
+    missingReason: available ? undefined : raw?.error || raw?.status || "暂无该口径价格",
+    sourceEvidencePath
+  } as PlatformQuote & { sourceEvidencePath?: string };
+}
+
+function buildAcceptanceHotelSample(sample: NonNullable<HotelScaleValidationResult["groups"][number]["samples"][number]>, index: number): HotelSample {
+  const hotelName = sample.selectedCandidate?.hotelName ?? sample.query?.keyword ?? `酒店-${index + 1}`;
+  const hotelId = `hotel-${String(index + 1).padStart(2, "0")}`;
+  const coverImagePath = sample.coverImagePath && fs.existsSync(sample.coverImagePath) ? sample.coverImagePath : undefined;
+
+  return enrichHotelSampleDisplayDecision({
+    id: hotelId,
+    group: hotelGroupName(sample.group),
+    brand: hotelBrandName(sample.group, hotelName),
+    hotelName,
+    city: sample.query?.city ?? "",
+    checkInDate: sample.query?.checkInDate ?? "",
+    checkOutDate: sample.query?.checkOutDate ?? "",
+    nights: sample.query?.nights ?? 1,
+    primaryRatePlan: "大床有早餐",
+    coverImagePath,
+    coverImageSource: coverImagePath ? sample.coverImageSource : undefined,
+    coverImageStatus: coverImagePath ? "saved" : "missing",
+    ratePlans: HOTEL_RATE_PLAN_LABELS.map((label) => ({
+      label,
+      quotes: SECOND_VERSION_PLATFORMS.map((platform) => buildHotelPlatformQuote(sample.quotes ?? [], platform, label, hotelId))
+    }))
+  });
+}
+
+function buildSecondVersionAcceptanceBatch(flightBatch: CollectionBatch, hotelResult: HotelScaleValidationResult, generatedAt: Date): CollectionBatch {
+  const completedHotelSamples = hotelResult.groups.flatMap((group) =>
+    group.samples.filter((sample) => sample.status === "completed")
+  );
+  const hotels = completedHotelSamples.map(buildAcceptanceHotelSample);
+  const flightCount = flightBatch.samples.length;
+  const hotelCount = hotels.length;
+
+  if (flightBatch.status !== "ready" || flightCount !== 20) {
+    throw new Error(`航班未达标：需要 20 条完整样本，当前 ${flightCount} 条，状态 ${flightBatch.status}`);
+  }
+  if (hotelResult.status !== "completed" || hotelResult.completedCount !== 40 || hotelCount !== 40) {
+    throw new Error(`酒店未达标：需要 40 家完整样本，当前完整 ${hotelResult.completedCount} 家，可入批次 ${hotelCount} 家，状态 ${hotelResult.status}`);
+  }
+
+  return {
+    id: `batch-${formatBatchTimestamp(generatedAt)}-second-version-final-acceptance`,
+    status: "ready",
+    generatedAt: generatedAt.toISOString(),
+    sampleCount: flightCount + hotelCount,
+    successCount: flightCount + hotelCount,
+    failedCount: hotelResult.failedCount + hotelResult.partialCount + hotelResult.skippedCount + hotelResult.timeoutCount + hotelResult.unattemptedCount,
+    samples: flightBatch.samples,
+    hotels,
+    failureNotes: [
+      `航班来源批次：${flightBatch.id}，四平台完整样本 ${flightCount} 条。`,
+      `酒店来源验收：${hotelResult.summaryPath ?? hotelResult.artifactDir ?? "本次 40 家酒店放量验证"}，四平台完整酒店 ${hotelCount} 家。`,
+      ...(flightBatch.failureNotes ?? []),
+      ...hotelResult.groups.flatMap((group) =>
+        group.samples
+          .filter((sample) => sample.status !== "completed")
+          .map((sample) => `${group.group} 第 ${sample.sampleIndex ?? "-"} 家未入最终批次：${sample.failureReason ?? sample.message ?? sample.status}`)
+      )
+    ]
+  };
+}
 
 function parseHotelSingleDiagnosisInput(value: unknown): { ok: true; input: HotelSingleDiagnosisInput } | { ok: false; error: string } {
   if (!isRecord(value)) {
@@ -761,6 +906,77 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       const offlinePackage = await offlinePackageExporter(batch, outputDir);
 
       return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+    });
+  });
+
+  app.post("/api/acceptance/second-version-final/run", async (_req, res, next) => {
+    await runExclusiveOperation("第二版最终验收：航班 + 酒店连续完整采集", res, next, async () => {
+      const startedAt = new Date();
+      const flightBatch = await pilotCollector.runFullBatchCollection();
+      const hotelResult = await pilotCollector.runHotelScaleValidationProbe({ limit: 40, disableBudgets: true });
+      const batch = buildSecondVersionAcceptanceBatch(flightBatch, hotelResult, new Date());
+      const excel = await workbookExporter(batch, outputDir);
+      const offlinePackage = await offlinePackageExporter(batch, outputDir);
+      const persisted = await setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+      const endedAt = new Date();
+
+      return {
+        ...persisted,
+        acceptance: {
+          status: "passed",
+          startedAt: startedAt.toISOString(),
+          endedAt: endedAt.toISOString(),
+          durationMs: endedAt.getTime() - startedAt.getTime(),
+          flightBatchId: flightBatch.id,
+          flightSuccessCount: flightBatch.samples.length,
+          flightFailedCount: flightBatch.failedCount,
+          hotelStatus: hotelResult.status,
+          hotelSuccessCount: hotelResult.completedCount,
+          hotelFailedCount: hotelResult.failedCount + hotelResult.partialCount + hotelResult.skippedCount + hotelResult.timeoutCount + hotelResult.unattemptedCount,
+          hotelSummaryPath: hotelResult.summaryPath,
+          hotelDiagnosticReviewPath: hotelResult.diagnosticReviewPath
+        }
+      };
+    });
+  });
+
+  app.post("/api/acceptance/second-version-final/finalize-current", async (_req, res, next) => {
+    await runExclusiveOperation("第二版最终验收：生成航班 + 酒店一体化交付物", res, next, async () => {
+      const currentBatch = state.batch;
+      if (!currentBatch || currentBatch.samples.length !== 20) {
+        res.status(400);
+        return { error: `当前航班批次未达标：需要 20 条航班，当前 ${currentBatch?.samples.length ?? 0} 条。` };
+      }
+      if (state.hotelScaleValidation.status !== "completed" || state.hotelScaleValidation.completedCount !== 40) {
+        res.status(400);
+        return {
+          error: `当前酒店验收未达标：需要 40 家完整酒店，当前 ${state.hotelScaleValidation.completedCount} 家，状态 ${state.hotelScaleValidation.status}。`
+        };
+      }
+
+      const batch = buildSecondVersionAcceptanceBatch(currentBatch, state.hotelScaleValidation, new Date());
+      const excel = await workbookExporter(batch, outputDir);
+      const offlinePackage = await offlinePackageExporter(batch, outputDir);
+      const persisted = await setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+
+      return {
+        ...persisted,
+        acceptance: {
+          status: "passed",
+          flightBatchId: currentBatch.id,
+          flightSuccessCount: currentBatch.samples.length,
+          flightFailedCount: currentBatch.failedCount,
+          hotelStatus: state.hotelScaleValidation.status,
+          hotelSuccessCount: state.hotelScaleValidation.completedCount,
+          hotelFailedCount: state.hotelScaleValidation.failedCount
+            + state.hotelScaleValidation.partialCount
+            + state.hotelScaleValidation.skippedCount
+            + state.hotelScaleValidation.timeoutCount
+            + state.hotelScaleValidation.unattemptedCount,
+          hotelSummaryPath: state.hotelScaleValidation.summaryPath,
+          hotelDiagnosticReviewPath: state.hotelScaleValidation.diagnosticReviewPath
+        }
+      };
     });
   });
 
