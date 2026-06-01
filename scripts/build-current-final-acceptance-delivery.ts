@@ -208,7 +208,7 @@ async function main() {
     failedCount: batch.failedCount,
     excelPath: workbook.path,
     offlinePackagePath: offlinePackage.path,
-    offlinePackageDirectory: offlinePackage.directory
+    offlinePackageFilename: offlinePackage.filename
   }, null, 2));
 }
 

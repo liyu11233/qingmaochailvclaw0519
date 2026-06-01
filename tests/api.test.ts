@@ -19,9 +19,9 @@ describe("management API", () => {
 
   async function exportTestOfflinePackage(batch: ReturnType<typeof buildFakeBatch>, outputDir: string) {
     await fsp.mkdir(outputDir, { recursive: true });
-    const filename = `青猫差旅离线网页包-${batch.id}.zip`;
+    const filename = `青猫差旅离线网页-${batch.id}.html`;
     const packagePath = path.join(outputDir, filename);
-    await fsp.writeFile(packagePath, ONE_PIXEL_PNG);
+    await fsp.writeFile(packagePath, "<!doctype html><html><body>test offline page</body></html>");
     return { path: packagePath, filename, directory: outputDir };
   }
 
@@ -106,7 +106,7 @@ describe("management API", () => {
     expect(collect.body.artifacts.excel).toMatch(/^\/outputs\//);
     expect(collect.body.artifacts.excel).toMatch(/\.xlsx$/);
     expect(collect.body.artifacts.offlinePackage).toMatch(/^\/outputs\//);
-    expect(collect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(collect.body.artifacts.offlinePackage).toMatch(/\.html$/);
 
     const latest = await request(app).get("/api/batch/latest").expect(200);
     expect(latest.body.batch.samples).toHaveLength(20);
@@ -137,7 +137,7 @@ describe("management API", () => {
     const regenerated = await request(app).post("/api/artifacts/regenerate").expect(200);
     expect(regenerated.body.batch.id).toBe(collect.body.batch.id);
     expect(regenerated.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(regenerated.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(regenerated.body.artifacts.offlinePackage).toMatch(/\.html$/);
     expect(workbook).toHaveBeenCalledTimes(2);
     expect(offlinePackage).toHaveBeenCalledTimes(2);
 
@@ -158,7 +158,7 @@ describe("management API", () => {
     expect(restoredStatus.body.batchId).toBe(collect.body.batch.id);
     expect(restoredStatus.body.sampleCount).toBe(20);
     expect(restoredStatus.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(restoredStatus.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(restoredStatus.body.artifacts.offlinePackage).toMatch(/\.html$/);
   });
 
   it("exposes third-version defaults and updates the management configuration preview", async () => {
@@ -172,7 +172,7 @@ describe("management API", () => {
       targetAdvantageRatio: 70,
       comparisonMode: "internal_discussion"
     });
-    expect(initialStatus.body.thirdVersion.status.exportNamePreview).toBe("【随】青猫差旅一体化比价-酒店0-航班0-优势0%.zip");
+    expect(initialStatus.body.thirdVersion.status.exportNamePreview).toBe("【随】青猫差旅一体化比价-酒店0-航班0-优势0%.html");
 
     const updated = await request(app)
       .post("/api/third-version/config")
@@ -1907,7 +1907,7 @@ describe("management API", () => {
     expect(realCollect.body.batch.id).toContain("real-domestic");
     expect(realCollect.body.batch.sampleCount).toBe(1);
     expect(realCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(realCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(realCollect.body.artifacts.offlinePackage).toMatch(/\.html$/);
     expect(pilotCollector.runDomesticBatchCollection).toHaveBeenCalledWith(1, expect.objectContaining({
       waitIfPaused: expect.any(Function),
       throwIfStopped: expect.any(Function)
@@ -1917,7 +1917,7 @@ describe("management API", () => {
     expect(realInternationalCollect.body.batch.id).toContain("real-international");
     expect(realInternationalCollect.body.batch.sampleCount).toBe(1);
     expect(realInternationalCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(realInternationalCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(realInternationalCollect.body.artifacts.offlinePackage).toMatch(/\.html$/);
     expect(pilotCollector.runInternationalBatchCollection).toHaveBeenCalledWith(1, expect.objectContaining({
       waitIfPaused: expect.any(Function),
       throwIfStopped: expect.any(Function)
@@ -1927,7 +1927,7 @@ describe("management API", () => {
     expect(realFullCollect.body.batch.id).toContain("real-full");
     expect(realFullCollect.body.batch.sampleCount).toBe(2);
     expect(realFullCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
-    expect(realFullCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+    expect(realFullCollect.body.artifacts.offlinePackage).toMatch(/\.html$/);
     expect(pilotCollector.runFullBatchCollection).toHaveBeenCalledTimes(1);
   });
 

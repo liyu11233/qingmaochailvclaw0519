@@ -38,11 +38,11 @@ describe("third version management layout", () => {
     expect(formalActionBlock).toContain("暂停采集");
     expect(formalActionBlock).toContain("停止采集");
     expect(formalActionBlock).toContain("导出 Excel");
-    expect(formalActionBlock).toContain("导出离线包");
+    expect(formalActionBlock).toContain("导出离线网页");
     expect(actionStackBlock).not.toContain("暂停采集");
     expect(actionStackBlock).not.toContain("停止采集");
     expect(actionStackBlock).toContain("导出 Excel");
-    expect(actionStackBlock).toContain("导出离线包");
+    expect(actionStackBlock).toContain("导出离线网页");
     expect(collectionControlBlock).toContain("暂停采集");
     expect(collectionControlBlock).toContain("停止采集");
     expect(collectionControlBlock).not.toContain('className="step"');

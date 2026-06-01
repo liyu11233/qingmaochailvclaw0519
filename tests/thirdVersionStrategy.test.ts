@@ -186,7 +186,7 @@ describe("third version strategy model", () => {
     expect(result.status.exportPrefix).toBe("【青】");
     expect(result.status.exportStatus).toBe("达标");
     expect(result.status.exportAdvantageRatio).toBe(100);
-    expect(result.status.exportNamePreview).toBe("【青】青猫差旅一体化比价-酒店2-航班2-优势100%.zip");
+    expect(result.status.exportNamePreview).toBe("【青】青猫差旅一体化比价-酒店2-航班2-优势100%.html");
   });
 
   it("caps Qingmao advantage selection to twice the display count before strategy filtering", () => {
@@ -261,7 +261,7 @@ describe("third version strategy model", () => {
     expect(result.status.exportPrefix).toBe("【随】");
     expect(result.status.exportStatus).toBe("未满量未达标");
     expect(result.status.exportAdvantageRatio).toBe(0);
-    expect(result.status.exportNamePreview).toBe("【随】青猫差旅一体化比价-酒店1-航班2-优势0%.zip");
+    expect(result.status.exportNamePreview).toBe("【随】青猫差旅一体化比价-酒店1-航班2-优势0%.html");
   });
 
   it("builds customer-safe export file base names with advantage ratio instead of not-met wording", () => {
@@ -296,7 +296,7 @@ describe("third version strategy model", () => {
     expect(result.status.flightAdvantageRatio).toBeLessThanOrEqual(100);
     expect(result.status.hotelAdvantageRatio).toBeGreaterThanOrEqual(0);
     expect(result.status.hotelAdvantageRatio).toBeLessThanOrEqual(100);
-    expect(result.status.exportNamePreview).toMatch(/^【(青|随)】青猫差旅一体化比价-酒店40-航班20-优势\d+%\.zip$/);
+    expect(result.status.exportNamePreview).toMatch(/^【(青|随)】青猫差旅一体化比价-酒店40-航班20-优势\d+%\.html$/);
     expect(result.status.exportNamePreview).not.toContain("未达标");
     expect(result.flights.every((sample) => sample.quotes.length === 4)).toBe(true);
     expect(result.hotels.every((sample) => sample.ratePlans.length > 0)).toBe(true);

@@ -17,7 +17,7 @@ const HOTEL_TRACE_PATH = path.join(OUTPUT_ROOT, "delivery-drafts", "hotel-client
 const FINAL_ID = "batch-2026-05-30-024928-flight-hotel-integrated";
 const DELIVERY_FOLDER_NAME = "qingmao-price-comparison-2026-05-30";
 const CUSTOMER_WORKBOOK_NAME = "qingmao-travel-price-comparison.xlsx";
-const OFFLINE_WEB_FOLDER_NAME = "offline-web";
+const OFFLINE_WEB_FILE_NAME = "qingmao-travel-price-comparison.html";
 const RATE_LABELS: HotelRatePlanLabel[] = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"];
 const PLATFORMS: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"];
 
@@ -151,7 +151,7 @@ async function writeReadme(deliveryDir: string) {
     "青猫差旅第二版交付包",
     "",
     "打开方式：",
-    `1. 打开 ${OFFLINE_WEB_FOLDER_NAME}/index.html 查看离线网页展示。`,
+    `1. 打开 ${OFFLINE_WEB_FILE_NAME} 查看离线网页展示。`,
     `2. 打开 ${CUSTOMER_WORKBOOK_NAME} 查看 Excel 复核表。`,
     "",
     "说明：",
@@ -199,15 +199,14 @@ async function main() {
   const workbook = await exportBatchWorkbook(batch, deliveryDir);
   const offlinePackage = await exportOfflinePackage(batch, deliveryDir);
   const customerWorkbookPath = path.join(deliveryDir, CUSTOMER_WORKBOOK_NAME);
-  const offlineWebDir = path.join(deliveryDir, OFFLINE_WEB_FOLDER_NAME);
+  const offlineWebPath = path.join(deliveryDir, OFFLINE_WEB_FILE_NAME);
 
   await fsp.rename(workbook.path, customerWorkbookPath);
-  await fsp.rename(offlinePackage.directory, offlineWebDir);
+  await fsp.rename(offlinePackage.path, offlineWebPath);
   await writeReadme(deliveryDir);
 
   const finalZip = path.join(OUTPUT_ROOT, `青猫差旅第二版正式交付包-航班酒店一体化-2026-05-30.zip`);
   await fsp.rm(finalZip, { force: true });
-  await fsp.rm(offlinePackage.path, { force: true });
   await zipExec("zip", ["-qr", finalZip, path.basename(deliveryDir)], { cwd: OUTPUT_ROOT });
   await writeCurrentState(batch, customerWorkbookPath, finalZip);
 
@@ -215,7 +214,7 @@ async function main() {
     deliveryDir,
     finalZip,
     workbook: { ...workbook, path: customerWorkbookPath, filename: CUSTOMER_WORKBOOK_NAME },
-    offlinePackage: { ...offlinePackage, directory: offlineWebDir, filename: OFFLINE_WEB_FOLDER_NAME },
+    offlinePackage: { ...offlinePackage, path: offlineWebPath, filename: OFFLINE_WEB_FILE_NAME },
     flightCount: batch.samples.length,
     hotelCount: batch.hotels?.length ?? 0
   }, null, 2)}\n`);

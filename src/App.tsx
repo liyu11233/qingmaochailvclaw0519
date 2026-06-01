@@ -613,7 +613,7 @@ export function App() {
   const fullState = hotelFull && flightFull;
   const targetState = thirdVersionOptions.generationMode === "qingmao_advantage" ? hotelTargetMet && flightTargetMet : null;
   const exportBaseName = thirdVersionStatus?.exportBaseName ?? "【随】青猫差旅一体化比价-酒店0-航班0-优势0%";
-  const exportZipName = thirdVersionStatus?.exportNamePreview ?? `${exportBaseName}.zip`;
+  const exportHtmlName = thirdVersionStatus?.exportNamePreview ?? `${exportBaseName}.html`;
   const exportExcelName = `${exportBaseName}.xlsx`;
   const failureTraceRows = view?.failureNotes.filter(isFailureTraceNote) ?? [];
   const visibleFailureTraceRows = failureTraceRows.length > 0 ? failureTraceRows : (view?.failureNotes ?? []);
@@ -712,7 +712,7 @@ export function App() {
       const result = await readJson<BatchResponse>("/api/collect", { method: "POST" });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
-      setCollectionResult({ tone: "success", title: "模拟采集完成", detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和离线网页包。` });
+      setCollectionResult({ tone: "success", title: "模拟采集完成", detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和离线网页。` });
       await refreshStatus();
     } catch (collectionError) {
       const message = collectionError instanceof Error ? collectionError.message : "采集失败";
@@ -738,7 +738,7 @@ export function App() {
       });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
-      setCollectionResult({ tone: "success", title: "国内真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条国内样本，可以导出 Excel 和离线网页包。` });
+      setCollectionResult({ tone: "success", title: "国内真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条国内样本，可以导出 Excel 和离线网页。` });
       await refreshStatus();
     } catch (collectionError) {
       const message = collectionError instanceof Error ? collectionError.message : "国内真实采集失败";
@@ -764,7 +764,7 @@ export function App() {
       });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
-      setCollectionResult({ tone: "success", title: "国际真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条国际样本，可以导出 Excel 和离线网页包。` });
+      setCollectionResult({ tone: "success", title: "国际真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条国际样本，可以导出 Excel 和离线网页。` });
       await refreshStatus();
     } catch (collectionError) {
       const message = collectionError instanceof Error ? collectionError.message : "国际真实采集失败";
@@ -801,7 +801,7 @@ export function App() {
         setThirdVersionOptions(result.thirdVersion.options);
         setThirdVersionStatus(result.thirdVersion.status);
       }
-      setCollectionResult({ tone: "success", title: "完整真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和离线网页包。` });
+      setCollectionResult({ tone: "success", title: "完整真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和离线网页。` });
       await refreshStatus();
     } catch (collectionError) {
       const message = collectionError instanceof Error ? collectionError.message : "完整真实采集失败";
@@ -846,7 +846,7 @@ export function App() {
       const result = await readJson<BatchResponse>("/api/artifacts/regenerate", { method: "POST" });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
-      setCollectionResult({ tone: "success", title: "交付包已重新生成", detail: "未重新采集数据，已基于当前批次重新生成 Excel 和离线网页包。" });
+      setCollectionResult({ tone: "success", title: "交付包已重新生成", detail: "未重新采集数据，已基于当前批次重新生成 Excel 和离线网页。" });
       await refreshStatus();
     } catch (regenerationError) {
       const message = regenerationError instanceof Error ? regenerationError.message : "交付包重新生成失败";
@@ -1081,7 +1081,7 @@ export function App() {
               <div className="summary-line"><span>酒店分析</span><b>青猫优势 {percentLabel(hotelAdvantageRatio)}，满量 {hotelDisplayed}/{thirdVersionOptions.hotelDisplayLimit}</b><strong>{targetMetBadgeLabel(hotelTargetMet)}</strong></div>
               <div className="summary-line"><span>航班分析</span><b>青猫优势 {percentLabel(flightAdvantageRatio)}，满量 {flightDisplayed}/{thirdVersionOptions.flightDisplayLimit}</b><strong>{targetMetBadgeLabel(flightTargetMet)}</strong></div>
               <div className="summary-line"><span>证据文件</span><b>四平台截图与 HTML 快照</b><strong>{view?.evidenceCount ?? 0} 份</strong></div>
-              <div className="summary-line"><span>导出状态</span><b>Excel 与离线包使用同一份策略结果</b><strong>{artifacts ? "可导出" : "待生成"}</strong></div>
+              <div className="summary-line"><span>导出状态</span><b>Excel 与离线网页使用同一份策略结果</b><strong>{artifacts ? "可导出" : "待生成"}</strong></div>
             </div>
           </div>
         </article>
@@ -1121,13 +1121,13 @@ export function App() {
             {artifacts?.offlinePackage ? (
               <a className="op-button export" href={artifacts.offlinePackage}>
                 <span className="step">5</span>
-                <span><b>导出离线包</b><small>销售打开 index.html 演示</small></span>
+                <span><b>导出离线网页</b><small>单个 HTML，销售直接打开</small></span>
                 <span className="state">可导出</span>
               </a>
             ) : (
               <button className="op-button export" type="button" disabled>
                 <span className="step">5</span>
-                <span><b>导出离线包</b><small>销售打开 index.html 演示</small></span>
+                <span><b>导出离线网页</b><small>单个 HTML，销售直接打开</small></span>
                 <span className="state">待生成</span>
               </button>
             )}
@@ -1178,7 +1178,7 @@ export function App() {
                   ? "采集已暂停在安全点，点击继续采集后恢复。"
                   : collectionStopping
                     ? "采集正在停止，本轮不会生成半成品批次。"
-                    : `${runningEstimateText}。${runningIsRegeneratingArtifacts ? "系统正在基于当前批次重新整理 Excel 和离线包，不会重新访问平台。" : "系统正在通过已登录浏览器后台采集，期间已锁定连接和后台探测按钮。"}`}
+                    : `${runningEstimateText}。${runningIsRegeneratingArtifacts ? "系统正在基于当前批次重新整理 Excel 和离线网页，不会重新访问平台。" : "系统正在通过已登录浏览器后台采集，期间已锁定连接和后台探测按钮。"}`}
               </p>
             </div>
           ) : null}
@@ -1344,8 +1344,8 @@ export function App() {
                 <span>Excel</span>
               </div>
               <div className="file-row">
-                <code>{exportZipName}</code>
-                <span>离线包</span>
+                <code>{exportHtmlName}</code>
+                <span>离线网页</span>
               </div>
             </div>
           </article>
@@ -1364,7 +1364,7 @@ export function App() {
           <Monitor size={34} />
           <div>
             <h2>还没有可展示的数据</h2>
-            <p>登录四个平台并连接当前窗口后，点击“开始完整真实采集”生成 Excel 和离线网页包。</p>
+            <p>登录四个平台并连接当前窗口后，点击“开始完整真实采集”生成 Excel 和离线网页。</p>
           </div>
         </section>
       ) : null}
@@ -1376,7 +1376,7 @@ export function App() {
               <div>
                 <p className="section-label">Current Batch</p>
                 <h2>当前批次明细</h2>
-                <p>客户主表和离线包只展示当前比价口径；内部留痕保留四平台原始价格、截图索引和失败原因。</p>
+                <p>客户主表和离线网页只展示当前比价口径；内部留痕保留四平台原始价格、截图索引和失败原因。</p>
                 <div className="section-meta">
                   <span><CalendarDays size={15} /> 国内 / 国际航班</span>
                   <span>数据日期：{view.samples[0]?.travelDate ?? "暂无"}</span>

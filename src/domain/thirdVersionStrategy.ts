@@ -315,7 +315,7 @@ export function applyThirdVersionStrategy(
       exportStatus: status,
       exportAdvantageRatio,
       exportBaseName,
-      exportNamePreview: `${exportBaseName}.zip`,
+      exportNamePreview: `${exportBaseName}.html`,
       failureReasons: sourceFailureReasons(batch)
     }
   };

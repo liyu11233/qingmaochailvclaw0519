@@ -1,8 +1,6 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { summarizeFlight, summarizeQuoteSet } from "../../src/domain/comparison";
 import {
   analyzeHotelRatePlanCompleteness,
@@ -12,7 +10,6 @@ import {
 } from "../../src/domain/hotelRatePlans";
 import type { CollectionBatch, HotelGroup, HotelSample, PlatformName, PlatformQuote, PriceComparisonOptions } from "../../src/domain/types";
 
-const zipExec = promisify(execFile);
 const PLATFORMS: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"];
 const PLATFORM_CLASS: Record<PlatformName, string> = {
   青猫差旅: "qingmao",
@@ -167,6 +164,29 @@ function renderFlightAdvantageHeadline(gap: number | null) {
   return "";
 }
 
+const DATA_URI_CACHE = new Map<string, string>();
+
+function imageMimeType(filePath: string) {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === ".png") return "image/png";
+  if (extension === ".webp") return "image/webp";
+  if (extension === ".svg") return "image/svg+xml";
+  return "image/jpeg";
+}
+
+function fileDataUri(filePath: string) {
+  const cached = DATA_URI_CACHE.get(filePath);
+  if (cached) return cached;
+
+  const dataUri = `data:${imageMimeType(filePath)};base64,${fs.readFileSync(filePath).toString("base64")}`;
+  DATA_URI_CACHE.set(filePath, dataUri);
+  return dataUri;
+}
+
+function assetDataUri(filename: string) {
+  return fileDataUri(path.join(STATIC_ASSET_DIR, filename));
+}
+
 function sharedHead(title: string) {
   return `<head>
   <meta charset="UTF-8" />
@@ -281,7 +301,7 @@ ${rootHead("青猫差旅价格对比离线包")}
     </section>
     <section class="home-feature-grid">
       <article class="home-feature-card flight-feature">
-        <figure class="feature-photo flight-photo"><img src="assets/flight-photo.jpg" alt="飞行中的飞机实拍图" /></figure>
+        <figure class="feature-photo flight-photo"><img src="${assetDataUri("flight-photo.jpg")}" alt="飞行中的飞机实拍图" /></figure>
         <section>
           <h2>航班价格</h2>
           <p>同一航班四平台价格看板</p>
@@ -291,7 +311,7 @@ ${rootHead("青猫差旅价格对比离线包")}
         </section>
       </article>
       <article class="home-feature-card hotel-feature">
-        <figure class="feature-photo hotel-photo-real"><img src="assets/hotel-photo.jpg" alt="酒店建筑实拍图" /></figure>
+        <figure class="feature-photo hotel-photo-real"><img src="${assetDataUri("hotel-photo.jpg")}" alt="酒店建筑实拍图" /></figure>
         <section>
           <h2>酒店价格</h2>
           <p>集团切换与四种口径价格对比</p>
@@ -499,9 +519,9 @@ function hotelCoverImageFileName(hotel: HotelSample) {
 }
 
 function renderHotelCard(hotel: HotelSample, index: number, options: PriceComparisonOptions, thirdVersionActive: boolean) {
-  const coverImage = hotel.coverImageStatus === "saved" && hotel.coverImagePath
-    ? `<figure class="hotel-photo"><img src="../covers/${escapeHtml(hotel.id)}/${escapeHtml(hotelCoverImageFileName(hotel))}" alt="${escapeHtml(hotel.hotelName)}酒店封面图" /><figcaption>${escapeHtml(hotel.brand)}</figcaption></figure>`
-    : `<figure class="hotel-photo"><img src="../assets/hotel-photo.jpg" alt="${escapeHtml(hotel.hotelName)}酒店展示图" /><figcaption>${escapeHtml(hotel.brand)}</figcaption></figure>`;
+  const coverImage = hotel.coverImageStatus === "saved" && hotel.coverImagePath && fs.existsSync(hotel.coverImagePath)
+    ? `<figure class="hotel-photo"><img src="${escapeHtml(fileDataUri(hotel.coverImagePath))}" alt="${escapeHtml(hotel.hotelName)}酒店封面图" /><figcaption>${escapeHtml(hotel.brand)}</figcaption></figure>`
+    : `<figure class="hotel-photo"><span class="hotel-photo-fallback" role="img" aria-label="${escapeHtml(hotel.hotelName)}酒店展示图"></span><figcaption>${escapeHtml(hotel.brand)}</figcaption></figure>`;
   return `<article class="hotel-record">
     <div class="hotel-rank">${index + 1}</div>
     ${coverImage}
@@ -750,7 +770,7 @@ function renderBaseStyles() {
 }
 
 function renderLayoutFixStyles() {
-  return `.evidence-link{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(95,211,161,.36);border-radius:999px;padding:4px 10px;color:#d9f7ee;text-decoration:none;font-weight:900;font-size:12px}.evidence-link:hover{background:rgba(63,208,129,.14)}.hotel-platform-price a{display:inline-flex;margin-top:8px;border:1px solid rgba(16,35,63,.12);border-radius:999px;padding:4px 10px;color:#235d64;text-decoration:none;font-weight:900;font-size:12px}.flight-price-row{grid-template-columns:44px 112px 1fr 110px}.hotel-rate-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:stretch}.hotel-rate-mini{min-height:auto;padding:10px 12px}.hotel-rate-mini span{font-size:12px;line-height:1.35}.hotel-metrics small{display:block;margin-top:7px;color:#64748b;font-size:12px;font-weight:900}`;
+  return `:root{--hotel-photo-fallback:url("${assetDataUri("hotel-photo.jpg")}")}.evidence-link{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(95,211,161,.36);border-radius:999px;padding:4px 10px;color:#d9f7ee;text-decoration:none;font-weight:900;font-size:12px}.evidence-link:hover{background:rgba(63,208,129,.14)}.hotel-platform-price a{display:inline-flex;margin-top:8px;border:1px solid rgba(16,35,63,.12);border-radius:999px;padding:4px 10px;color:#235d64;text-decoration:none;font-weight:900;font-size:12px}.flight-price-row{grid-template-columns:44px 112px 1fr 110px}.hotel-rate-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:stretch}.hotel-rate-mini{min-height:auto;padding:10px 12px}.hotel-rate-mini span{font-size:12px;line-height:1.35}.hotel-metrics small{display:block;margin-top:7px;color:#64748b;font-size:12px;font-weight:900}.hotel-photo-fallback{display:block;width:100%;height:100%;background-image:var(--hotel-photo-fallback);background-size:cover;background-position:center}`;
 }
 
 function renderStyles() {
@@ -804,37 +824,80 @@ async function materializeEvidenceFiles(batch: CollectionBatch, packageDir: stri
   }
 }
 
+function bodyContent(html: string) {
+  const match = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+  if (!match) {
+    throw new Error("无法生成单文件离线网页：缺少 body 内容");
+  }
+  return match[1].trim();
+}
+
+function rewriteSingleFileLinks(html: string, section: "home" | "flights" | "hotels") {
+  let rewritten = html
+    .replaceAll('href="../index.html"', 'href="#home"')
+    .replaceAll('href="flights/index.html"', 'href="#flights"')
+    .replaceAll('href="../flights/index.html"', 'href="#flights"')
+    .replaceAll('href="hotels/index.html"', 'href="#hotels"')
+    .replaceAll('href="../hotels/index.html"', 'href="#hotels"')
+    .replaceAll('href="../evidence/', 'href="#unused-evidence/')
+    .replaceAll('href="evidence/', 'href="#unused-evidence/');
+
+  if (section === "home") {
+    rewritten = rewritten.replaceAll('href="index.html"', 'href="#home"');
+  }
+  if (section === "hotels") {
+    rewritten = rewritten.replaceAll('href="index.html"', 'href="#hotels"');
+  }
+
+  return rewritten;
+}
+
+function renderSingleFileRouterScript() {
+  return `(function(){const routes={home:{id:"single-home",bodyClass:"home-page",title:"青猫差旅价格对比离线包"},flights:{id:"single-flights",bodyClass:"flight-page",title:"航班价格对比"},hotels:{id:"single-hotels",bodyClass:"hotel-page",title:"酒店价格对比"}};function currentRoute(){const key=(location.hash||"#home").replace("#","");return routes[key]?key:"home"}function setActiveLink(route){document.querySelectorAll(".dark-nav nav a,.hotel-topbar nav a").forEach((link)=>link.classList.remove("active"));document.querySelectorAll(".dark-nav nav strong,.hotel-topbar nav strong").forEach((node)=>{const link=document.createElement("a");link.href=node.textContent&&node.textContent.includes("航班")?"#flights":"#hotels";link.textContent=node.textContent||"";node.replaceWith(link)});document.querySelectorAll('a[href="#'+route+'"]').forEach((link)=>{if(link.closest("nav"))link.classList.add("active")})}function render(){const route=currentRoute();Object.values(routes).forEach((config)=>document.getElementById(config.id)?.classList.remove("active"));document.getElementById(routes[route].id)?.classList.add("active");document.body.className="single-route-preview "+routes[route].bodyClass;document.title=routes[route].title;setActiveLink(route);window.scrollTo(0,0)}window.addEventListener("hashchange",render);render()})();`;
+}
+
+function renderSingleFilePackage(batch: CollectionBatch) {
+  const home = rewriteSingleFileLinks(bodyContent(renderIndex(batch)), "home");
+  const flights = rewriteSingleFileLinks(bodyContent(renderFlights(batch)), "flights");
+  const hotels = rewriteSingleFileLinks(bodyContent(renderHotels(batch)), "hotels");
+  const routeStyles = `.single-route-preview .single-view{display:none;min-height:100vh}.single-route-preview .single-view.active{display:block}.single-route-preview .home-topbar a[href="#home"],.single-route-preview .dark-nav a[href="#flights"],.single-route-preview .hotel-topbar a[href="#hotels"]{pointer-events:auto}`;
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>青猫差旅价格对比离线包</title>
+  <style>${renderStyles()}
+${routeStyles}</style>
+</head>
+<body class="single-route-preview home-page">
+  <section id="single-home" class="single-view active" data-route="home">${home}</section>
+  <section id="single-flights" class="single-view" data-route="flights">${flights}</section>
+  <section id="single-hotels" class="single-view" data-route="hotels">${hotels}</section>
+  <script>${renderSingleFileRouterScript()}</script>
+</body>
+</html>`;
+}
+
 export async function exportOfflinePackage(batch: CollectionBatch, outputDir: string) {
   await fsp.mkdir(outputDir, { recursive: true });
 
   const packageName = `qingmao-offline-package-${batch.id}`;
-  const filename = `${batch.thirdVersion?.status.exportBaseName ?? `青猫差旅离线网页包-${batch.id}`}.zip`;
-  const zipPath = path.join(outputDir, filename);
+  const baseName = batch.thirdVersion?.status.exportBaseName ?? `青猫差旅离线网页-${batch.id}`;
+  const filename = `${baseName}.html`;
+  const htmlPath = path.join(outputDir, filename);
+  const legacyZipPath = path.join(outputDir, `${baseName}.zip`);
   const packageDir = path.join(outputDir, packageName);
 
   await fsp.rm(packageDir, { recursive: true, force: true });
-  await fsp.rm(zipPath, { force: true });
-  await fsp.mkdir(path.join(packageDir, "assets"), { recursive: true });
-  await fsp.mkdir(path.join(packageDir, "flights"), { recursive: true });
-  await fsp.mkdir(path.join(packageDir, "hotels"), { recursive: true });
-  await fsp.mkdir(path.join(packageDir, "covers"), { recursive: true });
-
-  await writeFileEnsured(path.join(packageDir, "assets", "styles.css"), renderStyles());
-  await copyStaticAsset(packageDir, "flight-photo.jpg");
-  await copyStaticAsset(packageDir, "hotel-photo.jpg");
-  await writeFileEnsured(path.join(packageDir, "index.html"), renderIndex(batch));
-  await writeFileEnsured(path.join(packageDir, "flights", "index.html"), renderFlights(batch));
-  await writeFileEnsured(path.join(packageDir, "hotels", "index.html"), renderHotels(batch));
-  await materializeHotelCoverImages(batch, packageDir);
-  if (INCLUDE_EVIDENCE_IN_SALES_PACKAGE) {
-    await materializeEvidenceFiles(batch, packageDir);
-  }
-
-  await zipExec("zip", ["-qr", zipPath, packageName], { cwd: outputDir });
+  await fsp.rm(htmlPath, { force: true });
+  await fsp.rm(legacyZipPath, { force: true });
+  await writeFileEnsured(htmlPath, renderSingleFilePackage(batch));
 
   return {
-    path: zipPath,
+    path: htmlPath,
     filename,
-    directory: packageDir
+    directory: outputDir
   };
 }

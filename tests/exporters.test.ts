@@ -201,45 +201,44 @@ describe("export artifacts", () => {
     batch.successCount = 4;
     batch.hotels = batch.hotels?.slice(0, 10);
     const result = await exportOfflinePackage(batch, outputDir);
-    const indexHtml = await readFile(path.join(result.directory, "index.html"), "utf8");
-    const flightHtml = await readFile(path.join(result.directory, "flights", "index.html"), "utf8");
-    const hotelHtml = await readFile(path.join(result.directory, "hotels", "index.html"), "utf8");
+    const offlineHtml = await readFile(result.path, "utf8");
 
-    expect(result.filename.endsWith(".zip")).toBe(true);
+    expect(result.filename.endsWith(".html")).toBe(true);
     expect(existsSync(result.path)).toBe(true);
     expect(statSync(result.path).size).toBeGreaterThan(5_000);
-    expect(indexHtml).toContain("航班价格");
-    expect(indexHtml).toContain("酒店价格");
-    expect(indexHtml).toContain("flight-photo.jpg");
-    expect(indexHtml).toContain("hotel-photo.jpg");
-    expect(indexHtml).toContain("航班青猫低价");
-    expect(indexHtml).toContain("酒店青猫低价");
-    expect(indexHtml).toContain("对比另外3家平台");
-    expect(indexHtml).not.toContain("开始采集");
-    expect(flightHtml).not.toContain("href=\"../evidence/");
-    expect(hotelHtml).not.toContain("href=\"../evidence/");
-    expect(flightHtml).not.toContain("内部留存");
-    expect(hotelHtml).not.toContain("内部留存");
-    expect(flightHtml).toContain("青猫差旅航班价格对比");
-    expect(flightHtml).toContain("平台价格对比");
-    expect(flightHtml).toContain("在途商旅");
-    expect(flightHtml).toContain("compare-visual");
-    expect(flightHtml).toContain("按竞品最低价口径");
-    expect(flightHtml).toContain("高70元");
-    expect(flightHtml).toContain("对比另外3家平台最高价低了40元");
-    expect(flightHtml).not.toContain("需结合企业协议价复核");
-    expect(hotelHtml).toContain("酒店价格对比");
-    expect(hotelHtml).toContain("首旅如家");
-    expect(hotelHtml).toContain("酒店数量");
-    expect(hotelHtml).toContain("主对比口径");
-    expect(hotelHtml).toContain("最具价格优势且四平台可比");
-    expect(hotelHtml).toContain("大床有早餐");
-    expect(hotelHtml).toContain("双床有早餐");
-    expect(hotelHtml).toContain("hotel-photo.jpg");
-    expect(hotelHtml).not.toContain("hotel-identity");
-    expect(existsSync(path.join(result.directory, "hotels", "index.html"))).toBe(true);
-    expect(existsSync(path.join(result.directory, "assets", "flight-photo.jpg"))).toBe(true);
-    expect(existsSync(path.join(result.directory, "assets", "hotel-photo.jpg"))).toBe(true);
+    expect(offlineHtml).toContain("<style>");
+    expect(offlineHtml).not.toContain('rel="stylesheet"');
+    expect(offlineHtml).toContain('id="single-home"');
+    expect(offlineHtml).toContain('id="single-flights"');
+    expect(offlineHtml).toContain('id="single-hotels"');
+    expect(offlineHtml).toContain("航班价格");
+    expect(offlineHtml).toContain("酒店价格");
+    expect(offlineHtml).toContain("data:image/jpeg;base64");
+    expect(offlineHtml).toContain("航班青猫低价");
+    expect(offlineHtml).toContain("酒店青猫低价");
+    expect(offlineHtml).toContain("对比另外3家平台");
+    expect(offlineHtml).not.toContain("开始采集");
+    expect(offlineHtml).not.toContain("href=\"../evidence/");
+    expect(offlineHtml).not.toContain("href=\"evidence/");
+    expect(offlineHtml).not.toContain("内部留存");
+    expect(offlineHtml).toContain("青猫差旅航班价格对比");
+    expect(offlineHtml).toContain("平台价格对比");
+    expect(offlineHtml).toContain("在途商旅");
+    expect(offlineHtml).toContain("compare-visual");
+    expect(offlineHtml).toContain("按竞品最低价口径");
+    expect(offlineHtml).toContain("高70元");
+    expect(offlineHtml).toContain("对比另外3家平台最高价低了40元");
+    expect(offlineHtml).not.toContain("需结合企业协议价复核");
+    expect(offlineHtml).toContain("酒店价格对比");
+    expect(offlineHtml).toContain("首旅如家");
+    expect(offlineHtml).toContain("酒店数量");
+    expect(offlineHtml).toContain("主对比口径");
+    expect(offlineHtml).toContain("最具价格优势且四平台可比");
+    expect(offlineHtml).toContain("大床有早餐");
+    expect(offlineHtml).toContain("双床有早餐");
+    expect(offlineHtml).toContain("hotel-photo-fallback");
+    expect(offlineHtml).not.toContain("hotel-identity");
+    expect(existsSync(path.join(result.directory, "assets", "styles.css"))).toBe(false);
   });
 
   it("keeps internal evidence out of the customer-facing offline web package", async () => {
@@ -256,13 +255,14 @@ describe("export artifacts", () => {
     await writeFile(path.join(outputDir, hotelEvidencePath), "hotel evidence");
 
     const result = await exportOfflinePackage(batch, outputDir);
-    const packageZip = await readFile(result.path);
+    const packageHtml = await readFile(result.path, "utf8");
 
     expect(existsSync(path.join(outputDir, flightEvidencePath))).toBe(true);
     expect(existsSync(path.join(outputDir, hotelEvidencePath))).toBe(true);
-    expect(existsSync(path.join(result.directory, flightEvidencePath))).toBe(false);
-    expect(existsSync(path.join(result.directory, hotelEvidencePath))).toBe(false);
-    expect(packageZip.includes(Buffer.from("evidence/"))).toBe(false);
+    expect(packageHtml).not.toContain("flight evidence");
+    expect(packageHtml).not.toContain("hotel evidence");
+    expect(packageHtml).not.toContain('href="evidence/');
+    expect(packageHtml).not.toContain('href="../evidence/');
   });
 
   it("renders hotel metrics by active group and rate plan", async () => {
@@ -291,7 +291,7 @@ describe("export artifacts", () => {
     };
 
     const result = await exportOfflinePackage(batch, outputDir);
-    const hotelHtml = await readFile(path.join(result.directory, "hotels", "index.html"), "utf8");
+    const hotelHtml = await readFile(result.path, "utf8");
     const metricsJson = hotelHtml.match(/<script type="application\/json" id="hotel-metrics-data">(.+?)<\/script>/s)?.[1] ?? "";
     const metrics = JSON.parse(metricsJson) as Record<string, Record<string, { hotelCount: number; lowestPrice: number | null; averageSaving: number | null; qingmaoLowestShare: number }>>;
 
@@ -335,12 +335,12 @@ describe("export artifacts", () => {
     };
 
     const result = await exportOfflinePackage(batch, outputDir);
-    const hotelHtml = await readFile(path.join(result.directory, "hotels", "index.html"), "utf8");
+    const hotelHtml = await readFile(result.path, "utf8");
 
     expect(hotelHtml).toContain("hotel-cover");
-    expect(hotelHtml).toContain("covers/hotel-01/hotel-cover.png");
+    expect(hotelHtml).toContain("data:image/png;base64");
     expect(hotelHtml).not.toContain("hotel-identity");
-    expect(existsSync(path.join(result.directory, "covers", "hotel-01", "hotel-cover.png"))).toBe(true);
+    expect(hotelHtml).not.toContain("covers/hotel-01/hotel-cover.png");
   });
 
   it("uses each hotel's Qingmao-lowest complete rate plan as the default sales display", async () => {
@@ -371,7 +371,7 @@ describe("export artifacts", () => {
     expect(hotelDetailSheet?.getRow(5).values).toContain("是");
 
     const packageResult = await exportOfflinePackage(batch, outputDir);
-    const hotelHtml = await readFile(path.join(packageResult.directory, "hotels", "index.html"), "utf8");
+    const hotelHtml = await readFile(packageResult.path, "utf8");
 
     expect(hotelHtml).toContain('data-plan="__default"');
     expect(hotelHtml).toContain('class="hotel-plan-view active" data-plan="大床无早餐" data-default="true"');
@@ -413,7 +413,7 @@ describe("export artifacts", () => {
     const packageResult = await exportOfflinePackage(deliveryBatch, outputDir);
 
     expect(workbookResult.filename).toBe(`${deliveryBatch.thirdVersion!.status.exportBaseName}.xlsx`);
-    expect(packageResult.filename).toBe(`${deliveryBatch.thirdVersion!.status.exportBaseName}.zip`);
+    expect(packageResult.filename).toBe(`${deliveryBatch.thirdVersion!.status.exportBaseName}.html`);
 
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(workbookResult.path);
@@ -425,7 +425,7 @@ describe("export artifacts", () => {
     expect(workbookResult.filename).not.toContain("未达标");
     expect(packageResult.filename).not.toContain("未达标");
     expect(workbookResult.filename).toMatch(/优势\d+%\.xlsx$/);
-    expect(packageResult.filename).toMatch(/优势\d+%\.zip$/);
+    expect(packageResult.filename).toMatch(/优势\d+%\.html$/);
     expect(overviewSheet?.getRow(5).values).toContain("第三版模式");
     expect(overviewSheet?.getRow(6).values).toContain("指定平台");
     expect(overviewSheet?.getRow(7).getCell(3).text).toContain("优势");
@@ -444,9 +444,9 @@ describe("export artifacts", () => {
     expect(traceHeader).toContain("截图索引");
     expect(failureSheet?.getColumn(2).values.join(" ")).toContain("第三版策略");
 
-    const indexHtml = await readFile(path.join(packageResult.directory, "index.html"), "utf8");
-    const flightHtml = await readFile(path.join(packageResult.directory, "flights", "index.html"), "utf8");
-    const hotelHtml = await readFile(path.join(packageResult.directory, "hotels", "index.html"), "utf8");
+    const indexHtml = await readFile(packageResult.path, "utf8");
+    const flightHtml = indexHtml;
+    const hotelHtml = indexHtml;
     expect(indexHtml).toContain("当前口径：指定平台");
     expect(flightHtml).toContain("阿里商旅暂无可比价格");
     expect(hotelHtml).toContain("暂无");
