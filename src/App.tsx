@@ -5,18 +5,11 @@ import {
   CalendarDays,
   CircleCheckBig,
   Clock3,
-  Download,
-  ExternalLink,
-  FileSpreadsheet,
-  Image as ImageIcon,
-  LogIn,
   Monitor,
   Plane,
-  Radar,
-  RefreshCw,
-  ShieldCheck,
-  Trash2
+  SlidersHorizontal
 } from "lucide-react";
+import { DEFAULT_THIRD_VERSION_OPTIONS, type ThirdVersionBatchStatus, type ThirdVersionStrategyOptions } from "./domain/thirdVersionStrategy";
 import type { CollectionBatch } from "./domain/types";
 import { type ArtifactLinks, type QuoteView, buildDashboardView, comparisonPlatforms } from "./ui/viewModel";
 
@@ -33,16 +26,29 @@ interface StatusResponse {
   activeOperation?: {
     label: string;
     startedAt: string;
+    state: "running" | "paused" | "stopping";
+    canPause: boolean;
+    canResume: boolean;
+    canStop: boolean;
+    pauseRequestedAt: string | null;
+    stopRequestedAt: string | null;
   } | null;
+  thirdVersion: ThirdVersionResponse;
 }
 
 interface BatchResponse {
   batch: CollectionBatch;
   artifacts: ArtifactLinks | null;
+  thirdVersion?: ThirdVersionResponse;
+}
+
+interface ThirdVersionResponse {
+  options: ThirdVersionStrategyOptions;
+  status: ThirdVersionBatchStatus;
 }
 
 interface CollectionResultNotice {
-  tone: "success" | "failed";
+  tone: "success" | "failed" | "info";
   title: string;
   detail: string;
 }
@@ -56,6 +62,7 @@ type ZtripProbeStatus = "idle" | "running" | "completed" | "failed";
 type ZtripFlightProbeStatus = "idle" | "running" | "completed" | "failed";
 type ZtripHotelProbeStatus = "idle" | "running" | "completed" | "failed";
 type PilotBusyAction = "login" | "probe" | "attached" | "cleanup" | "qingmao-candidates" | "same-flight" | "ztrip" | "ztrip-flight" | "ztrip-hotel" | "";
+type ThirdVersionConfigPatch = Partial<ThirdVersionStrategyOptions>;
 
 interface PilotPlatformState {
   platform: string;
@@ -215,9 +222,16 @@ interface BrowserCleanupResult {
   error?: string;
 }
 
-type ScopeFilter = "全部" | "国内" | "国际";
-
-const scopeFilters: ScopeFilter[] = ["全部", "国内", "国际"];
+const generationModeLabels: Record<ThirdVersionStrategyOptions["generationMode"], string> = {
+  real_random: "真实随机",
+  qingmao_advantage: "青猫优势"
+};
+const comparisonModeLabels: Record<ThirdVersionStrategyOptions["comparisonMode"], string> = {
+  internal_discussion: "内部讨论",
+  external_sales: "对外销售",
+  specified_platform: "指定平台"
+};
+const thirdVersionCompetitors: NonNullable<ThirdVersionStrategyOptions["specifiedPlatform"]>[] = ["携程商旅", "阿里商旅", "在途商旅"];
 const cityCodes: Record<string, string> = {
   广州: "CAN",
   上海: "SHA",
@@ -431,6 +445,40 @@ function estimateProgress(elapsedMs: number, estimateMs: number) {
   return Math.min(94, Math.max(8, Math.round((elapsedMs / estimateMs) * 100)));
 }
 
+function validateThirdVersionOptions(options: ThirdVersionStrategyOptions) {
+  if (!Number.isInteger(options.hotelDisplayLimit) || options.hotelDisplayLimit < 1) {
+    return "酒店展示数量必须是正整数";
+  }
+  if (!Number.isInteger(options.flightDisplayLimit) || options.flightDisplayLimit < 1) {
+    return "航班展示数量必须是正整数";
+  }
+  if (!Number.isFinite(options.targetAdvantageRatio) || options.targetAdvantageRatio < 0 || options.targetAdvantageRatio > 100) {
+    return "青猫优势目标比例必须在 0 到 100 之间";
+  }
+  if (options.comparisonMode === "specified_platform" && !options.specifiedPlatform) {
+    return "指定平台口径必须选择 1 个竞品平台";
+  }
+  return "";
+}
+
+function percentLabel(value: number) {
+  return `${Math.round(value)}%`;
+}
+
+function targetMetBadgeLabel(value: boolean) {
+  return value ? "已达标" : "未达标";
+}
+
+function metricCardTone(value: boolean) {
+  return value ? "ok" : "warn";
+}
+
+function connectionDotTone(tone: string) {
+  if (tone === "connected") return "ok";
+  if (tone === "failed") return "bad";
+  return "warn";
+}
+
 function platformHeadClass(platform: string) {
   const classes: Record<string, string> = {
     青猫差旅: "qingmao-head",
@@ -451,6 +499,18 @@ function platformPriceClass(quote: QuoteView) {
   return classes[quote.platform] ?? "";
 }
 
+function isFailureTraceNote(note: string) {
+  return /已替换|失败|为空|共同航班|无同航班|无价格|不可订|异常|错误|超时|登录|页面/.test(note);
+}
+
+function failureTraceObjectLabel(note: string) {
+  const replacementMatch = note.match(/^已替换\s+([^:：]+)/);
+  if (replacementMatch) return `已替换 ${replacementMatch[1].trim()}`;
+
+  const [label] = note.split(/[:：]/);
+  return label && label.length <= 18 ? label : "当前批次";
+}
+
 async function readJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const data = await response.json().catch(() => ({}));
@@ -462,36 +522,14 @@ async function readJson<T>(url: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
-function DownloadButton({
-  href,
-  icon,
-  label
-}: {
-  href: string | null;
-  icon: React.ReactNode;
-  label: string;
-}) {
-  if (!href) {
-    return (
-      <button className="ghost-button" type="button" disabled>
-        {icon}
-        {label}
-      </button>
-    );
-  }
-
-  return (
-    <a className="ghost-button active-link" href={href}>
-      {icon}
-      {label}
-    </a>
-  );
-}
-
 export function App() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [batch, setBatch] = useState<CollectionBatch | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactLinks | null>(null);
+  const [thirdVersionOptions, setThirdVersionOptions] = useState<ThirdVersionStrategyOptions>(DEFAULT_THIRD_VERSION_OPTIONS);
+  const [thirdVersionStatus, setThirdVersionStatus] = useState<ThirdVersionBatchStatus | null>(null);
+  const [thirdVersionSaving, setThirdVersionSaving] = useState(false);
+  const [thirdVersionError, setThirdVersionError] = useState("");
   const [collecting, setCollecting] = useState(false);
   const [realCollecting, setRealCollecting] = useState(false);
   const [internationalCollecting, setInternationalCollecting] = useState(false);
@@ -508,14 +546,19 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [collectionResult, setCollectionResult] = useState<CollectionResultNotice | null>(null);
-  const [scope, setScope] = useState<ScopeFilter>("全部");
+  const [activeDetailTab, setActiveDetailTab] = useState<"flight" | "hotel">("flight");
+  const [flightDetailExpanded, setFlightDetailExpanded] = useState(false);
+  const [hotelDetailExpanded, setHotelDetailExpanded] = useState(false);
+  const [failureTraceOpen, setFailureTraceOpen] = useState(true);
 
   const view = useMemo(() => (batch ? buildDashboardView(batch) : null), [batch]);
   const connection = useMemo(() => connectionStatus(pilot, pilotBusy, pilotError), [pilot, pilotBusy, pilotError]);
-  const visibleSamples = useMemo(() => {
-    if (!view) return [];
-    return scope === "全部" ? view.samples : view.samples.filter((sample) => sample.scope === scope);
-  }, [scope, view]);
+  const visibleSamples = useMemo(() => view?.samples ?? [], [view]);
+  const hotelRows = view?.hotels ?? [];
+  const displayedFlightRows = flightDetailExpanded ? visibleSamples : visibleSamples.slice(0, 3);
+  const displayedHotelRows = hotelDetailExpanded ? hotelRows : hotelRows.slice(0, 3);
+  const hiddenFlightRowCount = Math.max(visibleSamples.length - displayedFlightRows.length, 0);
+  const hiddenHotelRowCount = Math.max(hotelRows.length - displayedHotelRows.length, 0);
   const flightCount = status?.flightCount ?? batch?.samples.length ?? 0;
   const hotelCount = status?.hotelCount ?? batch?.hotels?.length ?? 0;
   const [collectionStartedAt, setCollectionStartedAt] = useState<number | null>(null);
@@ -545,8 +588,41 @@ export function App() {
   const runningEstimateMs = runningIsFull ? 15 * 60 * 1000 : runningIsSegment ? 8 * 60 * 1000 : runningIsRegeneratingArtifacts ? 30 * 1000 : 10 * 1000;
   const runningElapsedMs = runningStartedAt ? progressNow - runningStartedAt : 0;
   const runningProgress = isOperationRunning ? estimateProgress(runningElapsedMs, runningEstimateMs) : 0;
+  const collectionPaused = serverOperation?.state === "paused";
+  const collectionStopping = serverOperation?.state === "stopping";
+  const canPauseCollection = Boolean(serverOperation?.canPause);
+  const canResumeCollection = Boolean(serverOperation?.canResume);
+  const canStopCollection = Boolean(serverOperation?.canStop);
   const fullCollectionRunning = fullCollecting || serverOperation?.label === "完整真实采集";
   const artifactRegenerationRunning = regeneratingArtifacts || serverOperation?.label === "重新生成交付包";
+  const thirdVersionValidationMessage = validateThirdVersionOptions(thirdVersionOptions);
+  const thirdVersionBlocked = Boolean(thirdVersionValidationMessage || thirdVersionError);
+  const connectionReady = connection.tone === "connected";
+  const hotelDisplayed = thirdVersionStatus?.hotelDisplayed ?? 0;
+  const flightDisplayed = thirdVersionStatus?.flightDisplayed ?? 0;
+  const rawHotelCandidates = thirdVersionStatus?.rawHotelCandidates ?? hotelCount;
+  const rawFlightCandidates = thirdVersionStatus?.rawFlightCandidates ?? flightCount;
+  const hotelAdvantageCount = thirdVersionStatus?.hotelAdvantageCount ?? 0;
+  const flightAdvantageCount = thirdVersionStatus?.flightAdvantageCount ?? 0;
+  const hotelAdvantageRatio = thirdVersionStatus?.hotelAdvantageRatio ?? 0;
+  const flightAdvantageRatio = thirdVersionStatus?.flightAdvantageRatio ?? 0;
+  const hotelFull = thirdVersionStatus?.hotelFull ?? false;
+  const flightFull = thirdVersionStatus?.flightFull ?? false;
+  const hotelTargetMet = thirdVersionStatus?.hotelTargetMet ?? false;
+  const flightTargetMet = thirdVersionStatus?.flightTargetMet ?? false;
+  const fullState = hotelFull && flightFull;
+  const targetState = thirdVersionOptions.generationMode === "qingmao_advantage" ? hotelTargetMet && flightTargetMet : null;
+  const exportBaseName = thirdVersionStatus?.exportBaseName ?? "【随】青猫差旅一体化比价-酒店0-航班0-优势0%";
+  const exportZipName = thirdVersionStatus?.exportNamePreview ?? `${exportBaseName}.zip`;
+  const exportExcelName = `${exportBaseName}.xlsx`;
+  const failureTraceRows = view?.failureNotes.filter(isFailureTraceNote) ?? [];
+  const visibleFailureTraceRows = failureTraceRows.length > 0 ? failureTraceRows : (view?.failureNotes ?? []);
+  const failureTraceTableRows = visibleFailureTraceRows.length > 0 ? visibleFailureTraceRows : ["当前没有失败留痕记录。"];
+  const hasFailureTraceRows = visibleFailureTraceRows.length > 0;
+  const failureRecordCount = view ? Math.max(view.failedCount, visibleFailureTraceRows.length) : 0;
+  const failureScreenshotCount = visibleFailureTraceRows.filter((note) => /截图|screenshot|\.png|\.jpe?g/i.test(note)).length;
+  const failureHtmlSnapshotCount = visibleFailureTraceRows.filter((note) => /html|网页快照|快照|\.html/i.test(note)).length;
+  const pendingManualReviewCount = visibleFailureTraceRows.filter((note) => /待|复核|人工/i.test(note)).length;
 
   function markCollectionStart() {
     const startedAt = Date.now();
@@ -560,6 +636,8 @@ export function App() {
     const latestStatus = await readJson<StatusResponse>("/api/status");
     setStatus(latestStatus);
     setArtifacts(latestStatus.artifacts);
+    setThirdVersionOptions(latestStatus.thirdVersion.options);
+    setThirdVersionStatus(latestStatus.thirdVersion.status);
 
     if (!latestStatus.hasBatch) {
       setBatch(null);
@@ -569,6 +647,10 @@ export function App() {
     const latest = await readJson<BatchResponse>("/api/batch/latest");
     setBatch(latest.batch);
     setArtifacts(latest.artifacts);
+    if (latest.thirdVersion) {
+      setThirdVersionOptions(latest.thirdVersion.options);
+      setThirdVersionStatus(latest.thirdVersion.status);
+    }
   }
 
   async function refreshPilot() {
@@ -586,6 +668,39 @@ export function App() {
     setZtripProbe(nextZtripProbe);
     setZtripFlight(nextZtripFlight);
     setZtripHotel(nextZtripHotel);
+  }
+
+  async function updateThirdVersionConfig(patch: ThirdVersionConfigPatch) {
+    const nextOptions: ThirdVersionStrategyOptions = {
+      ...thirdVersionOptions,
+      ...patch
+    };
+    if (patch.comparisonMode && patch.comparisonMode !== "specified_platform") {
+      delete nextOptions.specifiedPlatform;
+    }
+
+    setThirdVersionOptions(nextOptions);
+    const validationMessage = validateThirdVersionOptions(nextOptions);
+    if (validationMessage) {
+      setThirdVersionError(validationMessage);
+      return;
+    }
+
+    setThirdVersionSaving(true);
+    setThirdVersionError("");
+    try {
+      const result = await readJson<{ thirdVersion: ThirdVersionResponse }>("/api/third-version/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(nextOptions)
+      });
+      setThirdVersionOptions(result.thirdVersion.options);
+      setThirdVersionStatus(result.thirdVersion.status);
+    } catch (configError) {
+      setThirdVersionError(configError instanceof Error ? configError.message : "第三版配置保存失败");
+    } finally {
+      setThirdVersionSaving(false);
+    }
   }
 
   async function collect() {
@@ -663,24 +778,62 @@ export function App() {
   }
 
   async function collectRealFull() {
+    const validationMessage = validateThirdVersionOptions(thirdVersionOptions);
+    if (validationMessage) {
+      setThirdVersionError(validationMessage);
+      setCollectionResult({ tone: "failed", title: "第三版配置未保存", detail: validationMessage });
+      return;
+    }
+
     markCollectionStart();
     setFullCollecting(true);
     setError("");
 
     try {
-      const result = await readJson<BatchResponse>("/api/collect-real-full", { method: "POST" });
+      const result = await readJson<BatchResponse>("/api/collect-real-full", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(thirdVersionOptions)
+      });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
+      if (result.thirdVersion) {
+        setThirdVersionOptions(result.thirdVersion.options);
+        setThirdVersionStatus(result.thirdVersion.status);
+      }
       setCollectionResult({ tone: "success", title: "完整真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和离线网页包。` });
       await refreshStatus();
     } catch (collectionError) {
       const message = collectionError instanceof Error ? collectionError.message : "完整真实采集失败";
       setError(message);
-      setCollectionResult({ tone: "failed", title: "完整真实采集失败", detail: message });
+      setCollectionResult({
+        tone: message.includes("采集已停止") ? "info" : "failed",
+        title: message.includes("采集已停止") ? "完整真实采集已停止" : "完整真实采集失败",
+        detail: message
+      });
     } finally {
       setFullCollecting(false);
       setCollectionStartedAt(null);
       void refreshStatus().catch(() => undefined);
+    }
+  }
+
+  async function controlCollection(action: "pause" | "resume" | "stop") {
+    const actionLabel = action === "pause" ? "暂停采集" : action === "resume" ? "继续采集" : "停止采集";
+    setError("");
+
+    try {
+      await readJson<{ message: string; activeOperation: StatusResponse["activeOperation"] }>(`/api/collection/${action}`, { method: "POST" });
+      await refreshStatus();
+      setCollectionResult({
+        tone: "info",
+        title: `${actionLabel}已提交`,
+        detail: action === "stop" ? "系统会在下一个安全点停止，本轮不会生成半成品批次。" : "系统会在采集安全点切换状态，不会改写当前已发布批次。"
+      });
+    } catch (controlError) {
+      const message = controlError instanceof Error ? controlError.message : `${actionLabel}失败`;
+      setError(message);
+      setCollectionResult({ tone: "failed", title: `${actionLabel}失败`, detail: message });
     }
   }
 
@@ -871,47 +1024,135 @@ export function App() {
   }, [loading, isOperationRunning, status?.hasBatch, status?.batchId]);
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand-mark">
-          <Plane size={22} />
-          <span>青猫差旅</span>
+    <main className="shell">
+      <header className="top-status" aria-label="顶部状态条">
+        <div className="brand">
+          <div className="brand-mark" aria-hidden="true">Q</div>
+          <div>
+            <b>青猫差旅比价管理台</b>
+            <span>第三版阶段 1 · 管理端交互设计</span>
+          </div>
         </div>
-        <div className="topbar-status">
-          <ShieldCheck size={18} />
-          第二版平台验证
+        <div className="status-strip" aria-label="平台状态">
+          <div className="status-chip"><i className={`dot ${connectionDotTone(connection.tone)}`} /><span>{connection.title}</span></div>
+          <div className="status-chip"><i className={isOperationRunning ? "dot warn" : "dot ok"} /><span>运行状态：{runningCollectionLabel || "空闲"}</span></div>
+          <div className="status-chip"><i className="dot ok" /><span>最近数据：{formatDateTime(status?.generatedAt ?? null)}</span></div>
         </div>
+        <div className="batch-pill">{status?.batchId ?? "暂无当前批次"}</div>
       </header>
 
-      <section className="command-band">
-        <div className="command-copy">
-          <p className="eyebrow">Manual Collection Console</p>
-          <h1>航班酒店比价管理台</h1>
-          <p>
-            先人工登录四个平台，再由系统采集航班和酒店价格；如果只是调整交付物，可直接重新生成 Excel 和离线网页包，不需要重新采集。
-          </p>
-        </div>
-
-        <div className="command-panel" aria-label="采集操作">
-          <div className="panel-state">
-            <span>{loading ? "正在读取状态" : status?.hasBatch ? "已有当前批次" : "暂无当前批次"}</span>
-            <strong>{flightCount} 条航班</strong>
-            <small>酒店：{hotelCount} 家</small>
-            <small>最近采集：{formatDateTime(status?.generatedAt ?? null)}</small>
+      <section className="hero-grid" aria-label="管理端首屏">
+        <article className="overview-card">
+          <div className="overview-copy">
+            <p className="screen-kicker">Third Version Console</p>
+            <h1>先配置展示策略，再执行完整真实采集</h1>
+            <p>这个页面只给采集负责人使用。首屏保留登录、连接、采集、导出四个真实动作，同时把酒店 40 家、航班 20 条、青猫优势比例和比价口径放在采集前确认。</p>
           </div>
-          <p className="operation-note">日常先登录并保持浏览器打开，再连接当前窗口，最后开始完整真实采集；如果已有批次，只调整 Excel 或离线包时，直接点“重新生成交付包”。</p>
-          <button className="ghost-button active-link" type="button" onClick={openPilotLogin} disabled={operationLocked}>
-            <LogIn size={18} />
-            {pilotBusy === "login" ? "正在打开" : "打开登录浏览器"}
-          </button>
-          <button className="primary-button" type="button" onClick={runAttachedPilotProbe} disabled={operationLocked}>
-            <Monitor size={18} className={pilotBusy === "attached" ? "spin" : ""} />
-            {pilotBusy === "attached" ? "正在连接窗口" : connection.tone === "connected" ? "已连接，可重新检测" : "连接当前登录窗口"}
-          </button>
-          <button className="ghost-button active-link" type="button" onClick={cleanupBrowserPages} disabled={operationLocked}>
-            <Trash2 size={18} className={pilotBusy === "cleanup" ? "spin" : ""} />
-            {pilotBusy === "cleanup" ? "正在清理" : "清理采集窗口"}
-          </button>
+
+          <div className="delivery-preview" aria-label="本次采集总览">
+            <div className="preview-title">
+              <b>本次采集总览</b>
+              <span className="badge neutral">{generationModeLabels[thirdVersionOptions.generationMode]}</span>
+            </div>
+            <div className="analysis-grid">
+              <div className="analysis-card">
+                <span>原始候选池</span>
+                <strong>{rawHotelCandidates + rawFlightCandidates}</strong>
+                <small>酒店候选 {rawHotelCandidates} 家 / 航班候选 {rawFlightCandidates} 条</small>
+              </div>
+              <div className="analysis-card">
+                <span>最终展示</span>
+                <strong>{hotelDisplayed + flightDisplayed}</strong>
+                <small>酒店 {hotelDisplayed} 家 / 航班 {flightDisplayed} 条</small>
+              </div>
+              <div className="analysis-card">
+                <span>青猫优势样本</span>
+                <strong>{hotelAdvantageCount + flightAdvantageCount}</strong>
+                <small>酒店 {hotelAdvantageCount} 家 / 航班 {flightAdvantageCount} 条</small>
+              </div>
+              <a className="analysis-card actionable" href="#failureTracePanel" aria-label="查看失败留痕" onClick={() => setFailureTraceOpen(true)}>
+                <span>失败留痕</span>
+                <strong>{status?.failedCount ?? batch?.failedCount ?? 0}</strong>
+                <small>不进客户页，只进后台复核</small>
+                <em className="card-link">查看失败记录和截图</em>
+              </a>
+            </div>
+            <div className="summary-list">
+              <div className="summary-line"><span>酒店分析</span><b>青猫优势 {percentLabel(hotelAdvantageRatio)}，满量 {hotelDisplayed}/{thirdVersionOptions.hotelDisplayLimit}</b><strong>{targetMetBadgeLabel(hotelTargetMet)}</strong></div>
+              <div className="summary-line"><span>航班分析</span><b>青猫优势 {percentLabel(flightAdvantageRatio)}，满量 {flightDisplayed}/{thirdVersionOptions.flightDisplayLimit}</b><strong>{targetMetBadgeLabel(flightTargetMet)}</strong></div>
+              <div className="summary-line"><span>证据文件</span><b>四平台截图与 HTML 快照</b><strong>{view?.evidenceCount ?? 0} 份</strong></div>
+              <div className="summary-line"><span>导出状态</span><b>Excel 与离线包使用同一份策略结果</b><strong>{artifacts ? "可导出" : "待生成"}</strong></div>
+            </div>
+          </div>
+        </article>
+
+        <aside className="action-card" aria-label="正式操作区">
+          <p className="section-label">Formal Actions</p>
+          <h2>正式操作区</h2>
+          <div className="action-stack">
+            <button className="op-button" type="button" onClick={openPilotLogin} disabled={operationLocked}>
+              <span className="step">1</span>
+              <span><b>打开登录浏览器</b><small>保持四个平台登录窗口打开</small></span>
+              <span className="state">{pilotBusy === "login" ? "打开中" : "可操作"}</span>
+            </button>
+            <button className="op-button" type="button" onClick={runAttachedPilotProbe} disabled={operationLocked}>
+              <span className="step">2</span>
+              <span><b>连接当前登录窗口</b><small>检查青猫、携程、阿里、在途</small></span>
+              <span className="state">{pilotBusy === "attached" ? "连接中" : connectionReady ? "已连接" : "待连接"}</span>
+            </button>
+            <button className="op-button primary" type="button" onClick={collectRealFull} disabled={isOperationRunning || Boolean(pilotBusy) || loading || thirdVersionSaving || thirdVersionBlocked || !connectionReady}>
+              <span className="step">3</span>
+              <span><b>开始完整真实采集</b><small>采集期间锁定登录和探测按钮</small></span>
+              <span className="state">{fullCollectionRunning ? "采集中" : "主操作"}</span>
+            </button>
+            {artifacts?.excel ? (
+              <a className="op-button export" href={artifacts.excel}>
+                <span className="step">4</span>
+                <span><b>导出 Excel</b><small>客户主表跟随当前口径</small></span>
+                <span className="state">可导出</span>
+              </a>
+            ) : (
+              <button className="op-button export" type="button" disabled>
+                <span className="step">4</span>
+                <span><b>导出 Excel</b><small>客户主表跟随当前口径</small></span>
+                <span className="state">待生成</span>
+              </button>
+            )}
+            {artifacts?.offlinePackage ? (
+              <a className="op-button export" href={artifacts.offlinePackage}>
+                <span className="step">5</span>
+                <span><b>导出离线包</b><small>销售打开 index.html 演示</small></span>
+                <span className="state">可导出</span>
+              </a>
+            ) : (
+              <button className="op-button export" type="button" disabled>
+                <span className="step">5</span>
+                <span><b>导出离线包</b><small>销售打开 index.html 演示</small></span>
+                <span className="state">待生成</span>
+              </button>
+            )}
+          </div>
+          <div className="collection-control-row" aria-label="采集控制区">
+            <button
+              className={`collection-control-button ${collectionPaused ? "resume" : ""}`}
+              type="button"
+              onClick={() => void controlCollection(collectionPaused ? "resume" : "pause")}
+              disabled={collectionStopping || (!canPauseCollection && !canResumeCollection)}
+            >
+              <b>{collectionPaused ? "继续采集" : "暂停采集"}</b>
+              <small>{collectionPaused ? "从安全点继续执行" : "停在下一个安全点"}</small>
+            </button>
+            <button
+              className="collection-control-button danger"
+              type="button"
+              onClick={() => void controlCollection("stop")}
+              disabled={collectionStopping || !canStopCollection}
+            >
+              <b>停止采集</b>
+              <small>不生成半成品批次</small>
+            </button>
+          </div>
+          {["partial", "failed", "running"].includes(connection.tone) ? (
           <div className={`connection-card ${connection.tone}`}>
             <div>
               {connection.tone === "connected" ? <CircleCheckBig size={18} /> : connection.tone === "failed" ? <AlertTriangle size={18} /> : <Monitor size={18} />}
@@ -919,10 +1160,7 @@ export function App() {
             </div>
             <p>{connection.detail}</p>
           </div>
-          <button className="primary-button real-button strong-action" type="button" onClick={collectRealFull} disabled={isOperationRunning || Boolean(pilotBusy) || loading}>
-            <Radar size={18} className={fullCollectionRunning ? "spin" : ""} />
-            {fullCollectionRunning ? "完整真实采集中" : "开始完整真实采集"}
-          </button>
+          ) : null}
           {isOperationRunning ? (
             <div className="collection-progress-card" role="status" aria-live="polite">
               <div className="progress-head">
@@ -936,438 +1174,182 @@ export function App() {
                 <span style={{ width: `${runningProgress}%` }} />
               </div>
               <p>
-                {runningEstimateText}。{runningIsRegeneratingArtifacts ? "系统正在基于当前批次重新整理 Excel 和离线网页包，不会重新访问平台。" : "系统正在通过已登录浏览器后台采集，期间已锁定连接和后台探测按钮，避免重复点击导致连接失败。"}
+                {collectionPaused
+                  ? "采集已暂停在安全点，点击继续采集后恢复。"
+                  : collectionStopping
+                    ? "采集正在停止，本轮不会生成半成品批次。"
+                    : `${runningEstimateText}。${runningIsRegeneratingArtifacts ? "系统正在基于当前批次重新整理 Excel 和离线包，不会重新访问平台。" : "系统正在通过已登录浏览器后台采集，期间已锁定连接和后台探测按钮。"}`}
               </p>
             </div>
           ) : null}
-          {!isOperationRunning && collectionResult ? (
+          {collectionResult ? (
             <div className={`collection-result-card ${collectionResult.tone}`} role={collectionResult.tone === "failed" ? "alert" : "status"} aria-live="polite">
               <div>
-                {collectionResult.tone === "success" ? <CircleCheckBig size={18} /> : <AlertTriangle size={18} />}
+                {collectionResult.tone === "success" ? <CircleCheckBig size={18} /> : collectionResult.tone === "info" ? <Monitor size={18} /> : <AlertTriangle size={18} />}
                 <strong>{collectionResult.title}</strong>
               </div>
               <p>{collectionResult.detail}</p>
             </div>
           ) : null}
-          <button className="ghost-button active-link artifact-refresh-button" type="button" onClick={regenerateArtifacts} disabled={!batch || operationLocked || loading}>
-            <RefreshCw size={17} className={artifactRegenerationRunning ? "spin" : ""} />
-            {artifactRegenerationRunning ? "正在重新生成交付包" : "重新生成交付包"}
-          </button>
-          <div className="download-row">
-            <DownloadButton href={artifacts?.excel ?? null} icon={<FileSpreadsheet size={17} />} label="导出 Excel" />
-            <DownloadButton href={artifacts?.offlinePackage ?? null} icon={<ImageIcon size={17} />} label="离线网页包" />
-          </div>
-        </div>
+        </aside>
       </section>
 
-      <section className="advanced-section" aria-label="高级验证">
-        <details>
-          <summary>
-            <div className="pilot-copy">
-              <p className="eyebrow"><span className="section-dot" /> Advanced Checks</p>
-              <h2>高级验证</h2>
-              <p>这些按钮只用于排查问题：检查登录态、验证在途商旅、采集在途航班和酒店样本、单独读青猫候选池、单条同航班比价，或只跑国内/国际分段采集。</p>
-            </div>
-            <div className="pilot-route">
-              <span>{pilot ? pilotStatusLabel(pilot.status) : "读取中"}</span>
-              <strong>{pilot ? `${pilot.route.origin} → ${pilot.route.destination}` : "广州 → 上海"}</strong>
-              <small>当前验证航线</small>
-            </div>
-          </summary>
-        <div className="pilot-actions advanced-actions">
-          <button className="primary-button inline-primary" type="button" onClick={runPilotProbe} disabled={operationLocked}>
-            <Radar size={17} className={pilotBusy === "probe" ? "spin" : ""} />
-            {pilotBusy === "probe" ? "后台探测中" : "运行后台探测"}
-          </button>
-          <button className="primary-button inline-primary strong-action" type="button" onClick={runZtripProbe} disabled={operationLocked}>
-            <Monitor size={17} className={pilotBusy === "ztrip" ? "spin" : ""} />
-            {pilotBusy === "ztrip" ? "验证中" : "验证在途商旅"}
-          </button>
-          <button className="primary-button inline-primary strong-action" type="button" onClick={runZtripFlightProbe} disabled={operationLocked}>
-            <Plane size={17} className={pilotBusy === "ztrip-flight" ? "spin" : ""} />
-            {pilotBusy === "ztrip-flight" ? "采集中" : "采集在途航班样本"}
-          </button>
-          <button className="primary-button inline-primary strong-action" type="button" onClick={runZtripHotelProbe} disabled={operationLocked}>
-            <Monitor size={17} className={pilotBusy === "ztrip-hotel" ? "spin" : ""} />
-            {pilotBusy === "ztrip-hotel" ? "采集中" : "采集在途酒店样本"}
-          </button>
-          <button className="primary-button inline-primary strong-action" type="button" onClick={runQingmaoCandidateProbe} disabled={operationLocked}>
-            <Plane size={17} className={pilotBusy === "qingmao-candidates" ? "spin" : ""} />
-            {pilotBusy === "qingmao-candidates" ? "读取中" : "读取青猫候选航班"}
-          </button>
-          <button className="primary-button inline-primary strong-action" type="button" onClick={runSameFlightComparisonProbe} disabled={operationLocked}>
-            <Radar size={17} className={pilotBusy === "same-flight" ? "spin" : ""} />
-            {pilotBusy === "same-flight" ? "查询中" : "随机同航班比价"}
-          </button>
-          <button className="primary-button inline-primary" type="button" onClick={collect} disabled={operationLocked || loading}>
-            <RefreshCw size={17} className={collecting ? "spin" : ""} />
-            {collecting ? "模拟采集中" : "模拟采集"}
-          </button>
-          <button className="primary-button inline-primary real-button" type="button" onClick={collectRealDomestic} disabled={operationLocked || loading}>
-            <Radar size={17} className={realCollecting ? "spin" : ""} />
-            {realCollecting ? "国内采集中" : "只采国内"}
-          </button>
-          <button className="primary-button inline-primary real-button" type="button" onClick={collectRealInternational} disabled={operationLocked || loading}>
-            <Radar size={17} className={internationalCollecting ? "spin" : ""} />
-            {internationalCollecting ? "国际采集中" : "只采国际"}
-          </button>
-        </div>
-        {pilotError ? (
-          <div className="pilot-error" role="alert">
-            <AlertTriangle size={16} />
-            {pilotError}
-          </div>
-        ) : null}
-        <div className="pilot-platforms">
-          {(pilot?.platforms ?? []).map((platform) => (
-            <div className={`pilot-platform ${platform.outcome ?? "pending"}`} key={platform.platform}>
-              <div>
-                <b>{platform.platform}</b>
-                <span>{pilotOutcomeLabel(platform.outcome)}</span>
-              </div>
-              <p>{platform.note ?? (platform.configured ? "等待探测" : "请先配置平台入口")}</p>
-              {platform.error ? <small>{platform.error}</small> : null}
-              {platform.screenshotUrl ? (
-                <a href={platform.screenshotUrl} target="_blank" rel="noreferrer">
-                  <ExternalLink size={15} />
-                  查看探测截图
-                </a>
-              ) : null}
-            </div>
-          ))}
-        </div>
-        <div className={`same-flight-panel ztrip-panel ${ztripProbe?.status ?? "idle"}`}>
-          <div className="candidate-head">
-            <div>
-              <span>{ztripStatusLabel(ztripProbe?.status)}</span>
-              <b>在途商旅单平台验证</b>
-              <small>{ztripProbe?.message ?? "先确认入口、登录态、航班入口、酒店入口是否可访问"}</small>
-            </div>
-            <div className="candidate-counts">
-              <strong>{ztripProbe?.checks.filter((check) => check.outcome === "reachable").length ?? "--"}</strong>
-              <span>可访问项</span>
-            </div>
-            <button
-              className="ghost-button active-link compact-action"
-              type="button"
-              onClick={runZtripProbe}
-              disabled={operationLocked}
-            >
-              <Monitor size={15} className={pilotBusy === "ztrip" ? "spin" : ""} />
-              重新验证
-            </button>
-          </div>
-          {ztripProbe?.error ? (
-            <div className="pilot-error compact" role="alert">
-              <AlertTriangle size={16} />
-              {ztripProbe.error}
+      <section className="content-grid" aria-label="第三版配置和状态">
+        <article className="config-card" aria-label="第三版配置区">
+          <p className="section-label">Version 3 Config</p>
+          <h2>第三版配置区</h2>
+          {thirdVersionError || thirdVersionValidationMessage || thirdVersionSaving ? (
+            <div className={`third-version-save ${thirdVersionError || thirdVersionValidationMessage ? "failed" : thirdVersionSaving ? "saving" : "saved"}`}>
+              <SlidersHorizontal size={16} className={thirdVersionSaving ? "spin" : ""} />
+              <span>{thirdVersionError || thirdVersionValidationMessage || "正在保存配置"}</span>
             </div>
           ) : null}
-          {ztripProbe && ztripProbe.checks.length > 0 ? (
-            <div className="same-flight-quotes">
-              {ztripProbe.checks.map((check) => (
-                <div className={`same-flight-quote ${check.outcome ?? "pending"}`} key={check.target}>
-                  <span>{check.target}</span>
-                  <strong>{pilotOutcomeLabel(check.outcome)}</strong>
-                  <small>{check.note ?? "等待验证"}</small>
-                  {check.error ? <em>{check.error}</em> : null}
-                  <div className="quote-links">
-                    {check.screenshotUrl ? (
-                      <a href={check.screenshotUrl} target="_blank" rel="noreferrer">
-                        <ExternalLink size={14} />
-                        网页截图
-                      </a>
-                    ) : null}
-                    {check.finalUrl ? (
-                      <a href={check.finalUrl} target="_blank" rel="noreferrer">
-                        <ExternalLink size={14} />
-                        平台页面
-                      </a>
-                    ) : null}
-                  </div>
-                </div>
+          <div className="config-grid">
+            <div className="field">
+              <label>酒店展示数量</label>
+              <div className="number-control">
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={thirdVersionOptions.hotelDisplayLimit}
+                onChange={(event) => void updateThirdVersionConfig({ hotelDisplayLimit: Number(event.currentTarget.value) })}
+              />
+                <span className="unit">家</span>
+              </div>
+            </div>
+            <div className="field">
+              <label>航班展示数量</label>
+              <div className="number-control">
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={thirdVersionOptions.flightDisplayLimit}
+                onChange={(event) => void updateThirdVersionConfig({ flightDisplayLimit: Number(event.currentTarget.value) })}
+              />
+                <span className="unit">条</span>
+              </div>
+            </div>
+            <div className="field wide">
+              <span className="field-label">生成模式</span>
+              <div className="segmented">
+              {(Object.keys(generationModeLabels) as ThirdVersionStrategyOptions["generationMode"][]).map((mode) => (
+                <button
+                  type="button"
+                  key={mode}
+                  aria-pressed={thirdVersionOptions.generationMode === mode}
+                  className={thirdVersionOptions.generationMode === mode ? "selected" : ""}
+                  onClick={() => void updateThirdVersionConfig({ generationMode: mode })}
+                >
+                  {generationModeLabels[mode]}
+                </button>
               ))}
-            </div>
-          ) : null}
-        </div>
-        <div className={`qingmao-candidate-panel ztrip-panel ${ztripFlight?.status ?? "idle"}`}>
-          <div className="candidate-head">
-            <div>
-              <span>{ztripFlightStatusLabel(ztripFlight?.status)}</span>
-              <b>在途航班样本</b>
-              <small>
-                {ztripFlight
-                  ? `${ztripFlight.route.origin} → ${ztripFlight.route.destination} · ${ztripFlight.route.travelDate}`
-                  : "广州 → 上海 · 未来 3 天后"}
-              </small>
-            </div>
-            <div className="candidate-counts">
-              <strong>{ztripFlight?.totalFlights ?? "--"}</strong>
-              <span>页面航班数</span>
-            </div>
-            <button
-              className="ghost-button active-link compact-action"
-              type="button"
-              onClick={runZtripFlightProbe}
-              disabled={operationLocked}
-            >
-              <Plane size={15} className={pilotBusy === "ztrip-flight" ? "spin" : ""} />
-              重新采集
-            </button>
-          </div>
-          {ztripFlight?.error ? (
-            <div className="pilot-error compact" role="alert">
-              <AlertTriangle size={16} />
-              {ztripFlight.error}
-            </div>
-          ) : null}
-          {ztripFlight?.selectedFlight ? (
-            <div className="same-flight-quotes">
-              <div className="same-flight-quote qingmao available">
-                <span>首条样本</span>
-                <strong>¥{ztripFlight.selectedFlight.price ?? "--"}</strong>
-                <small>
-                  {ztripFlight.selectedFlight.airline}{ztripFlight.selectedFlight.flightNo} · {ztripFlight.selectedFlight.departureTime} → {ztripFlight.selectedFlight.arrivalTime}
-                </small>
-                <div className="quote-links">
-                  {ztripFlight.screenshotUrl ? (
-                    <a href={ztripFlight.screenshotUrl} target="_blank" rel="noreferrer">
-                      <ExternalLink size={14} />
-                      网页截图
-                    </a>
-                  ) : null}
-                  {ztripFlight.finalUrl ? (
-                    <a href={ztripFlight.finalUrl} target="_blank" rel="noreferrer">
-                      <ExternalLink size={14} />
-                      平台页面
-                    </a>
-                  ) : null}
-                </div>
               </div>
             </div>
-          ) : null}
-          {ztripFlight && ztripFlight.candidates.length > 0 ? (
-            <div className="candidate-table">
-              <table>
-                <thead>
-                  <tr>
-                    <th>航班</th>
-                    <th>时间</th>
-                    <th>机场</th>
-                    <th>价格</th>
-                    <th>舱位</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {ztripFlight.candidates.slice(0, 6).map((candidate) => (
-                    <tr key={`ztrip-${candidate.flightNo}-${candidate.departureTime}`}>
-                      <td>
-                        <b>{candidate.airline}{candidate.flightNo}</b>
-                        <span>{candidate.aircraft}</span>
-                      </td>
-                      <td>
-                        <b>{candidate.departureTime} → {candidate.arrivalTime}</b>
-                        <span>{formatDuration(candidate.durationMinutes)}</span>
-                      </td>
-                      <td>
-                        <b>{candidate.originAirport}</b>
-                        <span>{candidate.destinationAirport}</span>
-                      </td>
-                      <td className="candidate-price">¥{candidate.price ?? "--"}</td>
-                      <td>
-                        <b>{candidate.discount || candidate.cabin || "待识别"}</b>
-                        <span>{candidate.meal}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </div>
-        <div className={`same-flight-panel ztrip-panel ${ztripHotel?.status ?? "idle"}`}>
-          <div className="candidate-head">
-            <div>
-              <span>{ztripHotelStatusLabel(ztripHotel?.status)}</span>
-              <b>在途酒店样本</b>
-              <small>
-                {ztripHotel
-                  ? `${ztripHotel.query.city} · ${ztripHotel.query.checkInDate} 至 ${ztripHotel.query.checkOutDate}`
-                  : "广州 · 明天入住 1 晚"}
-              </small>
-            </div>
-            <div className="candidate-counts">
-              <strong>{ztripHotel?.rates.length ?? "--"}</strong>
-              <span>大床有早餐</span>
-            </div>
-            <button
-              className="ghost-button active-link compact-action"
-              type="button"
-              onClick={runZtripHotelProbe}
-              disabled={operationLocked}
-            >
-              <Monitor size={15} className={pilotBusy === "ztrip-hotel" ? "spin" : ""} />
-              重新采集
-            </button>
-          </div>
-          {ztripHotel?.error ? (
-            <div className="pilot-error compact" role="alert">
-              <AlertTriangle size={16} />
-              {ztripHotel.error}
-            </div>
-          ) : null}
-          {ztripHotel?.selectedRate ? (
-            <div className="same-flight-quotes">
-              <div className="same-flight-quote qingmao available">
-                <span>{ztripHotel.selectedRate.hotelName}</span>
-                <strong>¥{ztripHotel.selectedRate.price ?? "--"}</strong>
-                <small>
-                  {ztripHotel.selectedRate.roomType} · {ztripHotel.selectedRate.bedType} · {ztripHotel.selectedRate.breakfast}
-                </small>
-                <div className="quote-links">
-                  {ztripHotel.screenshotUrl ? (
-                    <a href={ztripHotel.screenshotUrl} target="_blank" rel="noreferrer">
-                      <ExternalLink size={14} />
-                      网页截图
-                    </a>
-                  ) : null}
-                  {ztripHotel.finalUrl ? (
-                    <a href={ztripHotel.finalUrl} target="_blank" rel="noreferrer">
-                      <ExternalLink size={14} />
-                      平台页面
-                    </a>
-                  ) : null}
-                </div>
+            <div className={`field wide ${thirdVersionOptions.generationMode === "qingmao_advantage" ? "" : "disabled"}`}>
+              <label>青猫优势比例</label>
+              <div className="slider-row">
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                value={thirdVersionOptions.targetAdvantageRatio}
+                disabled={thirdVersionOptions.generationMode !== "qingmao_advantage"}
+                onChange={(event) => void updateThirdVersionConfig({ targetAdvantageRatio: Number(event.currentTarget.value) })}
+              />
+                <div className="percent-box">{percentLabel(thirdVersionOptions.targetAdvantageRatio)}</div>
               </div>
             </div>
-          ) : null}
-        </div>
-        <div className={`qingmao-candidate-panel ${qingmaoCandidates?.status ?? "idle"}`}>
-          <div className="candidate-head">
-            <div>
-              <span>{qingmaoCandidateStatusLabel(qingmaoCandidates?.status)}</span>
-              <b>青猫候选航班池</b>
-              <small>
-                {qingmaoCandidates
-                  ? `${qingmaoCandidates.route.origin} → ${qingmaoCandidates.route.destination} · ${qingmaoCandidates.route.travelDate}`
-                  : "广州 → 上海 · 未来 3 天后"}
-              </small>
-            </div>
-            <div className="candidate-counts">
-              <strong>{qingmaoCandidates?.totalFlights ?? "--"}</strong>
-              <span>页面航班数</span>
-            </div>
-            {qingmaoCandidates?.screenshotUrl ? (
-              <a href={qingmaoCandidates.screenshotUrl} target="_blank" rel="noreferrer">
-                <ExternalLink size={15} />
-                查看候选池截图
-              </a>
-            ) : null}
-          </div>
-          {qingmaoCandidates?.error ? (
-            <div className="pilot-error compact" role="alert">
-              <AlertTriangle size={16} />
-              {qingmaoCandidates.error}
-            </div>
-          ) : null}
-          {qingmaoCandidates && qingmaoCandidates.candidates.length > 0 ? (
-            <div className="candidate-table">
-              <table>
-                <thead>
-                  <tr>
-                    <th>航班</th>
-                    <th>时间</th>
-                    <th>机场</th>
-                    <th>价格</th>
-                    <th>舱位</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {qingmaoCandidates.candidates.slice(0, 6).map((candidate) => (
-                    <tr key={`${candidate.flightNo}-${candidate.departureTime}`}>
-                      <td>
-                        <b>{candidate.airline}{candidate.flightNo}</b>
-                        <span>{candidate.aircraft}{candidate.shared && !candidate.aircraft.includes("共享") ? " / 共享" : ""}</span>
-                      </td>
-                      <td>
-                        <b>{candidate.departureTime} → {candidate.arrivalTime}</b>
-                        <span>{formatDuration(candidate.durationMinutes)}</span>
-                      </td>
-                      <td>
-                        <b>{candidate.originAirport}</b>
-                        <span>{candidate.destinationAirport}</span>
-                      </td>
-                      <td className="candidate-price">¥{candidate.price ?? "--"}</td>
-                      <td>
-                        <b>{candidate.discount || candidate.cabin || "待识别"}</b>
-                        <span>{candidate.meal}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </div>
-        <div className={`same-flight-panel ${sameFlightComparison?.status ?? "idle"}`}>
-          <div className="candidate-head">
-            <div>
-              <span>{sameFlightStatusLabel(sameFlightComparison?.status)}</span>
-              <b>随机同航班比价</b>
-              <small>
-                {sameFlightComparison?.selectedFlight
-                  ? `${sameFlightComparison.selectedFlight.airline}${sameFlightComparison.selectedFlight.flightNo} · ${sameFlightComparison.route.travelDate}`
-                  : "从青猫候选池随机抽取一条航班，再查携程商旅与阿里商旅"}
-              </small>
-            </div>
-            <div className="candidate-counts">
-              <strong>{sameFlightComparison?.quotes.filter((quote) => quote.status === "available").length ?? "--"}</strong>
-              <span>平台已读取</span>
-            </div>
-            <button
-              className="ghost-button active-link compact-action"
-              type="button"
-              onClick={runSameFlightComparisonProbe}
-              disabled={operationLocked}
-            >
-              <Radar size={15} className={pilotBusy === "same-flight" ? "spin" : ""} />
-              再随机一次
-            </button>
-          </div>
-          {sameFlightComparison?.error ? (
-            <div className="pilot-error compact" role="alert">
-              <AlertTriangle size={16} />
-              {sameFlightComparison.error}
-            </div>
-          ) : null}
-          {sameFlightComparison && sameFlightComparison.quotes.length > 0 ? (
-            <div className="same-flight-quotes">
-              {sameFlightComparison.quotes.map((quote) => (
-                <div className={`same-flight-quote ${quote.platform === "青猫差旅" ? "qingmao" : ""} ${quote.status}`} key={quote.platform}>
-                  <span>{quote.platform}</span>
-                  <strong>{quotePriceLabel(quote)}</strong>
-                  <small>{quoteStatusLabel(quote.status)}</small>
-                  {quote.error ? <em>{quote.error}</em> : null}
-                  <div className="quote-links">
-                    {quote.screenshotUrl ? (
-                      <a href={quote.screenshotUrl} target="_blank" rel="noreferrer">
-                        <ExternalLink size={14} />
-                        网页截图
-                      </a>
-                    ) : null}
-                    {quote.finalUrl ? (
-                      <a href={quote.finalUrl} target="_blank" rel="noreferrer">
-                        <ExternalLink size={14} />
-                        平台页面
-                      </a>
-                    ) : null}
-                  </div>
-                </div>
+            <div className="field wide">
+              <span className="field-label">比价口径</span>
+              <div className="segmented three">
+              {(Object.keys(comparisonModeLabels) as ThirdVersionStrategyOptions["comparisonMode"][]).map((mode) => (
+                <button
+                  type="button"
+                  key={mode}
+                  aria-pressed={thirdVersionOptions.comparisonMode === mode}
+                  className={thirdVersionOptions.comparisonMode === mode ? "selected" : ""}
+                  onClick={() => void updateThirdVersionConfig({ comparisonMode: mode })}
+                >
+                  {comparisonModeLabels[mode]}
+                </button>
               ))}
+              </div>
             </div>
-          ) : null}
+            <div className={`field wide ${thirdVersionOptions.comparisonMode === "specified_platform" ? "" : "disabled"}`}>
+              <label>指定平台</label>
+              <select
+                value={thirdVersionOptions.specifiedPlatform ?? ""}
+                disabled={thirdVersionOptions.comparisonMode !== "specified_platform"}
+                onChange={(event) => {
+                  const specifiedPlatform = event.currentTarget.value as "" | NonNullable<ThirdVersionStrategyOptions["specifiedPlatform"]>;
+                  void updateThirdVersionConfig({ specifiedPlatform: specifiedPlatform || undefined });
+                }}
+              >
+                <option value="">请选择竞品平台</option>
+                {thirdVersionCompetitors.map((platform) => (
+                  <option key={platform} value={platform}>{platform}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </article>
+
+        <div className="side-stack">
+          <article className="status-card" aria-label="状态展示区">
+            <p className="section-label">Batch Status</p>
+            <h2>状态展示区</h2>
+            <div className="status-grid">
+              <div className={`metric-card ${metricCardTone(hotelFull)}`}>
+                <span className="mini-label">酒店实际展示数</span>
+                <strong>{hotelDisplayed}/{thirdVersionOptions.hotelDisplayLimit}</strong>
+                <small>未满量时仍可导出</small>
+              </div>
+              <div className={`metric-card ${metricCardTone(flightFull)}`}>
+                <span className="mini-label">航班实际展示数</span>
+                <strong>{flightDisplayed}/{thirdVersionOptions.flightDisplayLimit}</strong>
+                <small>国内和国际合计展示</small>
+              </div>
+              <div className={`metric-card ${metricCardTone(hotelTargetMet || thirdVersionOptions.generationMode === "real_random")}`}>
+                <span className="mini-label">酒店青猫优势比例</span>
+                <strong>{percentLabel(hotelAdvantageRatio)}</strong>
+                <small>{thirdVersionOptions.generationMode === "qingmao_advantage" ? `目标 ${percentLabel(thirdVersionOptions.targetAdvantageRatio)}` : "真实随机模式仅展示比例"}</small>
+              </div>
+              <div className={`metric-card ${metricCardTone(flightTargetMet || thirdVersionOptions.generationMode === "real_random")}`}>
+                <span className="mini-label">航班青猫优势比例</span>
+                <strong>{percentLabel(flightAdvantageRatio)}</strong>
+                <small>{thirdVersionOptions.generationMode === "qingmao_advantage" ? `目标 ${percentLabel(thirdVersionOptions.targetAdvantageRatio)}` : "真实随机模式仅展示比例"}</small>
+              </div>
+              <div className={`metric-card ${metricCardTone(fullState)}`}>
+                <span className="mini-label">是否满量</span>
+                <strong>{fullState ? "满量" : "未满量"}</strong>
+                <small>酒店和航班分别判断</small>
+              </div>
+              <div className={`metric-card ${targetState === false ? "warn" : "ok"}`}>
+                <span className="mini-label">是否达标</span>
+                <strong>{targetState === null ? "不判定" : targetMetBadgeLabel(targetState)}</strong>
+                <small>{thirdVersionOptions.generationMode === "qingmao_advantage" ? "青猫优势模式启用" : "青猫优势模式启用后判定"}</small>
+              </div>
+            </div>
+          </article>
+
+          <article className="preview-card" aria-label="导出预览">
+            <p className="section-label">Export Preview</p>
+            <h2>导出预览</h2>
+            <div className="file-list">
+              <div className="file-row">
+                <code>{exportExcelName}</code>
+                <span>Excel</span>
+              </div>
+              <div className="file-row">
+                <code>{exportZipName}</code>
+                <span>离线包</span>
+              </div>
+            </div>
+          </article>
         </div>
-        </details>
       </section>
 
       {error ? (
@@ -1389,55 +1371,36 @@ export function App() {
 
       {view ? (
         <>
-          <section className="metric-grid" aria-label="采集结果概览">
-            <div className="metric-item">
-              <span>总样本</span>
-              <strong>{view.flightCount + view.hotelCount}</strong>
-              <small>航班 {view.flightCount} / 酒店 {view.hotelCount}</small>
-            </div>
-            <div className="metric-item">
-              <span>青猫低于竞品</span>
-              <strong>{view.advantageCount + view.hotelAdvantageCount}</strong>
-              <small>航班 {view.advantageCount} / 酒店 {view.hotelAdvantageCount}</small>
-            </div>
-            <div className="metric-item">
-              <span>青猫高于对比口径</span>
-              <strong>{view.higherThanLowestCount + view.hotelHigherThanLowestCount}</strong>
-              <small>航班 {view.higherThanLowestCount} / 酒店 {view.hotelHigherThanLowestCount}</small>
-            </div>
-            <div className="metric-item">
-              <span>证据入口</span>
-              <strong>{view.evidenceCount}</strong>
-              <small>航班与酒店四平台留痕</small>
-            </div>
-          </section>
-
-          <section className="data-section">
-            <div className="section-head">
+          <section className="detail-card" aria-label="当前批次明细">
+            <div className="detail-head">
               <div>
-                <p className="eyebrow"><span className="section-dot" /> Current Batch</p>
+                <p className="section-label">Current Batch</p>
                 <h2>当前批次明细</h2>
-                <p className="section-subtitle">对比青猫差旅与主流商旅平台价格，助力企业差旅成本优化</p>
+                <p>客户主表和离线包只展示当前比价口径；内部留痕保留四平台原始价格、截图索引和失败原因。</p>
                 <div className="section-meta">
-                  <span><CalendarDays size={15} /> {scope === "国际" ? "国际航班" : scope === "国内" ? "国内航班" : "国内 / 国际航班"}</span>
+                  <span><CalendarDays size={15} /> 国内 / 国际航班</span>
                   <span>数据日期：{view.samples[0]?.travelDate ?? "暂无"}</span>
                 </div>
               </div>
-              <div className="segmented-control" aria-label="航线范围筛选">
-                {scopeFilters.map((filter) => (
-                  <button
-                    key={filter}
-                    type="button"
-                    className={scope === filter ? "selected" : ""}
-                    onClick={() => setScope(filter)}
-                  >
-                    {filter}
-                  </button>
-                ))}
+              <div className="table-tabs" role="tablist" aria-label="明细切换">
+                <button
+                  type="button"
+                  className={activeDetailTab === "flight" ? "active" : ""}
+                  onClick={() => setActiveDetailTab("flight")}
+                >
+                  航班明细
+                </button>
+                <button
+                  type="button"
+                  className={activeDetailTab === "hotel" ? "active" : ""}
+                  onClick={() => setActiveDetailTab("hotel")}
+                >
+                  酒店明细
+                </button>
               </div>
             </div>
 
-            <div className="table-frame">
+            <div className={activeDetailTab === "flight" ? "table-wrap" : "table-wrap hidden"} id="flightTable">
               <table className="batch-table">
                 <colgroup>
                   <col className="route-column" />
@@ -1452,16 +1415,16 @@ export function App() {
                 <thead>
                   <tr>
                     <th>航线</th>
-                    <th>航班</th>
+                    <th>日期 / 航班</th>
                     {comparisonPlatforms.map((platform) => (
                       <th key={platform}><span className={`platform-head ${platformHeadClass(platform)}`}>{platform}</span></th>
                     ))}
-                    <th>青猫差额</th>
-                    <th>结论</th>
+                    <th>当前口径结论</th>
+                    <th>网页截图</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleSamples.map((sample) => (
+                  {displayedFlightRows.map((sample) => (
                     <tr key={sample.id}>
                       <td>
                         <div className="route-cell">
@@ -1473,7 +1436,8 @@ export function App() {
                         </div>
                       </td>
                       <td>
-                        <b>{sample.flightNo}</b>
+                        <b>{sample.travelDate}</b>
+                        <span>{sample.flightNo} · {sample.cabin}</span>
                         <span>{sample.airline} / {sample.transferLabel} / {sample.durationLabel}</span>
                       </td>
                       {sample.quotes.map((quote) => (
@@ -1489,40 +1453,30 @@ export function App() {
                           {quote.status !== quote.priceLabel ? <span>{quote.status}</span> : null}
                         </td>
                       ))}
-                      <td className={`gap-cell ${sample.gapTone}`}>
-                        <b className="gap-badge">
-                          {sample.gapLabel}
-                        </b>
-                        <span>最低价平台：{sample.lowestPlatform}</span>
+                      <td>
+                        <span className={sample.gapTone === "higher" ? "gap-bad" : "gap-good"}>{sample.gapLabel}</span>
+                        <span>{sample.conclusion}</span>
                       </td>
                       <td>
-                        <div className={`conclusion-cell ${sample.gapTone}`}>
-                          <CircleCheckBig size={16} />
-                          {sample.conclusion}
-                        </div>
+                        <span className={`badge ${sample.quotes.filter((quote) => quote.evidencePath).length < 4 ? "warn" : "neutral"}`}>
+                          {sample.quotes.filter((quote) => quote.evidencePath).length} 张
+                        </span>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
-          </section>
-
-          {view.hotels.length > 0 ? (
-            <section className="data-section hotel-data-section">
-              <div className="section-head">
-                <div>
-                  <p className="eyebrow"><span className="section-dot hotel-dot" /> Hotel Batch</p>
-                  <h2>酒店采集明细</h2>
-                  <p className="section-subtitle">按默认展示口径呈现四平台酒店价格，销售交付包和 Excel 也按这个口径生成</p>
-                  <div className="section-meta">
-                    <span><Building2 size={15} /> 酒店 {view.hotelCount} 家</span>
-                    <span>默认口径：优先完整可比、青猫优势最大的房型早餐组合</span>
-                  </div>
+              {visibleSamples.length > 3 ? (
+                <div className="table-footer">
+                  <button className="expand-detail" type="button" onClick={() => setFlightDetailExpanded((expanded) => !expanded)}>
+                    {flightDetailExpanded ? "收起航班明细" : `展开更多航班明细（还有 ${hiddenFlightRowCount} 条）`}
+                  </button>
                 </div>
-              </div>
+              ) : null}
+            </div>
 
-              <div className="table-frame">
+            <div className={activeDetailTab === "hotel" ? "table-wrap" : "table-wrap hidden"} id="hotelTable">
+              {hotelRows.length > 0 ? (
                 <table className="batch-table hotel-table">
                   <colgroup>
                     <col className="hotel-column" />
@@ -1538,15 +1492,15 @@ export function App() {
                     <tr>
                       <th>酒店</th>
                       <th>日期 / 口径</th>
-                      {comparisonPlatforms.map((platform) => (
-                        <th key={platform}><span className={`platform-head ${platformHeadClass(platform)}`}>{platform}</span></th>
-                      ))}
-                      <th>青猫差额</th>
-                      <th>结论</th>
+                    {comparisonPlatforms.map((platform) => (
+                      <th key={platform}><span className={`platform-head ${platformHeadClass(platform)}`}>{platform}</span></th>
+                    ))}
+                      <th>当前口径结论</th>
+                      <th>网页截图</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {view.hotels.map((hotel) => (
+                    {displayedHotelRows.map((hotel) => (
                       <tr key={hotel.id}>
                         <td>
                           <div className="route-cell hotel-cell">
@@ -1575,45 +1529,152 @@ export function App() {
                             {quote.status !== quote.priceLabel ? <span>{quote.status}</span> : null}
                           </td>
                         ))}
-                        <td className={`gap-cell ${hotel.gapTone}`}>
-                          <b className="gap-badge">{hotel.gapLabel}</b>
-                          <span>最低价平台：{hotel.lowestPlatform}</span>
+                        <td>
+                          <span className={hotel.gapTone === "higher" ? "gap-bad" : "gap-good"}>{hotel.gapLabel}</span>
+                          <span>{hotel.conclusion}</span>
+                          <span>{hotel.salesDisplayReason}</span>
                         </td>
                         <td>
-                          <div className={`conclusion-cell ${hotel.gapTone}`}>
-                            {hotel.salesDisplayEligible ? <CircleCheckBig size={16} /> : <AlertTriangle size={16} />}
-                            <span>
-                              {hotel.conclusion}
-                              <small>{hotel.salesDisplayReason}</small>
-                            </span>
-                          </div>
+                          <span className={`badge ${hotel.quotes.filter((quote) => quote.evidencePath).length < 4 ? "warn" : "neutral"}`}>
+                            {hotel.quotes.filter((quote) => quote.evidencePath).length} 张
+                          </span>
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-              </div>
-            </section>
-          ) : null}
-
-          <section className="trace-strip">
-            <Clock3 size={18} />
-            <span>批次 {view.batchId}</span>
-            <span>生成时间 {formatDateTime(view.generatedAt)}</span>
-            <span>成功 {view.successCount} / 失败 {view.failedCount}</span>
-            <Download size={18} />
+              ) : (
+                <div className="empty-detail">
+                  <Building2 size={24} />
+                  <span>当前批次没有酒店明细。</span>
+                </div>
+              )}
+              {hotelRows.length > 3 ? (
+                <div className="table-footer">
+                  <button className="expand-detail" type="button" onClick={() => setHotelDetailExpanded((expanded) => !expanded)}>
+                    {hotelDetailExpanded ? "收起酒店明细" : `展开更多酒店明细（还有 ${hiddenHotelRowCount} 家）`}
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </section>
 
-          {view.failureNotes.length > 0 ? (
-            <section className="failure-notes" aria-label="替换航线原因">
-              <b>替换航线记录</b>
-              {view.failureNotes.map((note) => (
-                <span key={note}>{note}</span>
-              ))}
-            </section>
-          ) : null}
+          <section className="advanced-card" aria-label="问题排查区">
+            <details>
+              <summary>
+                <div>
+                  <p className="section-label">Diagnostics</p>
+                  <h2>问题排查区（平时不用）</h2>
+                  <p className="diagnostic-copy">完整真实采集失败时才打开这里。它用来拆开排查是哪一段坏了：登录态、航班链路、酒店候选池，还是某个平台页面结构变化。</p>
+                </div>
+                <span className="badge neutral">默认折叠</span>
+              </summary>
+              <div className="advanced-actions">
+                <button className="tiny-button" type="button" onClick={runPilotProbe} disabled={operationLocked}>
+                  {pilotBusy === "probe" ? "后台探测中" : "检查四平台登录态"}
+                </button>
+                <button className="tiny-button" type="button" onClick={collectRealDomestic} disabled={operationLocked || loading}>
+                  {realCollecting ? "航班链路采集中" : "只跑航班采集链路"}
+                </button>
+                <button className="tiny-button" type="button" onClick={runZtripHotelProbe} disabled={operationLocked}>
+                  {pilotBusy === "ztrip-hotel" ? "酒店候选池采集中" : "只跑酒店候选池"}
+                </button>
+                <button className="tiny-button" type="button" onClick={runZtripProbe} disabled={operationLocked}>
+                  {pilotBusy === "ztrip" ? "单平台验证中" : "单平台故障验证"}
+                </button>
+                <button className="tiny-button" type="button" onClick={cleanupBrowserPages} disabled={operationLocked}>
+                  {pilotBusy === "cleanup" ? "正在清理" : "清理采集窗口"}
+                </button>
+                <button className="tiny-button" type="button" onClick={regenerateArtifacts} disabled={!batch || operationLocked || loading}>
+                  {artifactRegenerationRunning ? "正在重新生成" : "重新生成交付包"}
+                </button>
+                <button className="tiny-button" type="button" onClick={runQingmaoCandidateProbe} disabled={operationLocked}>
+                  {pilotBusy === "qingmao-candidates" ? "读取中" : "读取青猫候选池"}
+                </button>
+                <button className="tiny-button" type="button" onClick={runSameFlightComparisonProbe} disabled={operationLocked}>
+                  {pilotBusy === "same-flight" ? "查询中" : "随机同航班比价"}
+                </button>
+              </div>
+              {pilotError ? (
+                <div className="pilot-error diagnostic-error" role="alert">
+                  <AlertTriangle size={16} />
+                  {pilotError}
+                </div>
+              ) : null}
+              <div className="diagnostic-status-grid">
+                <div>
+                  <span>登录态检查</span>
+                  <b>{pilot ? pilotStatusLabel(pilot.status) : "读取中"}</b>
+                  <small>{connection.title}</small>
+                </div>
+                <div>
+                  <span>青猫候选池</span>
+                  <b>{qingmaoCandidateStatusLabel(qingmaoCandidates?.status)}</b>
+                  <small>{qingmaoCandidates?.message ?? "未单独读取"}</small>
+                </div>
+                <div>
+                  <span>随机同航班</span>
+                  <b>{sameFlightStatusLabel(sameFlightComparison?.status)}</b>
+                  <small>{sameFlightComparison?.message ?? "未单独比价"}</small>
+                </div>
+                <div>
+                  <span>在途商旅</span>
+                  <b>{ztripStatusLabel(ztripProbe?.status)}</b>
+                  <small>{ztripProbe?.message ?? "未单独验证"}</small>
+                </div>
+              </div>
+            </details>
+          </section>
+
+          <section className={`failure-trace-panel ${failureTraceOpen ? "" : "hidden"}`} id="failureTracePanel" aria-label="失败留痕面板">
+            <div className="detail-head">
+              <div>
+                <p className="section-label">Failure Trace</p>
+                <h2>失败留痕</h2>
+                <p>这里放不进入客户交付物的失败记录。采集负责人可以看失败原因、当时页面截图或网页快照，再决定放弃、替换候选或重试。</p>
+              </div>
+              <button className="secondary-action" type="button" onClick={() => setFailureTraceOpen(false)}>收起留痕</button>
+            </div>
+            <div className="trace-summary">
+              <div className="trace-stat"><span>失败记录</span><strong>{failureRecordCount}</strong></div>
+              <div className="trace-stat"><span>已保存截图</span><strong>{failureScreenshotCount}</strong></div>
+              <div className="trace-stat"><span>HTML 快照</span><strong>{failureHtmlSnapshotCount}</strong></div>
+              <div className="trace-stat"><span>待人工复核</span><strong>{pendingManualReviewCount}</strong></div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>对象</th>
+                    <th>平台 / 阶段</th>
+                    <th>失败原因</th>
+                    <th>痕迹文件</th>
+                    <th>处理状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {failureTraceTableRows.map((note, index) => (
+                    <tr key={`${note}-${index}`}>
+                      <td><b>{hasFailureTraceRows ? failureTraceObjectLabel(note) : "当前批次"}</b><span>后台留痕</span></td>
+                      <td><b>采集链路</b><span>候选处理</span></td>
+                      <td><span>{note}</span></td>
+                      <td>
+                        <div className="trace-actions">
+                          <button className="trace-action" type="button" disabled>查看截图</button>
+                          <button className="trace-action" type="button" disabled>查看网页快照</button>
+                        </div>
+                      </td>
+                      <td><span className={hasFailureTraceRows ? "trace-status done" : "trace-status"}>{hasFailureTraceRows ? "已入留痕" : "暂无记录"}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
         </>
       ) : null}
+
     </main>
   );
 }

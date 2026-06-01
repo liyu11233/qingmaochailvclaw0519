@@ -10,7 +10,7 @@ import {
   resolveHotelDisplayDecision,
   resolveHotelPrimaryRatePlan
 } from "../../src/domain/hotelRatePlans";
-import type { CollectionBatch, HotelGroup, HotelSample, PlatformName, PlatformQuote } from "../../src/domain/types";
+import type { CollectionBatch, HotelGroup, HotelSample, PlatformName, PlatformQuote, PriceComparisonOptions } from "../../src/domain/types";
 
 const zipExec = promisify(execFile);
 const PLATFORMS: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"];
@@ -60,7 +60,7 @@ function formatDisplayTime(value: string) {
 
 function formatPrice(quote: PlatformQuote | undefined) {
   if (!quote) return "暂无";
-  return typeof quote.price === "number" ? `¥${quote.price.toLocaleString("zh-CN")}` : quote.status;
+  return typeof quote.price === "number" ? `¥${quote.price.toLocaleString("zh-CN")}` : "暂无";
 }
 
 function formatHotelPrice(quote: PlatformQuote | undefined) {
@@ -81,6 +81,19 @@ function formatDuration(minutes: number) {
 
 function quoteByPlatform(quotes: PlatformQuote[], platform: PlatformName) {
   return quotes.find((quote) => quote.platform === platform);
+}
+
+function comparisonOptions(batch: CollectionBatch): PriceComparisonOptions {
+  return {
+    comparisonMode: batch.thirdVersion?.options.comparisonMode,
+    specifiedPlatform: batch.thirdVersion?.options.specifiedPlatform
+  };
+}
+
+function comparisonModeLabel(options: PriceComparisonOptions) {
+  if (options.comparisonMode === "external_sales") return "对外销售";
+  if (options.comparisonMode === "specified_platform") return "指定平台";
+  return "内部讨论";
 }
 
 function primaryRatePlan(hotel: HotelSample) {
@@ -222,20 +235,21 @@ function renderHomeHotelRatePreview(hotel: HotelSample) {
 
 function renderIndex(batch: CollectionBatch) {
   const displayTime = formatDisplayTime(batch.generatedAt);
+  const options = comparisonOptions(batch);
   const hotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
   const flightAdvantageSamples = batch.samples.filter((sample) => {
-    const summary = summarizeFlight(sample);
+    const summary = summarizeFlight(sample, options);
     return summary.qingmaoGap !== null && summary.qingmaoGap < 0;
   });
   const hotelAdvantageSamples = hotels.filter((hotel) => {
-    const summary = summarizeQuoteSet(primaryRatePlan(hotel).quotes);
+    const summary = summarizeQuoteSet(primaryRatePlan(hotel).quotes, options);
     return summary.qingmaoGap !== null && summary.qingmaoGap < 0;
   });
   const featuredFlight = deterministicPick(flightAdvantageSamples, batch.id) ?? batch.samples[0];
-  const featuredFlightSummary = featuredFlight ? summarizeFlight(featuredFlight) : null;
+  const featuredFlightSummary = featuredFlight ? summarizeFlight(featuredFlight, options) : null;
   const featuredHotel = deterministicPick(hotelAdvantageSamples, `${batch.id}-hotel`) ?? hotels[0];
   const featuredHotelPlan = featuredHotel ? primaryRatePlan(featuredHotel) : null;
-  const featuredHotelSummary = featuredHotelPlan ? summarizeQuoteSet(featuredHotelPlan.quotes) : null;
+  const featuredHotelSummary = featuredHotelPlan ? summarizeQuoteSet(featuredHotelPlan.quotes, options) : null;
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -250,7 +264,7 @@ ${rootHead("青猫差旅价格对比离线包")}
       <div class="home-copy">
         <h1>青猫差旅价格对比</h1>
         <p>销售现场可分别查看航班与酒店价格。</p>
-        <div class="home-rules"><span>同一航班 · 同一日期 · 同一舱位</span><i></i><span>同一酒店 · 同一日期 · 同一床型早餐口径</span></div>
+        <div class="home-rules"><span>同一航班 · 同一日期 · 同一舱位</span><i></i><span>同一酒店 · 同一日期 · 同一床型早餐口径</span><i></i><span>当前口径：${escapeHtml(comparisonModeLabel(options))}</span></div>
       </div>
       <aside class="home-stamp">
         <span>数据更新时间</span>
@@ -316,18 +330,21 @@ function renderFlightQuoteRows(quotes: PlatformQuote[]) {
 
 function renderFlights(batch: CollectionBatch) {
   const displayTime = formatDisplayTime(batch.generatedAt);
+  const options = comparisonOptions(batch);
   const advantageSamples = batch.samples.filter((sample) => {
-    const summary = summarizeFlight(sample);
+    const summary = summarizeFlight(sample, options);
     return summary.qingmaoGap !== null && summary.qingmaoGap < 0;
   });
-  const gaps = advantageSamples.map((sample) => Math.abs(summarizeFlight(sample).qingmaoGap ?? 0));
+  const gaps = advantageSamples.map((sample) => Math.abs(summarizeFlight(sample, options).qingmaoGap ?? 0));
   const averageAdvantage = gaps.length ? Math.round(gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length) : 0;
-  const maxAdvantageSample = advantageSamples.sort((a, b) => Math.abs(summarizeFlight(b).qingmaoGap ?? 0) - Math.abs(summarizeFlight(a).qingmaoGap ?? 0))[0];
-  const maxAdvantage = Math.abs(summarizeFlight(maxAdvantageSample ?? batch.samples[0]).qingmaoGap ?? 0);
+  const maxAdvantageSample = advantageSamples.sort((a, b) => Math.abs(summarizeFlight(b, options).qingmaoGap ?? 0) - Math.abs(summarizeFlight(a, options).qingmaoGap ?? 0))[0];
+  const maxAdvantage = Math.abs(summarizeFlight(maxAdvantageSample ?? batch.samples[0], options).qingmaoGap ?? 0);
   const cards = batch.samples
     .map((sample) => {
-      const summary = summarizeFlight(sample);
-      const displayComparisonLabel = salesComparisonLabel(sample.quotes, summary);
+      const summary = summarizeFlight(sample, options);
+      const displayComparisonLabel = batch.thirdVersion
+        ? summary.qingmaoGap === null ? summary.conclusion : summary.comparisonLabel
+        : salesComparisonLabel(sample.quotes, summary);
       return `<article class="flight-record">
         <section class="flight-info">
           <h2>${escapeHtml(sample.origin)} - ${escapeHtml(sample.destination)}</h2>
@@ -364,7 +381,7 @@ ${sharedHead("航班价格对比")}
       <div>
         <p class="eyebrow">数据整理时间：${escapeHtml(displayTime)}</p>
         <h1>青猫差旅航班价格对比</h1>
-        <p>同一航班 · 同一日期 · 同一舱位</p>
+        <p>同一航班 · 同一日期 · 同一舱位 · 当前口径：${escapeHtml(comparisonModeLabel(options))}</p>
       </div>
       <div class="compare-visual" aria-label="四平台同航班价格动态示意">
         <div class="compare-orbit">
@@ -382,7 +399,7 @@ ${sharedHead("航班价格对比")}
     </header>
     <section class="flight-stats">
       <div><span>青猫价格更优航班</span><strong>${advantageSamples.length} / ${batch.samples.length}</strong><small>${batch.samples.length ? Math.round((advantageSamples.length / batch.samples.length) * 100) : 0}%</small></div>
-      <div><span>平均优势金额</span><strong>¥${averageAdvantage}</strong><small>按竞品最低价口径</small></div>
+      <div><span>平均优势金额</span><strong>¥${averageAdvantage}</strong><small>${batch.thirdVersion ? "按当前口径" : "按竞品最低价口径"}</small></div>
       <div><span>最大优势金额</span><strong>¥${formatGapAmount(maxAdvantage)}</strong><small>${maxAdvantageSample ? `${maxAdvantageSample.origin}-${maxAdvantageSample.destination} ${maxAdvantageSample.flightNo}` : "暂无"}</small></div>
     </section>
     <div class="flight-table-head"><span>航班信息</span><span>平台价格对比（含税价）</span><span>价格优势</span></div>
@@ -392,14 +409,14 @@ ${sharedHead("航班价格对比")}
 </html>`;
 }
 
-function renderHotelSummary(hotels: HotelSample[]) {
+function renderHotelSummary(hotels: HotelSample[], options: PriceComparisonOptions = {}) {
   const primaryPlans = hotels.map(primaryRatePlan);
   const prices = primaryPlans.flatMap((plan) => plan.quotes.filter((quote) => quote.available && typeof quote.price === "number").map((quote) => quote.price as number));
   const qingmaoAdvantages = hotels.filter((hotel) => {
-    const summary = summarizeQuoteSet(primaryRatePlan(hotel).quotes);
+    const summary = summarizeQuoteSet(primaryRatePlan(hotel).quotes, options);
     return summary.qingmaoGap !== null && summary.qingmaoGap < 0;
   });
-  const savings = qingmaoAdvantages.map((hotel) => Math.abs(summarizeQuoteSet(primaryRatePlan(hotel).quotes).qingmaoGap ?? 0));
+  const savings = qingmaoAdvantages.map((hotel) => Math.abs(summarizeQuoteSet(primaryRatePlan(hotel).quotes, options).qingmaoGap ?? 0));
   const avgSaving = savings.length ? Math.round(savings.reduce((sum, value) => sum + value, 0) / savings.length) : 0;
   return {
     lowest: prices.length ? Math.min(...prices) : 0,
@@ -420,7 +437,7 @@ function scopedRatePlan(hotel: HotelSample, planKey: string) {
   return hotel.ratePlans.find((ratePlan) => ratePlan.label === planKey);
 }
 
-function summarizeHotelMetrics(hotels: HotelSample[], planKey: string): HotelMetricSummary {
+function summarizeHotelMetrics(hotels: HotelSample[], planKey: string, options: PriceComparisonOptions = {}): HotelMetricSummary {
   const completePlans = hotels
     .map((hotel) => scopedRatePlan(hotel, planKey))
     .filter((ratePlan): ratePlan is HotelSample["ratePlans"][number] => Boolean(ratePlan))
@@ -428,7 +445,7 @@ function summarizeHotelMetrics(hotels: HotelSample[], planKey: string): HotelMet
   const prices = completePlans.flatMap((ratePlan) =>
     ratePlan.quotes.flatMap((quote) => (quote.available && typeof quote.price === "number" ? [quote.price] : []))
   );
-  const summaries = completePlans.map((ratePlan) => summarizeQuoteSet(ratePlan.quotes));
+  const summaries = completePlans.map((ratePlan) => summarizeQuoteSet(ratePlan.quotes, options));
   const savings = summaries.flatMap((summary) => (summary.lowestPlatform === "青猫差旅" && typeof summary.qingmaoGap === "number" && summary.qingmaoGap < 0 ? [Math.abs(summary.qingmaoGap)] : []));
   const qingmaoLowestCount = summaries.filter((summary) => summary.lowestPlatform === "青猫差旅").length;
 
@@ -440,7 +457,7 @@ function summarizeHotelMetrics(hotels: HotelSample[], planKey: string): HotelMet
   };
 }
 
-function buildHotelMetricsByGroup(hotels: HotelSample[], groups: HotelGroup[], rateLabels: string[]) {
+function buildHotelMetricsByGroup(hotels: HotelSample[], groups: HotelGroup[], rateLabels: string[], options: PriceComparisonOptions = {}) {
   const planKeys = [DEFAULT_RATE_PLAN_KEY, ...rateLabels];
 
   return Object.fromEntries(
@@ -448,7 +465,7 @@ function buildHotelMetricsByGroup(hotels: HotelSample[], groups: HotelGroup[], r
       const groupHotels = hotels.filter((hotel) => hotel.group === group);
       return [
         group,
-        Object.fromEntries(planKeys.map((planKey) => [planKey, summarizeHotelMetrics(groupHotels, planKey)]))
+        Object.fromEntries(planKeys.map((planKey) => [planKey, summarizeHotelMetrics(groupHotels, planKey, options)]))
       ];
     })
   );
@@ -476,23 +493,30 @@ function renderCompactRatePlan(ratePlan: HotelSample["ratePlans"][number]) {
   </div>`;
 }
 
-function renderHotelCard(hotel: HotelSample, index: number) {
+function hotelCoverImageFileName(hotel: HotelSample) {
+  const extension = path.extname(hotel.coverImagePath ?? "").toLowerCase();
+  return [".png", ".jpg", ".jpeg", ".webp"].includes(extension) ? `hotel-cover${extension}` : "hotel-cover.jpg";
+}
+
+function renderHotelCard(hotel: HotelSample, index: number, options: PriceComparisonOptions, thirdVersionActive: boolean) {
   const coverImage = hotel.coverImageStatus === "saved" && hotel.coverImagePath
-    ? `<figure class="hotel-photo"><img src="../covers/${escapeHtml(hotel.id)}/hotel-cover.jpg" alt="${escapeHtml(hotel.hotelName)}酒店封面图" /><figcaption>${escapeHtml(hotel.brand)}</figcaption></figure>`
+    ? `<figure class="hotel-photo"><img src="../covers/${escapeHtml(hotel.id)}/${escapeHtml(hotelCoverImageFileName(hotel))}" alt="${escapeHtml(hotel.hotelName)}酒店封面图" /><figcaption>${escapeHtml(hotel.brand)}</figcaption></figure>`
     : `<figure class="hotel-photo"><img src="../assets/hotel-photo.jpg" alt="${escapeHtml(hotel.hotelName)}酒店展示图" /><figcaption>${escapeHtml(hotel.brand)}</figcaption></figure>`;
   return `<article class="hotel-record">
     <div class="hotel-rank">${index + 1}</div>
     ${coverImage}
     <section class="hotel-content">
-      ${hotel.ratePlans.map((ratePlan) => renderHotelPlanView(hotel, ratePlan.label)).join("")}
+      ${hotel.ratePlans.map((ratePlan) => renderHotelPlanView(hotel, ratePlan.label, options, thirdVersionActive)).join("")}
     </section>
   </article>`;
 }
 
-function renderHotelPlanView(hotel: HotelSample, activeLabel: string) {
+function renderHotelPlanView(hotel: HotelSample, activeLabel: string, options: PriceComparisonOptions, thirdVersionActive: boolean) {
   const primary = hotel.ratePlans.find((ratePlan) => ratePlan.label === activeLabel) ?? primaryRatePlan(hotel);
-  const summary = summarizeQuoteSet(primary.quotes);
-  const displayComparisonLabel = salesComparisonLabel(primary.quotes, summary);
+  const summary = summarizeQuoteSet(primary.quotes, options);
+  const displayComparisonLabel = thirdVersionActive
+    ? summary.qingmaoGap === null ? summary.conclusion : summary.comparisonLabel
+    : salesComparisonLabel(primary.quotes, summary);
   const secondaryPlans = hotel.ratePlans.filter((ratePlan) => ratePlan.label !== primary.label);
   const primaryQuotes = PLATFORMS.map((platform) => quoteByPlatform(primary.quotes, platform));
   const isDefault = primary.label === primaryRatePlan(hotel).label;
@@ -521,6 +545,7 @@ function renderHotelPlanView(hotel: HotelSample, activeLabel: string) {
 
 function renderHotels(batch: CollectionBatch) {
   const displayTime = formatDisplayTime(batch.generatedAt);
+  const options = comparisonOptions(batch);
   const hotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
   const groups = GROUP_ORDER.filter((group) => hotels.some((hotel) => hotel.group === group));
   const defaultGroup = groups[0];
@@ -528,7 +553,7 @@ function renderHotels(batch: CollectionBatch) {
   const checkIn = hotels[0]?.checkInDate ?? "";
   const checkOut = hotels[0]?.checkOutDate ?? "";
   const rateLabels = HOTEL_DISPLAY_RATE_PLAN_PRIORITY.filter((label) => hotels.some((hotel) => hotel.ratePlans.some((ratePlan) => ratePlan.label === label)));
-  const hotelMetrics = buildHotelMetricsByGroup(hotels, groups, rateLabels);
+  const hotelMetrics = buildHotelMetricsByGroup(hotels, groups, rateLabels, options);
   const firstMetric = initialMetric(hotelMetrics, defaultGroup);
   const tabs = groups
     .map((group, index) => `<button type="button" class="${index === 0 ? "active" : ""}" data-group="${escapeHtml(group)}">${escapeHtml(GROUP_LABEL[group])}</button>`)
@@ -537,7 +562,7 @@ function renderHotels(batch: CollectionBatch) {
     .map((group, index) => {
       const groupHotels = hotels.filter((hotel) => hotel.group === group);
       return `<section class="hotel-group-panel ${index === 0 ? "active" : ""}" data-group="${escapeHtml(group)}">
-        <div class="hotel-records">${groupHotels.map((hotel, hotelIndex) => renderHotelCard(hotel, hotelIndex)).join("")}</div>
+        <div class="hotel-records">${groupHotels.map((hotel, hotelIndex) => renderHotelCard(hotel, hotelIndex, options, Boolean(batch.thirdVersion))).join("")}</div>
       </section>`;
     })
     .join("");
@@ -558,6 +583,7 @@ ${sharedHead("酒店价格对比")}
         <span>数据整理时间：${escapeHtml(displayTime)}</span>
         <span>入住 ${escapeHtml(checkIn)} · 离店 ${escapeHtml(checkOut)} · 1 间夜</span>
         <span>同一酒店 · 同一日期 · 同一床型早餐口径</span>
+        <span>当前口径：${escapeHtml(comparisonModeLabel(options))}</span>
         <div class="rate-selector" aria-label="选择主对比口径">
           <b>主对比口径</b>
           <button type="button" class="active" data-plan="__default">推荐口径</button>
@@ -743,7 +769,7 @@ async function copyStaticAsset(packageDir: string, filename: string) {
 async function materializeHotelCoverImages(batch: CollectionBatch, packageDir: string) {
   for (const hotel of batch.hotels ?? []) {
     if (hotel.coverImageStatus !== "saved" || !hotel.coverImagePath || !fs.existsSync(hotel.coverImagePath)) continue;
-    const targetPath = path.join(packageDir, "covers", hotel.id, "hotel-cover.jpg");
+    const targetPath = path.join(packageDir, "covers", hotel.id, hotelCoverImageFileName(hotel));
     await fsp.mkdir(path.dirname(targetPath), { recursive: true });
     await fsp.copyFile(hotel.coverImagePath, targetPath);
   }
@@ -782,7 +808,7 @@ export async function exportOfflinePackage(batch: CollectionBatch, outputDir: st
   await fsp.mkdir(outputDir, { recursive: true });
 
   const packageName = `qingmao-offline-package-${batch.id}`;
-  const filename = `青猫差旅离线网页包-${batch.id}.zip`;
+  const filename = `${batch.thirdVersion?.status.exportBaseName ?? `青猫差旅离线网页包-${batch.id}`}.zip`;
   const zipPath = path.join(outputDir, filename);
   const packageDir = path.join(outputDir, packageName);
 

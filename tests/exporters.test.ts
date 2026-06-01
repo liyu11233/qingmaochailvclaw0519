@@ -5,6 +5,7 @@ import path from "node:path";
 import ExcelJS from "exceljs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildFakeBatch } from "../src/domain/fakeBatch";
+import { buildThirdVersionDeliveryBatch } from "../src/domain/thirdVersionStrategy";
 import { exportBatchWorkbook } from "../server/exporters/excel";
 import { exportOfflinePackage } from "../server/exporters/offlinePackage";
 import type { HotelRatePlan, PlatformName, PlatformQuote } from "../src/domain/types";
@@ -322,12 +323,12 @@ describe("export artifacts", () => {
     batch.sampleCount = 1;
     batch.successCount = 1;
     batch.hotels = batch.hotels?.slice(0, 1);
-    const coverPath = path.join(outputDir, "covers", "hotel-cover.jpg");
+    const coverPath = path.join(outputDir, "covers", "hotel-cover.png");
     await mkdir(path.dirname(coverPath), { recursive: true });
     await writeFile(coverPath, ONE_PIXEL_PNG);
     batch.hotels![0] = {
       ...batch.hotels![0],
-      coverImageUrl: "https://example.com/hotel-cover.jpg",
+      coverImageUrl: "https://hotelimages.ceekee.com/hotel-cover.jpg",
       coverImagePath: coverPath,
       coverImageSource: "青猫差旅",
       coverImageStatus: "saved"
@@ -337,9 +338,9 @@ describe("export artifacts", () => {
     const hotelHtml = await readFile(path.join(result.directory, "hotels", "index.html"), "utf8");
 
     expect(hotelHtml).toContain("hotel-cover");
-    expect(hotelHtml).toContain("covers/hotel-01/hotel-cover.jpg");
+    expect(hotelHtml).toContain("covers/hotel-01/hotel-cover.png");
     expect(hotelHtml).not.toContain("hotel-identity");
-    expect(existsSync(path.join(result.directory, "covers", "hotel-01", "hotel-cover.jpg"))).toBe(true);
+    expect(existsSync(path.join(result.directory, "covers", "hotel-01", "hotel-cover.png"))).toBe(true);
   });
 
   it("uses each hotel's Qingmao-lowest complete rate plan as the default sales display", async () => {
@@ -375,5 +376,83 @@ describe("export artifacts", () => {
     expect(hotelHtml).toContain('data-plan="__default"');
     expect(hotelHtml).toContain('class="hotel-plan-view active" data-plan="大床无早餐" data-default="true"');
     expect(hotelHtml).toContain("<strong>暂无</strong>");
+  }, 15_000);
+
+  it("uses third-version export names and keeps the selected comparison mode out of competing customer columns", async () => {
+    const sourceBatch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
+    sourceBatch.samples = sourceBatch.samples.slice(0, 1);
+    sourceBatch.hotels = sourceBatch.hotels?.slice(0, 1);
+    sourceBatch.sampleCount = 2;
+    sourceBatch.successCount = 2;
+    sourceBatch.samples[0].quotes = sourceBatch.samples[0].quotes.map((quote) =>
+      quote.platform === "阿里商旅"
+        ? { ...quote, price: null, available: false, status: "未展示", missingReason: "阿里商旅暂无同航班价格" }
+        : quote
+    );
+    sourceBatch.hotels![0].ratePlans = sourceBatch.hotels![0].ratePlans.map((ratePlan, ratePlanIndex) => ({
+      ...ratePlan,
+      quotes: ratePlan.quotes.map((quote) =>
+        ratePlanIndex === 1 && quote.platform === "阿里商旅"
+          ? { ...quote, price: null, available: false, status: "未展示", missingReason: "阿里商旅暂无该口径价格" }
+          : quote
+      )
+    }));
+
+    const deliveryBatch = buildThirdVersionDeliveryBatch(sourceBatch, {
+      hotelDisplayLimit: 2,
+      flightDisplayLimit: 2,
+      generationMode: "qingmao_advantage",
+      targetAdvantageRatio: 95,
+      comparisonMode: "specified_platform",
+      specifiedPlatform: "阿里商旅"
+    }, {
+      random: () => 0.5
+    });
+
+    const workbookResult = await exportBatchWorkbook(deliveryBatch, outputDir);
+    const packageResult = await exportOfflinePackage(deliveryBatch, outputDir);
+
+    expect(workbookResult.filename).toBe(`${deliveryBatch.thirdVersion!.status.exportBaseName}.xlsx`);
+    expect(packageResult.filename).toBe(`${deliveryBatch.thirdVersion!.status.exportBaseName}.zip`);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(workbookResult.path);
+    const overviewSheet = workbook.getWorksheet("总览页");
+    const flightSheet = workbook.getWorksheet("航班汇总页");
+    const traceSheet = workbook.getWorksheet("内部留痕页");
+    const failureSheet = workbook.getWorksheet("失败记录页");
+
+    expect(workbookResult.filename).not.toContain("未达标");
+    expect(packageResult.filename).not.toContain("未达标");
+    expect(workbookResult.filename).toMatch(/优势\d+%\.xlsx$/);
+    expect(packageResult.filename).toMatch(/优势\d+%\.zip$/);
+    expect(overviewSheet?.getRow(5).values).toContain("第三版模式");
+    expect(overviewSheet?.getRow(6).values).toContain("指定平台");
+    expect(overviewSheet?.getRow(7).getCell(3).text).toContain("优势");
+    expect(flightSheet?.getRow(5).getCell(11).value).toBe("暂无");
+    expect(flightSheet?.getRow(5).getCell(15).value).toContain("阿里商旅暂无可比价格");
+    expect(flightSheet?.getRow(5).getCell(15).value).not.toContain("对比另外3家平台");
+    const traceHeader = traceSheet?.getRow(4).values;
+    expect(traceHeader).toContain("第三版筛选");
+    expect(traceHeader).toContain("比价口径");
+    expect(traceHeader).toContain("竞品最低价");
+    expect(traceHeader).toContain("竞品平均价");
+    expect(traceHeader).toContain("竞品最高价");
+    expect(traceHeader).toContain("是否计入青猫优势");
+    expect(traceHeader).toContain("航班是否达标");
+    expect(traceHeader).toContain("酒店是否达标");
+    expect(traceHeader).toContain("截图索引");
+    expect(failureSheet?.getColumn(2).values.join(" ")).toContain("第三版策略");
+
+    const indexHtml = await readFile(path.join(packageResult.directory, "index.html"), "utf8");
+    const flightHtml = await readFile(path.join(packageResult.directory, "flights", "index.html"), "utf8");
+    const hotelHtml = await readFile(path.join(packageResult.directory, "hotels", "index.html"), "utf8");
+    expect(indexHtml).toContain("当前口径：指定平台");
+    expect(flightHtml).toContain("阿里商旅暂无可比价格");
+    expect(hotelHtml).toContain("暂无");
+    expect(hotelHtml).toContain("阿里商旅");
+    expect(indexHtml).not.toContain("青猫优势模式");
+    expect(indexHtml).not.toContain("高级验证");
+    expect(flightHtml).not.toContain("对比另外3家平台");
   }, 15_000);
 });

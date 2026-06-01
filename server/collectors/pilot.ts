@@ -813,6 +813,24 @@ export interface BrowserCleanupResult {
   error?: string;
 }
 
+export class CollectionStoppedError extends Error {
+  constructor(message = "采集已停止，本轮不会生成半成品批次。") {
+    super(message);
+    this.name = "CollectionStoppedError";
+  }
+}
+
+export interface CollectionControlSignal {
+  waitIfPaused(): Promise<void>;
+  throwIfStopped(): void;
+}
+
+export interface FullBatchCollectionOptions {
+  flightCandidateLimit?: number;
+  hotelCandidateLimit?: number;
+  control?: CollectionControlSignal;
+}
+
 export interface PilotCollector {
   getStatus(): PilotResult;
   getQingmaoCandidateStatus(): QingmaoCandidateProbeResult;
@@ -853,9 +871,9 @@ export interface PilotCollector {
   runZtripProbe(): Promise<ZtripProbeResult>;
   runZtripFlightProbe(): Promise<ZtripFlightProbeResult>;
   runZtripHotelProbe(): Promise<ZtripHotelProbeResult>;
-  runDomesticBatchCollection(limit?: number): Promise<CollectionBatch>;
-  runInternationalBatchCollection(limit?: number): Promise<CollectionBatch>;
-  runFullBatchCollection(): Promise<CollectionBatch>;
+  runDomesticBatchCollection(limit?: number, control?: CollectionControlSignal): Promise<CollectionBatch>;
+  runInternationalBatchCollection(limit?: number, control?: CollectionControlSignal): Promise<CollectionBatch>;
+  runFullBatchCollection(options?: FullBatchCollectionOptions): Promise<CollectionBatch>;
 }
 
 interface PilotCollectorOptions {
@@ -884,6 +902,7 @@ interface BrowserFrame {
   getByText(text: string, options?: { exact?: boolean }): BrowserLocator;
   waitForTimeout(timeout: number): Promise<unknown>;
   evaluate<T, Arg = unknown>(pageFunction: string | ((arg: Arg) => T), arg?: Arg): Promise<T>;
+  evaluateHandle?(pageFunction: string): Promise<BrowserHandle>;
 }
 
 interface BrowserPage {
@@ -899,11 +918,22 @@ interface BrowserPage {
   waitForLoadState?(state: "domcontentloaded" | "load" | "networkidle", options?: { timeout?: number }): Promise<unknown>;
   waitForResponse?(predicate: (response: { url(): string; text(): Promise<string> }) => boolean, options?: { timeout?: number }): Promise<{ url(): string; text(): Promise<string> }>;
   evaluate<T, Arg = unknown>(pageFunction: string | ((arg: Arg) => T), arg?: Arg): Promise<T>;
+  evaluateHandle?(pageFunction: string): Promise<BrowserHandle>;
   on?(event: "console", handler: (message: { text(): string }) => void): unknown;
   frames(): BrowserFrame[];
   bringToFront(): Promise<unknown>;
   mouse: { click(x: number, y: number): Promise<unknown> };
   close?(options?: { runBeforeUnload?: boolean }): Promise<unknown>;
+}
+
+interface BrowserElementHandle {
+  screenshot(options: { path: string }): Promise<unknown>;
+  evaluate<T>(pageFunction: string | ((element: HTMLImageElement) => T)): Promise<T>;
+}
+
+interface BrowserHandle {
+  asElement(): BrowserElementHandle | null;
+  dispose?(): Promise<unknown> | unknown;
 }
 
 interface BrowserContext {
@@ -8117,11 +8147,7 @@ async function writeJsonArtifact(filePath: string, value: unknown) {
 
 interface HotelCoverImagePage {
   evaluate<T, Arg = unknown>(pageFunction: string | ((arg: Arg) => T), arg?: Arg): Promise<T>;
-}
-
-function parseDataUrl(dataUrl: string) {
-  const match = /^data:[^;]+;base64,(.+)$/i.exec(dataUrl);
-  return match ? Buffer.from(match[1], "base64") : null;
+  evaluateHandle?(pageFunction: string): Promise<BrowserHandle>;
 }
 
 export async function collectHotelCoverImageFromPage(
@@ -8129,22 +8155,36 @@ export async function collectHotelCoverImageFromPage(
   artifactDir: string,
   source: PlatformName
 ): Promise<HotelCoverImageFields> {
-  const coverImageUrl = await page.evaluate<string | null>(`(() => {
+  const imageHandle = await page.evaluateHandle?.(`(() => {
+    const bad = /logo|icon|avatar|sprite|二维码|qrcode|maptile|autonavi|amap|appmaptile/i;
+    const preferred = /hotelimages\\.ceekee\\.com|dimg\\d*\\.c-ctrip\\.com|img\\.alicdn\\.com/i;
     const images = Array.from(document.images || [])
-      .map((image) => ({
-        src: image.currentSrc || image.src || "",
-        width: image.naturalWidth || image.width || 0,
-        height: image.naturalHeight || image.height || 0,
-        alt: image.alt || "",
-        visible: Boolean(image.offsetWidth || image.offsetHeight || image.getClientRects().length)
-      }))
-      .filter((image) => image.src && image.visible && image.width >= 180 && image.height >= 120)
-      .filter((image) => !/logo|icon|avatar|sprite|二维码|qrcode/i.test(image.src + " " + image.alt))
-      .sort((left, right) => (right.width * right.height) - (left.width * left.height));
-    return images[0]?.src || null;
+      .map((image) => {
+        const rect = image.getBoundingClientRect();
+        const src = image.currentSrc || image.src || "";
+        return {
+          image,
+          src,
+          width: image.naturalWidth || image.width || rect.width || 0,
+          height: image.naturalHeight || image.height || rect.height || 0,
+          alt: image.alt || "",
+          visible: Boolean(image.offsetWidth || image.offsetHeight || image.getClientRects().length)
+        };
+      })
+      .filter((item) => item.src && item.visible && item.width >= 180 && item.height >= 120)
+      .filter((item) => !bad.test(item.src + " " + item.alt))
+      .filter((item) => preferred.test(item.src) || /R_550_412|hotel/i.test(item.src))
+      .sort((left, right) => {
+        const preferredDelta = Number(preferred.test(right.src)) - Number(preferred.test(left.src));
+        if (preferredDelta) return preferredDelta;
+        return (right.width * right.height) - (left.width * left.height);
+      });
+    return images[0]?.image || null;
   })()`).catch(() => null);
+  const imageElement = imageHandle?.asElement() ?? null;
 
-  if (!coverImageUrl) {
+  if (!imageElement) {
+    await imageHandle?.dispose?.();
     return {
       coverImageSource: source,
       coverImageStatus: "missing",
@@ -8153,24 +8193,11 @@ export async function collectHotelCoverImageFromPage(
   }
 
   try {
-    const dataUrl = await page.evaluate<string | null>(`(async (src) => {
-      const response = await fetch(src, { credentials: "include" });
-      if (!response.ok) return null;
-      const blob = await response.blob();
-      return await new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(String(reader.result || ""));
-        reader.onerror = () => resolve(null);
-        reader.readAsDataURL(blob);
-      });
-    })`, coverImageUrl);
-    const image = dataUrl ? parseDataUrl(dataUrl) : null;
-    if (!image?.length) {
-      throw new Error("图片下载为空");
-    }
-    const coverImagePath = path.join(artifactDir, "hotel-cover.jpg");
+    const coverImageUrl = await imageElement.evaluate((image) => image.currentSrc || image.src || "");
+    const coverImagePath = path.join(artifactDir, "hotel-cover.png");
     await fsp.mkdir(path.dirname(coverImagePath), { recursive: true });
-    await fsp.writeFile(coverImagePath, image);
+    await imageElement.screenshot({ path: coverImagePath });
+    await imageHandle?.dispose?.();
     return {
       coverImageUrl,
       coverImagePath,
@@ -8178,8 +8205,8 @@ export async function collectHotelCoverImageFromPage(
       coverImageStatus: "saved"
     };
   } catch (error) {
+    await imageHandle?.dispose?.();
     return {
-      coverImageUrl,
       coverImageSource: source,
       coverImageStatus: "failed",
       coverImageFailureReason: errorMessage(error)
@@ -8189,10 +8216,8 @@ export async function collectHotelCoverImageFromPage(
 
 function selectHotelCoverImage(quotes: HotelMainRateQuote[]): HotelCoverImageFields {
   const candidates = quotes.map((quote) => quote.coverImage).filter(Boolean) as HotelCoverImageFields[];
-  const saved = ["青猫差旅", "携程商旅", "阿里商旅"]
-    .map((platform) => candidates.find((image) => image.coverImageSource === platform && image.coverImageStatus === "saved"))
-    .find(Boolean);
-  return saved ?? candidates.find((image) => image.coverImageStatus === "failed")
+  const qingmao = candidates.find((image) => image.coverImageSource === "青猫差旅");
+  return qingmao ?? candidates.find((image) => image.coverImageStatus === "failed")
     ?? candidates.find((image) => image.coverImageStatus === "missing")
     ?? { coverImageStatus: "missing", coverImageFailureReason: "未执行酒店封面图采集" };
 }
@@ -9077,7 +9102,6 @@ async function collectCtripHotelAllRatePlanQuotes(
   try {
     await openCtripHotelDetailByHotel(page, query, candidate);
     const bodyText = await waitForCtripHotelDetailRooms(page);
-    const coverImage = await collectHotelCoverImageFromPage(page, artifactDir, "携程商旅");
     const quotes: HotelMainRateQuote[] = [];
     for (const [index, ratePlan] of HOTEL_RATE_PLAN_LABELS.entries()) {
       const rates = parseCtripHotelMainRatesText(bodyText, ratePlan);
@@ -9092,7 +9116,7 @@ async function collectCtripHotelAllRatePlanQuotes(
         rawText: selectedRate?.rawText ?? excludedRows[0]?.rawText
       });
       quotes.push(selectedRate
-        ? { ...selectedRate, finalUrl: page.url(), screenshotPath: evidencePath, coverImage: index === 0 ? coverImage : undefined, durationMs: index === 0 ? Date.now() - startedAt : 0 }
+        ? { ...selectedRate, finalUrl: page.url(), screenshotPath: evidencePath, durationMs: index === 0 ? Date.now() - startedAt : 0 }
         : {
           platform: "携程商旅",
           status: "not-found",
@@ -9102,7 +9126,6 @@ async function collectCtripHotelAllRatePlanQuotes(
           ratePlan,
           finalUrl: page.url(),
           screenshotPath: evidencePath,
-          coverImage: index === 0 ? coverImage : undefined,
           durationMs: index === 0 ? Date.now() - startedAt : 0,
           rawText: excludedRows[0]?.rawText,
           error: excludedRows.length
@@ -9165,7 +9188,6 @@ async function collectAliHotelAllRatePlanQuotes(
     if (lastError) throw new Error(lastError);
     if (!detailPage) throw new Error("阿里商旅同酒店详情页未打开");
 
-    const coverImage = await collectHotelCoverImageFromPage(detailPage, artifactDir, "阿里商旅");
     const quotes: HotelMainRateQuote[] = [];
     for (const [index, ratePlan] of HOTEL_RATE_PLAN_LABELS.entries()) {
       const rates = parseAliHotelMainRatesText(bodyText, ratePlan);
@@ -9183,7 +9205,7 @@ async function collectAliHotelAllRatePlanQuotes(
         rawText: selectedRate?.rawText ?? fallbackRawText
       });
       if (selectedRate) {
-        quotes.push({ ...selectedRate, finalUrl: detailPage.url(), screenshotPath: evidencePath, coverImage: index === 0 ? coverImage : undefined, durationMs: index === 0 ? Date.now() - startedAt : 0 });
+        quotes.push({ ...selectedRate, finalUrl: detailPage.url(), screenshotPath: evidencePath, durationMs: index === 0 ? Date.now() - startedAt : 0 });
         continue;
       }
       const status = hotelPlatformNoRateStatus("阿里商旅", Boolean(detailRoomsRead?.stable));
@@ -9205,7 +9227,6 @@ async function collectAliHotelAllRatePlanQuotes(
         ratePlan,
         finalUrl: detailPage.url(),
         screenshotPath: evidencePath,
-        coverImage: index === 0 ? coverImage : undefined,
         diagnosisPath: sidecarPath,
         durationMs: index === 0 ? Date.now() - startedAt : 0,
         rawText: fallbackRawText,
@@ -9422,6 +9443,12 @@ async function runHotelAllRatePlansForQuery(
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "未知错误";
+}
+
+async function collectionCheckpoint(control?: CollectionControlSignal) {
+  control?.throwIfStopped();
+  await control?.waitIfPaused();
+  control?.throwIfStopped();
 }
 
 function resolveBrowserExecutable() {
@@ -11982,7 +12009,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runDomesticBatchCollection(limit) {
+    async runDomesticBatchCollection(limit, control) {
+      await collectionCheckpoint(control);
       const collectedAt = now();
       const batchId = `batch-${formatBatchTimestamp(collectedAt)}-real-domestic`;
       const batchArtifactDir = path.join(options.artifactDir, batchId);
@@ -12049,6 +12077,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
 
       try {
         for (const routeConfig of routes) {
+          await collectionCheckpoint(control);
           if (samples.length >= targetSampleCount) {
             break;
           }
@@ -12112,11 +12141,15 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
               await writePartialSnapshot();
             }
           } catch (error) {
+            if (error instanceof CollectionStoppedError) {
+              throw error;
+            }
             failureNotes.push(`已替换 ${route.origin}-${route.destination}: ${errorMessage(error)}`);
             await writePartialSnapshot();
           } finally {
             await closeTemporaryFlightPages(context, protectedPages).catch(() => undefined);
           }
+          await collectionCheckpoint(control);
         }
       } finally {
         await closeFlightListingWorkPages(workPages).catch(() => undefined);
@@ -12147,7 +12180,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       };
     },
 
-    async runInternationalBatchCollection(limit) {
+    async runInternationalBatchCollection(limit, control) {
+      await collectionCheckpoint(control);
       const collectedAt = now();
       const batchId = `batch-${formatBatchTimestamp(collectedAt)}-real-international`;
       const batchArtifactDir = path.join(options.artifactDir, batchId);
@@ -12206,6 +12240,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
 
       try {
         for (const routeConfig of routes) {
+          await collectionCheckpoint(control);
           if (samples.length >= targetSampleCount) {
             break;
           }
@@ -12269,11 +12304,15 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
               await writePartialSnapshot();
             }
           } catch (error) {
+            if (error instanceof CollectionStoppedError) {
+              throw error;
+            }
             failureNotes.push(`已替换 ${route.origin}-${route.destination}: ${errorMessage(error)}`);
             await writePartialSnapshot();
           } finally {
             await closeTemporaryFlightPages(context, protectedPages).catch(() => undefined);
           }
+          await collectionCheckpoint(control);
         }
       } finally {
         await closeFlightListingWorkPages(workPages).catch(() => undefined);
@@ -12304,9 +12343,18 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       };
     },
 
-    async runFullBatchCollection() {
-      const domesticBatch = await this.runDomesticBatchCollection(10);
-      const internationalBatch = await this.runInternationalBatchCollection(10);
+    async runFullBatchCollection(fullOptions = {}) {
+      const control = fullOptions.control;
+      await collectionCheckpoint(control);
+      const flightCandidateLimit = typeof fullOptions.flightCandidateLimit === "number" && fullOptions.flightCandidateLimit > 0
+        ? Math.max(1, Math.floor(fullOptions.flightCandidateLimit))
+        : 20;
+      const domesticTarget = Math.min(10, Math.ceil(flightCandidateLimit / 2));
+      const internationalTarget = Math.min(10, Math.max(1, flightCandidateLimit - domesticTarget));
+      const domesticBatch = await this.runDomesticBatchCollection(domesticTarget, control);
+      await collectionCheckpoint(control);
+      const internationalBatch = await this.runInternationalBatchCollection(internationalTarget, control);
+      await collectionCheckpoint(control);
       const batchId = `batch-${formatBatchTimestamp(now())}-real-full`;
       const samples = [...domesticBatch.samples, ...internationalBatch.samples].map((sample, index) => {
         const nextId = `real-full-${String(index + 1).padStart(2, "0")}`;
@@ -12326,6 +12374,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       await fsp.mkdir(publicScreenshotDir, { recursive: true });
 
       for (const sourceBatch of [domesticBatch, internationalBatch]) {
+        await collectionCheckpoint(control);
         const sourceDir = path.join(outputRoot, "screenshots", sourceBatch.id);
         if (!fs.existsSync(sourceDir)) continue;
         const files = await fsp.readdir(sourceDir);

@@ -44,6 +44,56 @@ describe("management API", () => {
     });
   }
 
+  function createMinimalPilotCollector(overrides: Record<string, unknown> = {}) {
+    const idle = {};
+
+    return {
+      getStatus: vi.fn(() => idle),
+      getQingmaoCandidateStatus: vi.fn(() => idle),
+      getQingmaoHotelCandidateStatus: vi.fn(() => idle),
+      getHotelMainRateStatus: vi.fn(() => idle),
+      getHotelGroupMainRateStatus: vi.fn(() => idle),
+      getHotelSmallBatchStatus: vi.fn(() => idle),
+      getHotelScaleValidationStatus: vi.fn(() => idle),
+      getHotelSingleDiagnosisStatus: vi.fn(() => idle),
+      getHotelSingleAllRatePlansStatus: vi.fn(() => idle),
+      getAliHotelSingleVerifyStatus: vi.fn(() => idle),
+      getAliHotelMatchStatus: vi.fn(() => idle),
+      getHotelRatePlanProbeStatus: vi.fn(() => idle),
+      getHotelAllRatePlanStatus: vi.fn(() => idle),
+      getHotelCalibrationStatus: vi.fn(() => idle),
+      getSameFlightComparisonStatus: vi.fn(() => idle),
+      getZtripStatus: vi.fn(() => idle),
+      getZtripFlightStatus: vi.fn(() => idle),
+      getZtripHotelStatus: vi.fn(() => idle),
+      openLoginSession: vi.fn(),
+      runSilentProbe: vi.fn(),
+      runAttachedProbe: vi.fn(),
+      runQingmaoCandidateProbe: vi.fn(),
+      runQingmaoHotelCandidateProbe: vi.fn(),
+      runHotelMainRateProbe: vi.fn(),
+      runHotelGroupMainRateProbe: vi.fn(),
+      runHotelSmallBatchProbe: vi.fn(),
+      runHotelScaleValidationProbe: vi.fn(),
+      runHotelSingleDiagnosisProbe: vi.fn(),
+      runHotelSingleAllRatePlansProbe: vi.fn(),
+      runAliHotelSingleVerifyProbe: vi.fn(),
+      runAliHotelMatchProbe: vi.fn(),
+      runHotelRatePlanProbe: vi.fn(),
+      runHotelAllRatePlanProbe: vi.fn(),
+      runHotelCalibrationProbe: vi.fn(),
+      cleanupBrowserPages: vi.fn(),
+      runSameFlightComparisonProbe: vi.fn(),
+      runZtripProbe: vi.fn(),
+      runZtripFlightProbe: vi.fn(),
+      runZtripHotelProbe: vi.fn(),
+      runDomesticBatchCollection: vi.fn(),
+      runInternationalBatchCollection: vi.fn(),
+      runFullBatchCollection: vi.fn(),
+      ...overrides
+    } as never;
+  }
+
   it("starts empty, creates a fake collection batch, and exposes export links", async () => {
     const app = createTestApp({ outputDir: await createTempOutputDir() });
 
@@ -109,6 +159,284 @@ describe("management API", () => {
     expect(restoredStatus.body.sampleCount).toBe(20);
     expect(restoredStatus.body.artifacts.excel).toMatch(/\.xlsx$/);
     expect(restoredStatus.body.artifacts.offlinePackage).toMatch(/\.zip$/);
+  });
+
+  it("exposes third-version defaults and updates the management configuration preview", async () => {
+    const app = createTestApp({ outputDir: await createTempOutputDir() });
+
+    const initialStatus = await request(app).get("/api/status").expect(200);
+    expect(initialStatus.body.thirdVersion.options).toMatchObject({
+      hotelDisplayLimit: 40,
+      flightDisplayLimit: 20,
+      generationMode: "real_random",
+      targetAdvantageRatio: 70,
+      comparisonMode: "internal_discussion"
+    });
+    expect(initialStatus.body.thirdVersion.status.exportNamePreview).toBe("【随】青猫差旅一体化比价-酒店0-航班0-优势0%.zip");
+
+    const updated = await request(app)
+      .post("/api/third-version/config")
+      .send({
+        hotelDisplayLimit: 12,
+        flightDisplayLimit: 6,
+        generationMode: "qingmao_advantage",
+        targetAdvantageRatio: 80,
+        comparisonMode: "specified_platform",
+        specifiedPlatform: "阿里商旅"
+      })
+      .expect(200);
+
+    expect(updated.body.thirdVersion.options).toMatchObject({
+      hotelDisplayLimit: 12,
+      flightDisplayLimit: 6,
+      generationMode: "qingmao_advantage",
+      targetAdvantageRatio: 80,
+      comparisonMode: "specified_platform",
+      specifiedPlatform: "阿里商旅"
+    });
+    expect(updated.body.thirdVersion.status.hotelDisplayLimit).toBe(12);
+    expect(updated.body.thirdVersion.status.flightDisplayLimit).toBe(6);
+
+    const statusAfterUpdate = await request(app).get("/api/status").expect(200);
+    expect(statusAfterUpdate.body.thirdVersion.options.specifiedPlatform).toBe("阿里商旅");
+  });
+
+  it("rejects invalid third-version management configuration instead of silently falling back", async () => {
+    const app = createTestApp({ outputDir: await createTempOutputDir() });
+
+    const badLimit = await request(app)
+      .post("/api/third-version/config")
+      .send({
+        hotelDisplayLimit: 0,
+        flightDisplayLimit: 20,
+        generationMode: "real_random",
+        targetAdvantageRatio: 70,
+        comparisonMode: "internal_discussion"
+      })
+      .expect(400);
+    expect(badLimit.body.error).toContain("hotelDisplayLimit 必须是正整数");
+
+    const missingSpecifiedPlatform = await request(app)
+      .post("/api/third-version/config")
+      .send({
+        hotelDisplayLimit: 40,
+        flightDisplayLimit: 20,
+        generationMode: "real_random",
+        targetAdvantageRatio: 70,
+        comparisonMode: "specified_platform"
+      })
+      .expect(400);
+    expect(missingSpecifiedPlatform.body.error).toContain("指定平台口径必须选择 1 个竞品平台");
+
+    const qingmaoSpecifiedPlatform = await request(app)
+      .post("/api/third-version/config")
+      .send({
+        hotelDisplayLimit: 40,
+        flightDisplayLimit: 20,
+        generationMode: "real_random",
+        targetAdvantageRatio: 70,
+        comparisonMode: "specified_platform",
+        specifiedPlatform: "青猫差旅"
+      })
+      .expect(400);
+    expect(qingmaoSpecifiedPlatform.body.error).toContain("specifiedPlatform 不能是青猫差旅");
+  });
+
+  it("preserves the current third-version configuration when starting full collection", async () => {
+    const outputDir = await createTempOutputDir();
+    const runFullBatchCollection = vi.fn(async () => buildFakeBatch(new Date("2026-05-18T10:00:00+08:00")));
+    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection });
+    const app = createTestApp({ outputDir, pilotCollector });
+
+    const collect = await request(app)
+      .post("/api/collect-real-full")
+      .send({
+        hotelDisplayLimit: 8,
+        flightDisplayLimit: 4,
+        generationMode: "qingmao_advantage",
+        targetAdvantageRatio: 75,
+        comparisonMode: "external_sales"
+      })
+      .expect(200);
+
+    expect(runFullBatchCollection).toHaveBeenCalledTimes(1);
+    expect(collect.body.thirdVersion.options).toMatchObject({
+      hotelDisplayLimit: 8,
+      flightDisplayLimit: 4,
+      generationMode: "qingmao_advantage",
+      targetAdvantageRatio: 75,
+      comparisonMode: "external_sales"
+    });
+    expect(collect.body.thirdVersion.status.hotelDisplayLimit).toBe(8);
+    expect(collect.body.thirdVersion.status.flightDisplayLimit).toBe(4);
+
+    const status = await request(app).get("/api/status").expect(200);
+    expect(status.body.thirdVersion.options.comparisonMode).toBe("external_sales");
+  });
+
+  it("passes real collection results through the third-version strategy before exporting", async () => {
+    const outputDir = await createTempOutputDir();
+    const sourceBatch = buildFakeBatch(new Date("2026-05-18T10:00:00+08:00"));
+    const exportedBatches: ReturnType<typeof buildFakeBatch>[] = [];
+    const workbook = vi.fn(async (batch: ReturnType<typeof buildFakeBatch>, dir: string) => {
+      exportedBatches.push(batch);
+      return exportTestWorkbook(batch, dir);
+    });
+    const offlinePackage = vi.fn(async (batch: ReturnType<typeof buildFakeBatch>, dir: string) => exportTestOfflinePackage(batch, dir));
+    const runFullBatchCollection = vi.fn(async () => sourceBatch);
+    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection });
+    const app = createTestApp({ outputDir, pilotCollector, exporters: { workbook, offlinePackage } });
+
+    const collect = await request(app)
+      .post("/api/collect-real-full")
+      .send({
+        hotelDisplayLimit: 5,
+        flightDisplayLimit: 4,
+        generationMode: "qingmao_advantage",
+        targetAdvantageRatio: 80,
+        comparisonMode: "internal_discussion"
+      })
+      .expect(200);
+
+    expect(runFullBatchCollection).toHaveBeenCalledWith(expect.objectContaining({
+      flightCandidateLimit: 8,
+      hotelCandidateLimit: 10,
+      control: expect.objectContaining({
+        waitIfPaused: expect.any(Function),
+        throwIfStopped: expect.any(Function)
+      })
+    }));
+    expect(exportedBatches[0].samples).toHaveLength(4);
+    expect(exportedBatches[0].hotels).toHaveLength(5);
+    expect(exportedBatches[0].thirdVersion?.rawSamples).toHaveLength(sourceBatch.samples.length);
+    expect(exportedBatches[0].thirdVersion?.rawHotels).toHaveLength(sourceBatch.hotels!.length);
+    expect(collect.body.batch.samples).toHaveLength(4);
+    expect(collect.body.batch.hotels).toHaveLength(5);
+    expect(collect.body.thirdVersion.status.rawFlightCandidates).toBe(sourceBatch.samples.length);
+    expect(collect.body.thirdVersion.status.rawHotelCandidates).toBe(sourceBatch.hotels!.length);
+    expect(collect.body.thirdVersion.status.flightStrategyCandidateLimit).toBe(8);
+    expect(collect.body.thirdVersion.status.hotelStrategyCandidateLimit).toBe(10);
+  });
+
+  it("pauses and resumes the active collection through a real collection control signal", async () => {
+    const outputDir = await createTempOutputDir();
+    let capturedControl: {
+      waitIfPaused: () => Promise<void>;
+      throwIfStopped: () => void;
+    } | null = null;
+    let markFullStarted!: () => void;
+    let resolveFull!: (batch: ReturnType<typeof buildFakeBatch>) => void;
+    const fullStarted = new Promise<void>((resolve) => {
+      markFullStarted = resolve;
+    });
+    const runFullBatchCollection = vi.fn(async (options: { control?: typeof capturedControl }) => {
+      capturedControl = options.control ?? null;
+      markFullStarted();
+      return await new Promise<ReturnType<typeof buildFakeBatch>>((resolve) => {
+        resolveFull = resolve;
+      });
+    });
+    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection });
+    const app = createTestApp({ outputDir, pilotCollector });
+
+    const fullRequest = new Promise<void>((resolve, reject) => {
+      request(app)
+        .post("/api/collect-real-full")
+        .expect(200)
+        .end((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+    });
+    await fullStarted;
+    expect(capturedControl).not.toBeNull();
+
+    const paused = await request(app).post("/api/collection/pause").expect(200);
+    expect(paused.body.activeOperation).toMatchObject({
+      label: "完整真实采集",
+      state: "paused",
+      canResume: true,
+      canStop: true
+    });
+
+    let checkpointResolved = false;
+    const checkpoint = capturedControl!.waitIfPaused().then(() => {
+      checkpointResolved = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(checkpointResolved).toBe(false);
+
+    const resumed = await request(app).post("/api/collection/resume").expect(200);
+    expect(resumed.body.activeOperation).toMatchObject({
+      label: "完整真实采集",
+      state: "running",
+      canPause: true,
+      canStop: true
+    });
+    await checkpoint;
+    expect(checkpointResolved).toBe(true);
+
+    resolveFull(buildFakeBatch(new Date("2026-05-18T10:00:00+08:00")));
+    await fullRequest;
+  });
+
+  it("stops the active collection without exporting a partial batch", async () => {
+    const outputDir = await createTempOutputDir();
+    let capturedControl: {
+      waitIfPaused: () => Promise<void>;
+      throwIfStopped: () => void;
+    } | null = null;
+    let markFullStarted!: () => void;
+    const fullStarted = new Promise<void>((resolve) => {
+      markFullStarted = resolve;
+    });
+    const workbook = vi.fn(exportTestWorkbook);
+    const offlinePackage = vi.fn(exportTestOfflinePackage);
+    const runFullBatchCollection = vi.fn(async (options: { control?: typeof capturedControl }) => {
+      capturedControl = options.control ?? null;
+      markFullStarted();
+      while (true) {
+        await capturedControl!.waitIfPaused();
+        capturedControl!.throwIfStopped();
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    });
+    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection });
+    const app = createTestApp({ outputDir, pilotCollector, exporters: { workbook, offlinePackage } });
+
+    const fullRequest = new Promise<void>((resolve, reject) => {
+      request(app)
+        .post("/api/collect-real-full")
+        .expect(409)
+        .expect((response) => {
+          expect(response.body.error).toContain("采集已停止");
+        })
+        .end((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+    });
+    await fullStarted;
+
+    const stopped = await request(app).post("/api/collection/stop").expect(200);
+    expect(stopped.body.activeOperation).toMatchObject({
+      label: "完整真实采集",
+      state: "stopping",
+      canPause: false,
+      canStop: false
+    });
+
+    await fullRequest;
+    const status = await request(app).get("/api/status").expect(200);
+    expect(status.body.activeOperation).toBeNull();
+    expect(workbook).not.toHaveBeenCalled();
+    expect(offlinePackage).not.toHaveBeenCalled();
   });
 
   it("exposes a separate one-route real collection pilot flow", async () => {
@@ -1580,14 +1908,20 @@ describe("management API", () => {
     expect(realCollect.body.batch.sampleCount).toBe(1);
     expect(realCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
     expect(realCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
-    expect(pilotCollector.runDomesticBatchCollection).toHaveBeenCalledWith(1);
+    expect(pilotCollector.runDomesticBatchCollection).toHaveBeenCalledWith(1, expect.objectContaining({
+      waitIfPaused: expect.any(Function),
+      throwIfStopped: expect.any(Function)
+    }));
 
     const realInternationalCollect = await request(app).post("/api/collect-real-international").send({ limit: 1 }).expect(200);
     expect(realInternationalCollect.body.batch.id).toContain("real-international");
     expect(realInternationalCollect.body.batch.sampleCount).toBe(1);
     expect(realInternationalCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
     expect(realInternationalCollect.body.artifacts.offlinePackage).toMatch(/\.zip$/);
-    expect(pilotCollector.runInternationalBatchCollection).toHaveBeenCalledWith(1);
+    expect(pilotCollector.runInternationalBatchCollection).toHaveBeenCalledWith(1, expect.objectContaining({
+      waitIfPaused: expect.any(Function),
+      throwIfStopped: expect.any(Function)
+    }));
 
     const realFullCollect = await request(app).post("/api/collect-real-full").expect(200);
     expect(realFullCollect.body.batch.id).toContain("real-full");

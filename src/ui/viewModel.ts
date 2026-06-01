@@ -1,6 +1,6 @@
 import { summarizeFlight, summarizeQuoteSet } from "../domain/comparison";
 import { analyzeHotelRatePlanCompleteness, resolveHotelDisplayDecision, resolveHotelPrimaryRatePlan } from "../domain/hotelRatePlans";
-import type { CollectionBatch, FlightSample, HotelRatePlan, HotelSample, PlatformName, PlatformQuote } from "../domain/types";
+import type { CollectionBatch, FlightSample, HotelRatePlan, HotelSample, PlatformName, PlatformQuote, PriceComparisonOptions } from "../domain/types";
 
 export interface ArtifactLinks {
   excel: string;
@@ -115,8 +115,8 @@ function buildQuoteView(quotes: PlatformQuote[], platform: PlatformName): QuoteV
   };
 }
 
-export function buildSampleView(sample: FlightSample): SampleView {
-  const summary = summarizeFlight(sample);
+export function buildSampleView(sample: FlightSample, options: PriceComparisonOptions = {}): SampleView {
+  const summary = summarizeFlight(sample, options);
   const transferLabel = sample.directType === "中转" && sample.transferCity ? `中转${sample.transferCity}` : sample.directType;
 
   return {
@@ -146,11 +146,11 @@ function fallbackRatePlan(): HotelRatePlan {
   };
 }
 
-export function buildHotelView(hotel: HotelSample): HotelView {
+export function buildHotelView(hotel: HotelSample, options: PriceComparisonOptions = {}): HotelView {
   const primary = resolveHotelPrimaryRatePlan(hotel) ?? fallbackRatePlan();
   const displayDecision = resolveHotelDisplayDecision(hotel.ratePlans);
   const completeness = analyzeHotelRatePlanCompleteness(primary);
-  const summary = summarizeQuoteSet(primary.quotes);
+  const summary = summarizeQuoteSet(primary.quotes, options);
   const completeRatePlanCount = hotel.completeRatePlanCount ?? displayDecision.completeRatePlanCount;
 
   return {
@@ -175,8 +175,12 @@ export function buildHotelView(hotel: HotelSample): HotelView {
 }
 
 export function buildDashboardView(batch: CollectionBatch): DashboardView {
-  const samples = batch.samples.map(buildSampleView);
-  const hotels = (batch.hotels ?? []).map(buildHotelView);
+  const options = {
+    comparisonMode: batch.thirdVersion?.options.comparisonMode,
+    specifiedPlatform: batch.thirdVersion?.options.specifiedPlatform
+  };
+  const samples = batch.samples.map((sample) => buildSampleView(sample, options));
+  const hotels = (batch.hotels ?? []).map((hotel) => buildHotelView(hotel, options));
 
   return {
     batchId: batch.id,

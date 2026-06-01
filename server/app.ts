@@ -5,10 +5,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildFakeBatch } from "../src/domain/fakeBatch";
 import { enrichHotelSampleDisplayDecision } from "../src/domain/hotelRatePlans";
-import type { CollectionBatch, HotelGroup, HotelRatePlanLabel, HotelSample, PlatformName, PlatformQuote, QuoteStatus } from "../src/domain/types";
+import {
+  applyThirdVersionStrategy,
+  buildThirdVersionDeliveryBatch,
+  DEFAULT_THIRD_VERSION_OPTIONS,
+  getThirdVersionSourceBatch,
+  thirdVersionCollectionLimits,
+  type ThirdVersionBatchStatus,
+  type ThirdVersionStrategyOptions
+} from "../src/domain/thirdVersionStrategy";
+import type { CollectionBatch, CompetitorPlatformName, ComparisonMode, HotelGroup, HotelRatePlanLabel, HotelSample, PlatformName, PlatformQuote, QuoteStatus } from "../src/domain/types";
 import {
   type AliHotelSingleVerifyInput,
   type AliHotelSingleVerifyResult,
+  CollectionStoppedError,
+  type CollectionControlSignal,
   createPlaywrightPilotCollector,
   type AliHotelMatchProbeResult,
   type BrowserCleanupResult,
@@ -50,6 +61,7 @@ interface ArtifactState {
 interface AppState {
   batch: CollectionBatch | null;
   artifacts: ArtifactState | null;
+  thirdVersionOptions: ThirdVersionStrategyOptions;
   pilot: PilotResult;
   qingmaoCandidates: QingmaoCandidateProbeResult;
   qingmaoHotelCandidates: QingmaoHotelCandidateProbeResult;
@@ -73,11 +85,73 @@ interface AppState {
 interface ActiveOperation {
   label: string;
   startedAt: string;
+  state: "running" | "paused" | "stopping";
+  canPause: boolean;
+  canResume: boolean;
+  canStop: boolean;
+  pauseRequestedAt: string | null;
+  stopRequestedAt: string | null;
+  control: OperationControl;
 }
 
 interface ArtifactExporters {
   workbook: typeof exportBatchWorkbook;
   offlinePackage: typeof exportOfflinePackage;
+}
+
+interface ThirdVersionResponse {
+  options: ThirdVersionStrategyOptions;
+  status: ThirdVersionBatchStatus;
+}
+
+interface PersistedAppState {
+  batch?: CollectionBatch | null;
+  artifacts?: unknown;
+  thirdVersionOptions?: Partial<ThirdVersionStrategyOptions>;
+}
+
+class OperationControl implements CollectionControlSignal {
+  private paused = false;
+  private stopped = false;
+  private waiters = new Set<() => void>();
+
+  pause() {
+    if (!this.stopped) {
+      this.paused = true;
+    }
+  }
+
+  resume() {
+    this.paused = false;
+    this.releaseWaiters();
+  }
+
+  stop() {
+    this.stopped = true;
+    this.paused = false;
+    this.releaseWaiters();
+  }
+
+  async waitIfPaused() {
+    while (this.paused && !this.stopped) {
+      await new Promise<void>((resolve) => {
+        this.waiters.add(resolve);
+      });
+    }
+    this.throwIfStopped();
+  }
+
+  throwIfStopped() {
+    if (this.stopped) {
+      throw new CollectionStoppedError();
+    }
+  }
+
+  private releaseWaiters() {
+    const waiters = [...this.waiters];
+    this.waiters.clear();
+    waiters.forEach((resolve) => resolve());
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -100,10 +174,101 @@ function restoreArtifactState(value: unknown): ArtifactState | null {
   };
 }
 
+function emptyThirdVersionBatch(): CollectionBatch {
+  return {
+    id: "third-version-preview-empty",
+    status: "ready",
+    generatedAt: new Date(0).toISOString(),
+    sampleCount: 0,
+    successCount: 0,
+    failedCount: 0,
+    samples: [],
+    hotels: []
+  };
+}
+
+function parsePositiveIntegerField(value: unknown, field: "hotelDisplayLimit" | "flightDisplayLimit", fallback: number): { ok: true; value: number } | { ok: false; error: string } {
+  if (value === undefined) {
+    return { ok: true, value: fallback };
+  }
+  if (!Number.isInteger(value) || typeof value !== "number" || value < 1) {
+    return { ok: false, error: `${field} 必须是正整数` };
+  }
+  return { ok: true, value };
+}
+
+function parseTargetAdvantageRatio(value: unknown, fallback: number): { ok: true; value: number } | { ok: false; error: string } {
+  if (value === undefined) {
+    return { ok: true, value: fallback };
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {
+    return { ok: false, error: "targetAdvantageRatio 必须是 0 到 100 之间的数字" };
+  }
+  return { ok: true, value };
+}
+
+function parseThirdVersionOptionsInput(value: unknown, fallback: ThirdVersionStrategyOptions): { ok: true; options: ThirdVersionStrategyOptions } | { ok: false; error: string } {
+  if (value === undefined || value === null || (isRecord(value) && Object.keys(value).length === 0)) {
+    return { ok: true, options: fallback };
+  }
+  if (!isRecord(value)) {
+    return { ok: false, error: "第三版配置请求体必须是对象" };
+  }
+
+  const hotelDisplayLimit = parsePositiveIntegerField(value.hotelDisplayLimit, "hotelDisplayLimit", fallback.hotelDisplayLimit);
+  if (!hotelDisplayLimit.ok) return hotelDisplayLimit;
+  const flightDisplayLimit = parsePositiveIntegerField(value.flightDisplayLimit, "flightDisplayLimit", fallback.flightDisplayLimit);
+  if (!flightDisplayLimit.ok) return flightDisplayLimit;
+
+  const generationMode = value.generationMode === undefined ? fallback.generationMode : value.generationMode;
+  if (!THIRD_VERSION_GENERATION_MODES.includes(generationMode as typeof THIRD_VERSION_GENERATION_MODES[number])) {
+    return { ok: false, error: "generationMode 只能是 real_random 或 qingmao_advantage" };
+  }
+
+  const targetAdvantageRatio = parseTargetAdvantageRatio(value.targetAdvantageRatio, fallback.targetAdvantageRatio);
+  if (!targetAdvantageRatio.ok) return targetAdvantageRatio;
+
+  const comparisonMode = value.comparisonMode === undefined ? fallback.comparisonMode : value.comparisonMode;
+  if (!THIRD_VERSION_COMPARISON_MODES.includes(comparisonMode as ComparisonMode)) {
+    return { ok: false, error: "comparisonMode 不在允许范围内" };
+  }
+
+  let specifiedPlatform: CompetitorPlatformName | undefined;
+  const rawSpecifiedPlatform = value.specifiedPlatform === undefined ? fallback.specifiedPlatform : value.specifiedPlatform;
+  if (rawSpecifiedPlatform !== undefined) {
+    if (rawSpecifiedPlatform === "青猫差旅") {
+      return { ok: false, error: "specifiedPlatform 不能是青猫差旅" };
+    }
+    if (!THIRD_VERSION_COMPETITOR_PLATFORMS.includes(rawSpecifiedPlatform as CompetitorPlatformName)) {
+      return { ok: false, error: `specifiedPlatform 只能是：${THIRD_VERSION_COMPETITOR_PLATFORMS.join("、")}` };
+    }
+    specifiedPlatform = rawSpecifiedPlatform as CompetitorPlatformName;
+  }
+
+  if (comparisonMode === "specified_platform" && !specifiedPlatform) {
+    return { ok: false, error: "指定平台口径必须选择 1 个竞品平台" };
+  }
+
+  return {
+    ok: true,
+    options: {
+      hotelDisplayLimit: hotelDisplayLimit.value,
+      flightDisplayLimit: flightDisplayLimit.value,
+      generationMode: generationMode as ThirdVersionStrategyOptions["generationMode"],
+      targetAdvantageRatio: targetAdvantageRatio.value,
+      comparisonMode: comparisonMode as ThirdVersionStrategyOptions["comparisonMode"],
+      ...(comparisonMode === "specified_platform" && specifiedPlatform ? { specifiedPlatform } : {})
+    }
+  };
+}
+
 const HOTEL_SINGLE_DIAGNOSIS_RATE_PLANS = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"] as const;
 const HOTEL_RATE_PLAN_LABELS: HotelRatePlanLabel[] = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"];
 const SECOND_VERSION_PLATFORMS: PlatformName[] = ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"];
 const HOTEL_CALIBRATION_COMPETITOR_PLATFORMS = ["阿里商旅", "在途商旅", "携程商旅"] as const;
+const THIRD_VERSION_GENERATION_MODES = ["real_random", "qingmao_advantage"] as const;
+const THIRD_VERSION_COMPARISON_MODES: ComparisonMode[] = ["internal_discussion", "external_sales", "specified_platform"];
+const THIRD_VERSION_COMPETITOR_PLATFORMS: CompetitorPlatformName[] = ["携程商旅", "阿里商旅", "在途商旅"];
 
 function formatBatchTimestamp(date: Date) {
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -464,35 +629,40 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     return `/outputs/${relativePath.split(path.sep).map(encodeURIComponent).join("/")}`;
   }
 
-  function loadPersistedBatchState(): Pick<AppState, "batch" | "artifacts"> {
+  function loadPersistedBatchState(): Pick<AppState, "batch" | "artifacts" | "thirdVersionOptions"> {
     const persistedStatePath = path.join(outputDir, "current-state.json");
 
     try {
       if (fs.existsSync(persistedStatePath)) {
-        const persisted = JSON.parse(fs.readFileSync(persistedStatePath, "utf8")) as Pick<AppState, "batch" | "artifacts">;
+        const persisted = JSON.parse(fs.readFileSync(persistedStatePath, "utf8")) as PersistedAppState;
         const artifacts = restoreArtifactState(persisted.artifacts);
+        const parsedThirdVersionOptions = parseThirdVersionOptionsInput(persisted.thirdVersionOptions ?? {}, DEFAULT_THIRD_VERSION_OPTIONS);
+        const thirdVersionOptions = parsedThirdVersionOptions.ok ? parsedThirdVersionOptions.options : DEFAULT_THIRD_VERSION_OPTIONS;
         if (persisted.batch && artifacts) {
           return {
             batch: persisted.batch,
-            artifacts
+            artifacts,
+            thirdVersionOptions
           };
         }
+        return { batch: null, artifacts: null, thirdVersionOptions };
       }
 
       if (!fs.existsSync(outputDir)) {
-        return { batch: null, artifacts: null };
+        return { batch: null, artifacts: null, thirdVersionOptions: DEFAULT_THIRD_VERSION_OPTIONS };
       }
     } catch {
-      return { batch: null, artifacts: null };
+      return { batch: null, artifacts: null, thirdVersionOptions: DEFAULT_THIRD_VERSION_OPTIONS };
     }
 
-    return { batch: null, artifacts: null };
+    return { batch: null, artifacts: null, thirdVersionOptions: DEFAULT_THIRD_VERSION_OPTIONS };
   }
 
   const persistedState = loadPersistedBatchState();
   const state: AppState = {
     batch: persistedState.batch,
     artifacts: persistedState.artifacts,
+    thirdVersionOptions: persistedState.thirdVersionOptions,
     pilot: pilotCollector.getStatus(),
     qingmaoCandidates: pilotCollector.getQingmaoCandidateStatus(),
     qingmaoHotelCandidates: pilotCollector.getQingmaoHotelCandidateStatus(),
@@ -517,9 +687,18 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     await fsp.mkdir(outputDir, { recursive: true });
     await fsp.writeFile(
       path.join(outputDir, "current-state.json"),
-      JSON.stringify({ batch: state.batch, artifacts: state.artifacts }, null, 2),
+      JSON.stringify({ batch: state.batch, artifacts: state.artifacts, thirdVersionOptions: state.thirdVersionOptions }, null, 2),
       "utf8"
     );
+  }
+
+  function buildThirdVersionResponse(batch: CollectionBatch | null = state.batch): ThirdVersionResponse {
+    const sourceBatch = batch ? getThirdVersionSourceBatch(batch) : emptyThirdVersionBatch();
+    const strategy = applyThirdVersionStrategy(sourceBatch, state.thirdVersionOptions, { random: () => 0.5 });
+    return {
+      options: strategy.options,
+      status: strategy.status
+    };
   }
 
   async function setCurrentBatchArtifacts(batch: CollectionBatch, excelPath: string, offlinePackagePath: string) {
@@ -532,32 +711,76 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
 
     return {
       batch,
-      artifacts: state.artifacts
+      artifacts: state.artifacts,
+      thirdVersion: buildThirdVersionResponse(batch)
     };
+  }
+
+  async function exportThirdVersionArtifacts(sourceBatch: CollectionBatch) {
+    const deliveryBatch = buildThirdVersionDeliveryBatch(sourceBatch, state.thirdVersionOptions, { random: () => 0.5 });
+    const excel = await workbookExporter(deliveryBatch, outputDir);
+    const offlinePackage = await offlinePackageExporter(deliveryBatch, outputDir);
+
+    return setCurrentBatchArtifacts(deliveryBatch, excel.path, offlinePackage.path);
+  }
+
+  function serializeActiveOperation(operation: ActiveOperation | null) {
+    if (!operation) return null;
+    return {
+      label: operation.label,
+      startedAt: operation.startedAt,
+      state: operation.state,
+      canPause: operation.canPause,
+      canResume: operation.canResume,
+      canStop: operation.canStop,
+      pauseRequestedAt: operation.pauseRequestedAt,
+      stopRequestedAt: operation.stopRequestedAt
+    };
+  }
+
+  function refreshOperationControls(operation: ActiveOperation) {
+    operation.canPause = operation.state === "running";
+    operation.canResume = operation.state === "paused";
+    operation.canStop = operation.state === "running" || operation.state === "paused";
   }
 
   async function runExclusiveOperation(
     label: string,
     res: express.Response,
     next: express.NextFunction,
-    task: () => Promise<unknown>
+    task: (control: CollectionControlSignal) => Promise<unknown>
   ) {
     if (activeOperation) {
       res.status(409).json({
         error: `正在${activeOperation.label}，请等待完成后再操作。`,
-        activeOperation
+        activeOperation: serializeActiveOperation(activeOperation)
       });
       return;
     }
 
+    const control = new OperationControl();
     activeOperation = {
       label,
-      startedAt: new Date().toISOString()
+      startedAt: new Date().toISOString(),
+      state: "running",
+      canPause: true,
+      canResume: false,
+      canStop: true,
+      pauseRequestedAt: null,
+      stopRequestedAt: null,
+      control
     };
 
     try {
-      res.json(await task());
+      res.json(await task(control));
     } catch (error) {
+      if (error instanceof CollectionStoppedError) {
+        res.status(409).json({
+          error: error.message,
+          activeOperation: serializeActiveOperation(activeOperation)
+        });
+        return;
+      }
       next(error);
     } finally {
       activeOperation = null;
@@ -863,61 +1086,124 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       successCount: state.batch?.successCount ?? 0,
       failedCount: state.batch?.failedCount ?? 0,
       artifacts: state.artifacts,
-      activeOperation
+      activeOperation: serializeActiveOperation(activeOperation),
+      thirdVersion: buildThirdVersionResponse()
     });
+  });
+
+  app.post("/api/third-version/config", async (req, res) => {
+    const parsed = parseThirdVersionOptionsInput(req.body, state.thirdVersionOptions);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error, thirdVersion: buildThirdVersionResponse() });
+      return;
+    }
+
+    state.thirdVersionOptions = parsed.options;
+    await persistCurrentBatchState();
+    res.json({ thirdVersion: buildThirdVersionResponse() });
+  });
+
+  app.post("/api/collection/pause", (_req, res) => {
+    if (!activeOperation) {
+      res.status(409).json({ error: "当前没有正在运行的采集任务。" });
+      return;
+    }
+    if (activeOperation.state === "stopping") {
+      res.status(409).json({ error: "采集正在停止，不能再暂停。", activeOperation: serializeActiveOperation(activeOperation) });
+      return;
+    }
+
+    activeOperation.control.pause();
+    activeOperation.state = "paused";
+    activeOperation.pauseRequestedAt = new Date().toISOString();
+    refreshOperationControls(activeOperation);
+    res.json({ message: "采集已暂停，当前任务停在下一个安全点。", activeOperation: serializeActiveOperation(activeOperation) });
+  });
+
+  app.post("/api/collection/resume", (_req, res) => {
+    if (!activeOperation) {
+      res.status(409).json({ error: "当前没有已暂停的采集任务。" });
+      return;
+    }
+    if (activeOperation.state !== "paused") {
+      res.status(409).json({ error: "当前采集没有处于暂停状态。", activeOperation: serializeActiveOperation(activeOperation) });
+      return;
+    }
+
+    activeOperation.control.resume();
+    activeOperation.state = "running";
+    refreshOperationControls(activeOperation);
+    res.json({ message: "采集已继续。", activeOperation: serializeActiveOperation(activeOperation) });
+  });
+
+  app.post("/api/collection/stop", (_req, res) => {
+    if (!activeOperation) {
+      res.status(409).json({ error: "当前没有正在运行的采集任务。" });
+      return;
+    }
+    if (activeOperation.state === "stopping") {
+      res.json({ message: "采集正在停止。", activeOperation: serializeActiveOperation(activeOperation) });
+      return;
+    }
+
+    activeOperation.control.stop();
+    activeOperation.state = "stopping";
+    activeOperation.stopRequestedAt = new Date().toISOString();
+    refreshOperationControls(activeOperation);
+    res.json({ message: "采集已请求停止，本轮不会生成半成品批次。", activeOperation: serializeActiveOperation(activeOperation) });
   });
 
   app.post("/api/collect", async (_req, res, next) => {
     await runExclusiveOperation("模拟采集", res, next, async () => {
       const batch = buildFakeBatch(new Date());
-      const excel = await workbookExporter(batch, outputDir);
-      const offlinePackage = await offlinePackageExporter(batch, outputDir);
-
-      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+      return exportThirdVersionArtifacts(batch);
     });
   });
 
   app.post("/api/collect-real-domestic", async (req, res, next) => {
-    await runExclusiveOperation("国内真实采集", res, next, async () => {
+    await runExclusiveOperation("国内真实采集", res, next, async (control) => {
       const rawLimit = isRecord(req.body) && typeof req.body.limit === "number" ? req.body.limit : undefined;
-      const batch = await pilotCollector.runDomesticBatchCollection(rawLimit);
-      const excel = await workbookExporter(batch, outputDir);
-      const offlinePackage = await offlinePackageExporter(batch, outputDir);
-
-      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+      const batch = await pilotCollector.runDomesticBatchCollection(rawLimit, control);
+      return exportThirdVersionArtifacts(batch);
     });
   });
 
   app.post("/api/collect-real-international", async (req, res, next) => {
-    await runExclusiveOperation("国际真实采集", res, next, async () => {
+    await runExclusiveOperation("国际真实采集", res, next, async (control) => {
       const rawLimit = isRecord(req.body) && typeof req.body.limit === "number" ? req.body.limit : undefined;
-      const batch = await pilotCollector.runInternationalBatchCollection(rawLimit);
-      const excel = await workbookExporter(batch, outputDir);
-      const offlinePackage = await offlinePackageExporter(batch, outputDir);
-
-      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+      const batch = await pilotCollector.runInternationalBatchCollection(rawLimit, control);
+      return exportThirdVersionArtifacts(batch);
     });
   });
 
-  app.post("/api/collect-real-full", async (_req, res, next) => {
-    await runExclusiveOperation("完整真实采集", res, next, async () => {
-      const batch = await pilotCollector.runFullBatchCollection();
-      const excel = await workbookExporter(batch, outputDir);
-      const offlinePackage = await offlinePackageExporter(batch, outputDir);
+  app.post("/api/collect-real-full", async (req, res, next) => {
+    const parsed = parseThirdVersionOptionsInput(req.body, state.thirdVersionOptions);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error, thirdVersion: buildThirdVersionResponse() });
+      return;
+    }
 
-      return setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+    await runExclusiveOperation("完整真实采集", res, next, async (control) => {
+      state.thirdVersionOptions = parsed.options;
+      const batch = await pilotCollector.runFullBatchCollection({
+        ...(thirdVersionCollectionLimits(state.thirdVersionOptions) ?? {}),
+        control
+      });
+      return exportThirdVersionArtifacts(batch);
     });
   });
 
   app.post("/api/acceptance/second-version-final/run", async (_req, res, next) => {
-    await runExclusiveOperation("第二版最终验收：航班 + 酒店连续完整采集", res, next, async () => {
+    await runExclusiveOperation("第二版最终验收：航班 + 酒店连续完整采集", res, next, async (control) => {
       const startedAt = new Date();
-      const flightBatch = await pilotCollector.runFullBatchCollection();
+      const flightBatch = await pilotCollector.runFullBatchCollection({ control });
+      await control.waitIfPaused();
+      control.throwIfStopped();
       const hotelResult = await pilotCollector.runHotelScaleValidationProbe({ limit: 40, disableBudgets: true });
+      await control.waitIfPaused();
+      control.throwIfStopped();
       const batch = buildSecondVersionAcceptanceBatch(flightBatch, hotelResult, new Date());
-      const excel = await workbookExporter(batch, outputDir);
-      const offlinePackage = await offlinePackageExporter(batch, outputDir);
-      const persisted = await setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+      const persisted = await exportThirdVersionArtifacts(batch);
       const endedAt = new Date();
 
       return {
@@ -942,7 +1228,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
 
   app.post("/api/acceptance/second-version-final/finalize-current", async (_req, res, next) => {
     await runExclusiveOperation("第二版最终验收：生成航班 + 酒店一体化交付物", res, next, async () => {
-      const currentBatch = state.batch;
+      const currentBatch = state.batch ? getThirdVersionSourceBatch(state.batch) : null;
       if (!currentBatch || currentBatch.samples.length !== 20) {
         res.status(400);
         return { error: `当前航班批次未达标：需要 20 条航班，当前 ${currentBatch?.samples.length ?? 0} 条。` };
@@ -955,9 +1241,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       }
 
       const batch = buildSecondVersionAcceptanceBatch(currentBatch, state.hotelScaleValidation, new Date());
-      const excel = await workbookExporter(batch, outputDir);
-      const offlinePackage = await offlinePackageExporter(batch, outputDir);
-      const persisted = await setCurrentBatchArtifacts(batch, excel.path, offlinePackage.path);
+      const persisted = await exportThirdVersionArtifacts(batch);
 
       return {
         ...persisted,
@@ -988,10 +1272,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
         return { error: "还没有可用批次，不能重新生成交付包。" };
       }
 
-      const excel = await workbookExporter(currentBatch, outputDir);
-      const offlinePackage = await offlinePackageExporter(currentBatch, outputDir);
-
-      return setCurrentBatchArtifacts(currentBatch, excel.path, offlinePackage.path);
+      return exportThirdVersionArtifacts(currentBatch);
     });
   });
 
@@ -1269,7 +1550,8 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
 
     res.json({
       batch: state.batch,
-      artifacts: state.artifacts
+      artifacts: state.artifacts,
+      thirdVersion: buildThirdVersionResponse()
     });
   });
 

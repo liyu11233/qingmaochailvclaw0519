@@ -1,6 +1,15 @@
 export type RouteScope = "国内" | "国际";
 
 export type PlatformName = "青猫差旅" | "携程商旅" | "阿里商旅" | "在途商旅";
+export type CompetitorPlatformName = Exclude<PlatformName, "青猫差旅">;
+export type ComparisonMode = "internal_discussion" | "external_sales" | "specified_platform";
+export type ComparisonBasis =
+  | "lowestCompetitor"
+  | "competitorAverage"
+  | "competitorRange"
+  | "specifiedPlatform"
+  | "specifiedPlatformUnavailable"
+  | "unavailable";
 
 export type QuoteStatus = "可订" | "无同航班" | "未展示" | "不可订" | "采集失败";
 
@@ -93,24 +102,78 @@ export interface CollectionBatch {
   samples: FlightSample[];
   hotels?: HotelSample[];
   failureNotes?: string[];
+  thirdVersion?: ThirdVersionBatchTrace;
 }
 
 export interface FlightSummary {
   sampleId: string;
   lowestPlatform: PlatformName | "";
   qingmaoGap: number | null;
-  comparisonBasis: "lowestCompetitor" | "unavailable";
+  comparisonBasis: ComparisonBasis;
   comparisonLabel: string;
   availablePlatformCount: number;
   evidenceCount: number;
   conclusion: string;
+  competitorCount: number;
+}
+
+export interface PriceComparisonOptions {
+  comparisonMode?: ComparisonMode;
+  specifiedPlatform?: CompetitorPlatformName;
 }
 
 export interface PriceComparisonSummary {
   lowestPlatform: PlatformName | "";
   qingmaoGap: number | null;
-  comparisonBasis: "lowestCompetitor" | "unavailable";
+  comparisonBasis: ComparisonBasis;
   comparisonLabel: string;
   conclusion: string;
   competitorCount: number;
+}
+
+export interface ThirdVersionTraceOptions extends PriceComparisonOptions {
+  hotelDisplayLimit: number;
+  flightDisplayLimit: number;
+  generationMode: "real_random" | "qingmao_advantage";
+  targetAdvantageRatio: number;
+}
+
+export interface ThirdVersionTraceStatus {
+  rawHotelCandidates: number;
+  rawFlightCandidates: number;
+  hotelStrategyCandidateLimit: number;
+  flightStrategyCandidateLimit: number;
+  hotelStrategyCandidates: number;
+  flightStrategyCandidates: number;
+  hotelDisplayed: number;
+  flightDisplayed: number;
+  hotelDisplayLimit: number;
+  flightDisplayLimit: number;
+  hotelAdvantageCount: number;
+  flightAdvantageCount: number;
+  hotelAdvantageDenominator: number;
+  flightAdvantageDenominator: number;
+  hotelAdvantageRatio: number;
+  flightAdvantageRatio: number;
+  hotelTargetMet: boolean;
+  flightTargetMet: boolean;
+  hotelFull: boolean;
+  flightFull: boolean;
+  exportPrefix: "【青】" | "【随】";
+  exportStatus: "达标" | "未达标" | "未满量" | "未满量未达标";
+  exportAdvantageRatio: number;
+  exportBaseName: string;
+  exportNamePreview: string;
+  failureReasons: string[];
+}
+
+export interface ThirdVersionBatchTrace {
+  sourceBatchId: string;
+  sourceGeneratedAt: string;
+  options: ThirdVersionTraceOptions;
+  status: ThirdVersionTraceStatus;
+  rawSamples: FlightSample[];
+  rawHotels: HotelSample[];
+  sourceFailureNotes: string[];
+  selectionNotes: string[];
 }
