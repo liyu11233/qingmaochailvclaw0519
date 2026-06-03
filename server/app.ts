@@ -374,7 +374,12 @@ function buildAcceptanceHotelSample(sample: NonNullable<HotelScaleValidationResu
   });
 }
 
-function buildSecondVersionAcceptanceBatch(flightBatch: CollectionBatch, hotelResult: HotelScaleValidationResult, generatedAt: Date): CollectionBatch {
+function buildFlightHotelCollectionBatch(
+  flightBatch: CollectionBatch,
+  hotelResult: HotelScaleValidationResult,
+  generatedAt: Date,
+  options: { idSuffix: string; requireFullAcceptance?: boolean }
+): CollectionBatch {
   const completedHotelSamples = hotelResult.groups.flatMap((group) =>
     group.samples.filter((sample) => sample.status === "completed")
   );
@@ -382,20 +387,28 @@ function buildSecondVersionAcceptanceBatch(flightBatch: CollectionBatch, hotelRe
   const flightCount = flightBatch.samples.length;
   const hotelCount = hotels.length;
 
-  if (flightBatch.status !== "ready" || flightCount !== 20) {
-    throw new Error(`航班未达标：需要 20 条完整样本，当前 ${flightCount} 条，状态 ${flightBatch.status}`);
+  if (flightBatch.status !== "ready" || flightCount === 0) {
+    throw new Error(`航班未达标：需要完整航班样本，当前 ${flightCount} 条，状态 ${flightBatch.status}`);
   }
-  if (hotelResult.status !== "completed" || hotelResult.completedCount !== 40 || hotelCount !== 40) {
-    throw new Error(`酒店未达标：需要 40 家完整样本，当前完整 ${hotelResult.completedCount} 家，可入批次 ${hotelCount} 家，状态 ${hotelResult.status}`);
+  if (hotelResult.status !== "completed" || hotelResult.completedCount !== hotelCount || hotelCount === 0) {
+    throw new Error(`酒店未达标：需要完整酒店样本，当前完整 ${hotelResult.completedCount} 家，可入批次 ${hotelCount} 家，状态 ${hotelResult.status}`);
+  }
+  if (options.requireFullAcceptance) {
+    if (flightCount !== 20) {
+      throw new Error(`航班未达标：需要 20 条完整样本，当前 ${flightCount} 条，状态 ${flightBatch.status}`);
+    }
+    if (hotelResult.completedCount !== 40 || hotelCount !== 40) {
+      throw new Error(`酒店未达标：需要 40 家完整样本，当前完整 ${hotelResult.completedCount} 家，可入批次 ${hotelCount} 家，状态 ${hotelResult.status}`);
+    }
   }
 
   return {
-    id: `batch-${formatBatchTimestamp(generatedAt)}-second-version-final-acceptance`,
+    id: `batch-${formatBatchTimestamp(generatedAt)}-${options.idSuffix}`,
     status: "ready",
     generatedAt: generatedAt.toISOString(),
     sampleCount: flightCount + hotelCount,
     successCount: flightCount + hotelCount,
-    failedCount: hotelResult.failedCount + hotelResult.partialCount + hotelResult.skippedCount + hotelResult.timeoutCount + hotelResult.unattemptedCount,
+    failedCount: flightBatch.failedCount + hotelResult.failedCount + hotelResult.partialCount + hotelResult.skippedCount + hotelResult.timeoutCount + hotelResult.unattemptedCount,
     samples: flightBatch.samples,
     hotels,
     failureNotes: [
@@ -409,6 +422,13 @@ function buildSecondVersionAcceptanceBatch(flightBatch: CollectionBatch, hotelRe
       )
     ]
   };
+}
+
+function buildSecondVersionAcceptanceBatch(flightBatch: CollectionBatch, hotelResult: HotelScaleValidationResult, generatedAt: Date): CollectionBatch {
+  return buildFlightHotelCollectionBatch(flightBatch, hotelResult, generatedAt, {
+    idSuffix: "second-version-final-acceptance",
+    requireFullAcceptance: true
+  });
 }
 
 function parseHotelSingleDiagnosisInput(value: unknown): { ok: true; input: HotelSingleDiagnosisInput } | { ok: false; error: string } {
@@ -1185,9 +1205,21 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
 
     await runExclusiveOperation("完整真实采集", res, next, async (control) => {
       state.thirdVersionOptions = parsed.options;
-      const batch = await pilotCollector.runFullBatchCollection({
-        ...(thirdVersionCollectionLimits(state.thirdVersionOptions) ?? {}),
+      const collectionLimits = thirdVersionCollectionLimits(state.thirdVersionOptions) ?? {};
+      const flightBatch = await pilotCollector.runFullBatchCollection({
+        ...collectionLimits,
         control
+      });
+      await control.waitIfPaused();
+      control.throwIfStopped();
+      const hotelResult = await pilotCollector.runHotelScaleValidationProbe({
+        limit: Math.min(collectionLimits.hotelCandidateLimit ?? 40, 40),
+        disableBudgets: true
+      });
+      await control.waitIfPaused();
+      control.throwIfStopped();
+      const batch = buildFlightHotelCollectionBatch(flightBatch, hotelResult, new Date(), {
+        idSuffix: "real-full"
       });
       return exportThirdVersionArtifacts(batch);
     });

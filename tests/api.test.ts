@@ -94,6 +94,102 @@ describe("management API", () => {
     } as never;
   }
 
+  function buildCompletedHotelScaleValidationResult() {
+    const groups = ["首旅如家", "锦江", "华住", "东呈", "亚朵"];
+    const ratePlans = ["大床无早餐", "大床有早餐", "双床无早餐", "双床有早餐"];
+    const platforms = ["青猫差旅", "携程商旅", "阿里商旅", "在途商旅"];
+
+    return {
+      status: "completed",
+      mode: "scale-validation",
+      targetTotal: 40,
+      targetPerGroup: 8,
+      mainRatePlan: "大床有早餐",
+      checkInDate: "2026-05-25",
+      checkOutDate: "2026-05-26",
+      nights: 1,
+      budget: {
+        totalMs: null,
+        perGroupMs: null,
+        maxAttemptsPerGroup: 24
+      },
+      platformOrder: platforms,
+      cityPool: ["广州"],
+      groups: groups.map((group, groupIndex) => ({
+        group,
+        groupIndex: groupIndex + 1,
+        targetCount: 8,
+        completedCount: 8,
+        failedCount: 0,
+        partialCount: 0,
+        skippedCount: 0,
+        timeoutCount: 0,
+        unattemptedCount: 0,
+        timeoutBudget: false,
+        samples: Array.from({ length: 8 }, (_, sampleIndex) => {
+          const hotelName = `${group}完整酒店${sampleIndex + 1}`;
+          return {
+            group,
+            groupIndex: groupIndex + 1,
+            sampleIndex: sampleIndex + 1,
+            query: {
+              city: "广州",
+              keyword: group,
+              checkInDate: "2026-05-25",
+              checkOutDate: "2026-05-26",
+              nights: 1
+            },
+            status: "completed",
+            selectedCandidate: {
+              hotelName,
+              level: "舒适",
+              score: "4.8",
+              area: "广州",
+              address: `广州市测试路${groupIndex}${sampleIndex}号`,
+              price: 220 + groupIndex + sampleIndex,
+              rawText: hotelName
+            },
+            quotes: ratePlans.flatMap((ratePlan, ratePlanIndex) =>
+              platforms.map((platform, platformIndex) => ({
+                platform,
+                status: "available",
+                price: 220 + groupIndex + sampleIndex + ratePlanIndex + platformIndex,
+                hotelName,
+                roomType: `${ratePlan}房`,
+                ratePlan,
+                durationMs: 1000 + platformIndex,
+                screenshotPath: path.resolve(`outputs/current/pilot/hotel-scale-validation/test/${group}-${sampleIndex + 1}-${ratePlan}-${platform}.png`),
+                finalUrl: "https://example.com/hotel"
+              }))
+            ),
+            message: `${hotelName} 四平台四口径均已读取`
+          };
+        })
+      })),
+      completedCount: 40,
+      failedCount: 0,
+      partialCount: 0,
+      skippedCount: 0,
+      timeoutCount: 0,
+      unattemptedCount: 0,
+      evidenceCompleteCount: 40,
+      evidenceMissingCount: 0,
+      evidenceSaveFailedCount: 0,
+      evidenceCompleteRate: 1,
+      timeoutBudget: false,
+      summaryPath: "/tmp/hotel-scale-validation/summary.json",
+      diagnosticReviewPath: "/tmp/hotel-scale-validation/diagnostic-review.html",
+      timing: {
+        platforms: [],
+        steps: [],
+        slowestSteps: [],
+        timeoutSamples: []
+      },
+      updatedAt: "2026-05-18T10:05:20.000Z",
+      message: "40 家酒店放量验证完成：完整 40/40"
+    };
+  }
+
   it("starts empty, creates a fake collection batch, and exposes export links", async () => {
     const app = createTestApp({ outputDir: await createTempOutputDir() });
 
@@ -245,7 +341,8 @@ describe("management API", () => {
   it("preserves the current third-version configuration when starting full collection", async () => {
     const outputDir = await createTempOutputDir();
     const runFullBatchCollection = vi.fn(async () => buildFakeBatch(new Date("2026-05-18T10:00:00+08:00")));
-    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection });
+    const runHotelScaleValidationProbe = vi.fn(async () => buildCompletedHotelScaleValidationResult());
+    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection, runHotelScaleValidationProbe });
     const app = createTestApp({ outputDir, pilotCollector });
 
     const collect = await request(app)
@@ -260,6 +357,7 @@ describe("management API", () => {
       .expect(200);
 
     expect(runFullBatchCollection).toHaveBeenCalledTimes(1);
+    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith({ limit: 16, disableBudgets: true });
     expect(collect.body.thirdVersion.options).toMatchObject({
       hotelDisplayLimit: 8,
       flightDisplayLimit: 4,
@@ -284,7 +382,8 @@ describe("management API", () => {
     });
     const offlinePackage = vi.fn(async (batch: ReturnType<typeof buildFakeBatch>, dir: string) => exportTestOfflinePackage(batch, dir));
     const runFullBatchCollection = vi.fn(async () => sourceBatch);
-    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection });
+    const runHotelScaleValidationProbe = vi.fn(async () => buildCompletedHotelScaleValidationResult());
+    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection, runHotelScaleValidationProbe });
     const app = createTestApp({ outputDir, pilotCollector, exporters: { workbook, offlinePackage } });
 
     const collect = await request(app)
@@ -306,6 +405,7 @@ describe("management API", () => {
         throwIfStopped: expect.any(Function)
       })
     }));
+    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith({ limit: 10, disableBudgets: true });
     expect(exportedBatches[0].samples).toHaveLength(4);
     expect(exportedBatches[0].hotels).toHaveLength(5);
     expect(exportedBatches[0].thirdVersion?.rawSamples).toHaveLength(sourceBatch.samples.length);
@@ -316,6 +416,44 @@ describe("management API", () => {
     expect(collect.body.thirdVersion.status.rawHotelCandidates).toBe(sourceBatch.hotels!.length);
     expect(collect.body.thirdVersion.status.flightStrategyCandidateLimit).toBe(8);
     expect(collect.body.thirdVersion.status.hotelStrategyCandidateLimit).toBe(10);
+  });
+
+  it("combines flight collection with 40-hotel validation when starting full real collection", async () => {
+    const outputDir = await createTempOutputDir();
+    const flightBatch = {
+      ...buildFakeBatch(new Date("2026-05-18T10:00:00+08:00")),
+      hotels: [],
+      sampleCount: 20,
+      successCount: 20
+    };
+    const runFullBatchCollection = vi.fn(async () => flightBatch);
+    const runHotelScaleValidationProbe = vi.fn(async () => buildCompletedHotelScaleValidationResult());
+    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection, runHotelScaleValidationProbe });
+    const app = createTestApp({ outputDir, pilotCollector });
+
+    const collect = await request(app)
+      .post("/api/collect-real-full")
+      .send({
+        hotelDisplayLimit: 40,
+        flightDisplayLimit: 20,
+        generationMode: "real_random",
+        targetAdvantageRatio: 70,
+        comparisonMode: "internal_discussion"
+      })
+      .expect(200);
+
+    expect(runFullBatchCollection).toHaveBeenCalledTimes(1);
+    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith({ limit: 40, disableBudgets: true });
+    expect(collect.body.batch.samples).toHaveLength(20);
+    expect(collect.body.batch.hotels).toHaveLength(40);
+    expect(collect.body.thirdVersion.status.rawFlightCandidates).toBe(20);
+    expect(collect.body.thirdVersion.status.rawHotelCandidates).toBe(40);
+    expect(collect.body.thirdVersion.status.flightDisplayed).toBe(20);
+    expect(collect.body.thirdVersion.status.hotelDisplayed).toBe(40);
+    expect(collect.body.batch.failureNotes).toEqual(expect.arrayContaining([
+      expect.stringContaining(`航班来源批次：${flightBatch.id}`),
+      expect.stringContaining("酒店来源验收：/tmp/hotel-scale-validation/summary.json")
+    ]));
   });
 
   it("pauses and resumes the active collection through a real collection control signal", async () => {
@@ -336,7 +474,8 @@ describe("management API", () => {
         resolveFull = resolve;
       });
     });
-    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection });
+    const runHotelScaleValidationProbe = vi.fn(async () => buildCompletedHotelScaleValidationResult());
+    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection, runHotelScaleValidationProbe });
     const app = createTestApp({ outputDir, pilotCollector });
 
     const fullRequest = new Promise<void>((resolve, reject) => {
@@ -1923,9 +2062,12 @@ describe("management API", () => {
       throwIfStopped: expect.any(Function)
     }));
 
+    pilotCollector.runHotelScaleValidationProbe.mockResolvedValueOnce(buildCompletedHotelScaleValidationResult() as never);
     const realFullCollect = await request(app).post("/api/collect-real-full").expect(200);
     expect(realFullCollect.body.batch.id).toContain("real-full");
-    expect(realFullCollect.body.batch.sampleCount).toBe(2);
+    expect(realFullCollect.body.batch.sampleCount).toBe(42);
+    expect(realFullCollect.body.batch.samples).toHaveLength(2);
+    expect(realFullCollect.body.batch.hotels).toHaveLength(40);
     expect(realFullCollect.body.artifacts.excel).toMatch(/\.xlsx$/);
     expect(realFullCollect.body.artifacts.offlinePackage).toMatch(/\.html$/);
     expect(pilotCollector.runFullBatchCollection).toHaveBeenCalledTimes(1);
@@ -2192,6 +2334,7 @@ describe("management API", () => {
       runZtripHotelProbe: vi.fn(),
       runDomesticBatchCollection: vi.fn(),
       runInternationalBatchCollection: vi.fn(),
+      runHotelScaleValidationProbe: vi.fn(async () => buildCompletedHotelScaleValidationResult()),
       runFullBatchCollection: vi.fn(async () => {
         markFullStarted();
         return await new Promise<ReturnType<typeof buildFakeBatch>>((resolve) => {
