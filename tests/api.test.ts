@@ -357,7 +357,7 @@ describe("management API", () => {
       .expect(200);
 
     expect(runFullBatchCollection).toHaveBeenCalledTimes(1);
-    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith({ limit: 16, disableBudgets: true });
+    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith(expect.objectContaining({ limit: 16, disableBudgets: true }));
     expect(collect.body.thirdVersion.options).toMatchObject({
       hotelDisplayLimit: 8,
       flightDisplayLimit: 4,
@@ -370,6 +370,161 @@ describe("management API", () => {
 
     const status = await request(app).get("/api/status").expect(200);
     expect(status.body.thirdVersion.options.comparisonMode).toBe("external_sales");
+  });
+
+  it("locks default collection dates on the backend before full real collection", async () => {
+    const outputDir = await createTempOutputDir();
+    const runFullBatchCollection = vi.fn(async () => buildFakeBatch(new Date("2026-06-03T10:00:00+08:00")));
+    const runHotelScaleValidationProbe = vi.fn(async () => buildCompletedHotelScaleValidationResult());
+    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection, runHotelScaleValidationProbe });
+    const app = createTestApp({
+      outputDir,
+      pilotCollector,
+      now: () => new Date("2026-06-03T10:00:00+08:00")
+    });
+
+    const response = await request(app)
+      .post("/api/collect-real-full")
+      .send({ collectionDates: { mode: "default" } })
+      .expect(200);
+
+    const expectedDates = {
+      mode: "default",
+      flightTravelDate: "2026-06-06",
+      hotelCheckInDate: "2026-06-04",
+      hotelCheckOutDate: "2026-06-05",
+      hotelNights: 1
+    };
+    expect(runFullBatchCollection).toHaveBeenCalledWith(expect.objectContaining({
+      collectionDates: expectedDates,
+      control: expect.objectContaining({
+        waitIfPaused: expect.any(Function),
+        throwIfStopped: expect.any(Function)
+      })
+    }));
+    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith(expect.objectContaining({
+      checkInDate: "2026-06-04",
+      checkOutDate: "2026-06-05",
+      disableBudgets: true
+    }));
+    expect(response.body.batch.collectionDates).toEqual(expectedDates);
+    expect(response.body.batch.failureNotes).toEqual(expect.arrayContaining([
+      expect.stringContaining("本次目标查询日期")
+    ]));
+  });
+
+  it("validates manual collection dates and recalculates hotel checkout on the backend", async () => {
+    const outputDir = await createTempOutputDir();
+    const runFullBatchCollection = vi.fn(async () => buildFakeBatch(new Date("2026-06-03T10:00:00+08:00")));
+    const runHotelScaleValidationProbe = vi.fn(async () => buildCompletedHotelScaleValidationResult());
+    const pilotCollector = createMinimalPilotCollector({ runFullBatchCollection, runHotelScaleValidationProbe });
+    const app = createTestApp({
+      outputDir,
+      pilotCollector,
+      now: () => new Date("2026-06-03T10:00:00+08:00")
+    });
+
+    await request(app)
+      .post("/api/collect-real-full")
+      .send({
+        collectionDates: {
+          mode: "manual",
+          flightTravelDate: "2026-06-20",
+          hotelCheckInDate: "2026-06-10",
+          hotelCheckOutDate: "2099-01-01"
+        }
+      })
+      .expect(200);
+
+    const expectedDates = {
+      mode: "manual",
+      flightTravelDate: "2026-06-20",
+      hotelCheckInDate: "2026-06-10",
+      hotelCheckOutDate: "2026-06-11",
+      hotelNights: 1
+    };
+    expect(runFullBatchCollection).toHaveBeenCalledWith(expect.objectContaining({
+      collectionDates: expectedDates
+    }));
+    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith(expect.objectContaining({
+      checkInDate: "2026-06-10",
+      checkOutDate: "2026-06-11"
+    }));
+
+    await request(app)
+      .post("/api/collect-real-full")
+      .send({ collectionDates: { mode: "manual", flightTravelDate: "2026-02-31", hotelCheckInDate: "2026-06-10" } })
+      .expect(400);
+    expect(runFullBatchCollection).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the same locked date config to domestic, international, hotel, and advanced probes", async () => {
+    const outputDir = await createTempOutputDir();
+    const flightBatch = buildFakeBatch(new Date("2026-06-03T10:00:00+08:00"));
+    const runDomesticBatchCollection = vi.fn(async () => ({ ...flightBatch, id: "batch-test-real-domestic", samples: flightBatch.samples.slice(0, 1), sampleCount: 1, successCount: 1 }));
+    const runInternationalBatchCollection = vi.fn(async () => ({ ...flightBatch, id: "batch-test-real-international", samples: flightBatch.samples.slice(0, 1), sampleCount: 1, successCount: 1 }));
+    const runQingmaoCandidateProbe = vi.fn(async () => ({
+      status: "completed",
+      route: { scope: "国内", origin: "广州", destination: "上海", travelDate: "2026-06-20" },
+      candidates: [],
+      totalFlights: 0,
+      updatedAt: "2026-06-03T10:00:00.000Z",
+      message: "done"
+    }));
+    const runSameFlightComparisonProbe = vi.fn(async () => ({
+      status: "completed",
+      route: { scope: "国内", origin: "广州", destination: "上海", travelDate: "2026-06-20" },
+      selectedFlight: null,
+      quotes: [],
+      updatedAt: "2026-06-03T10:00:00.000Z",
+      message: "done"
+    }));
+    const runHotelScaleValidationProbe = vi.fn(async () => buildCompletedHotelScaleValidationResult());
+    const pilotCollector = createMinimalPilotCollector({
+      runDomesticBatchCollection,
+      runInternationalBatchCollection,
+      runQingmaoCandidateProbe,
+      runSameFlightComparisonProbe,
+      runHotelScaleValidationProbe
+    });
+    const app = createTestApp({ outputDir, pilotCollector, now: () => new Date("2026-06-03T10:00:00+08:00") });
+    const collectionDates = {
+      mode: "manual",
+      flightTravelDate: "2026-06-20",
+      hotelCheckInDate: "2026-06-10"
+    };
+    const lockedDates = {
+      mode: "manual",
+      flightTravelDate: "2026-06-20",
+      hotelCheckInDate: "2026-06-10",
+      hotelCheckOutDate: "2026-06-11",
+      hotelNights: 1
+    };
+
+    await request(app).post("/api/collect-real-domestic").send({ limit: 1, collectionDates }).expect(200);
+    expect(runDomesticBatchCollection).toHaveBeenCalledWith(1, expect.objectContaining({
+      waitIfPaused: expect.any(Function),
+      throwIfStopped: expect.any(Function)
+    }), lockedDates);
+
+    await request(app).post("/api/collect-real-international").send({ limit: 1, collectionDates }).expect(200);
+    expect(runInternationalBatchCollection).toHaveBeenCalledWith(1, expect.objectContaining({
+      waitIfPaused: expect.any(Function),
+      throwIfStopped: expect.any(Function)
+    }), lockedDates);
+
+    await request(app).post("/api/pilot/hotel-scale-validation/run").send({ limit: 3, collectionDates }).expect(200);
+    expect(runHotelScaleValidationProbe).toHaveBeenLastCalledWith(expect.objectContaining({
+      limit: 3,
+      checkInDate: "2026-06-10",
+      checkOutDate: "2026-06-11"
+    }));
+
+    await request(app).post("/api/pilot/qingmao-candidates/run").send({ collectionDates }).expect(200);
+    expect(runQingmaoCandidateProbe).toHaveBeenCalledWith(lockedDates);
+
+    await request(app).post("/api/pilot/same-flight/run").send({ collectionDates }).expect(200);
+    expect(runSameFlightComparisonProbe).toHaveBeenCalledWith(lockedDates);
   });
 
   it("passes real collection results through the third-version strategy before exporting", async () => {
@@ -405,7 +560,7 @@ describe("management API", () => {
         throwIfStopped: expect.any(Function)
       })
     }));
-    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith({ limit: 10, disableBudgets: true });
+    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith(expect.objectContaining({ limit: 10, disableBudgets: true }));
     expect(exportedBatches[0].samples).toHaveLength(4);
     expect(exportedBatches[0].hotels).toHaveLength(5);
     expect(exportedBatches[0].thirdVersion?.rawSamples).toHaveLength(sourceBatch.samples.length);
@@ -443,7 +598,7 @@ describe("management API", () => {
       .expect(200);
 
     expect(runFullBatchCollection).toHaveBeenCalledTimes(1);
-    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith({ limit: 40, disableBudgets: true });
+    expect(runHotelScaleValidationProbe).toHaveBeenCalledWith(expect.objectContaining({ limit: 40, disableBudgets: true }));
     expect(collect.body.batch.samples).toHaveLength(20);
     expect(collect.body.batch.hotels).toHaveLength(40);
     expect(collect.body.thirdVersion.status.rawFlightCandidates).toBe(20);
@@ -1764,35 +1919,39 @@ describe("management API", () => {
 
     const defaultScaleValidation = await request(app).post("/api/pilot/hotel-scale-validation/run").expect(200);
     expect(defaultScaleValidation.body).toMatchObject({
-      checkInDate: "2026-05-25",
-      checkOutDate: "2026-05-26",
-      nights: 1
+      checkInDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      checkOutDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)
     });
-    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenCalledWith({});
+    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenCalledWith(expect.objectContaining({
+      checkInDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      checkOutDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)
+    }));
 
-    const explicitScaleInput = { checkInDate: "2026-06-02", checkOutDate: "2026-06-04" };
+    const explicitScaleInput = { collectionDates: { mode: "manual", flightTravelDate: "2026-06-20", hotelCheckInDate: "2026-06-02", hotelCheckOutDate: "2026-06-04" } };
     const hotelScaleValidation = await request(app).post("/api/pilot/hotel-scale-validation/run").send(explicitScaleInput).expect(200);
     expect(hotelScaleValidation.body).toMatchObject({
       status: "partial",
       mode: "scale-validation",
       checkInDate: "2026-06-02",
-      checkOutDate: "2026-06-04",
-      nights: 2,
+      checkOutDate: "2026-06-03",
       completedCount: 39,
       evidenceCompleteRate: 0.975
     });
-    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(explicitScaleInput);
+    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(expect.objectContaining({
+      checkInDate: "2026-06-02",
+      checkOutDate: "2026-06-03"
+    }));
 
     const smokeScaleInput = { limit: 5 };
     await request(app).post("/api/pilot/hotel-scale-validation/run").send(smokeScaleInput).expect(200);
-    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(smokeScaleInput);
+    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(expect.objectContaining(smokeScaleInput));
 
     const threeHotelScaleInput = { limit: 3 };
     await request(app).post("/api/pilot/hotel-scale-validation/run").send(threeHotelScaleInput).expect(200);
-    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(threeHotelScaleInput);
+    expect(pilotCollector.runHotelScaleValidationProbe).toHaveBeenLastCalledWith(expect.objectContaining(threeHotelScaleInput));
 
-    await request(app).post("/api/pilot/hotel-scale-validation/run").send({ checkInDate: "2026-06-02" }).expect(400);
-    await request(app).post("/api/pilot/hotel-scale-validation/run").send({ checkInDate: "2026-06-04", checkOutDate: "2026-06-02" }).expect(400);
+    await request(app).post("/api/pilot/hotel-scale-validation/run").send({ collectionDates: { mode: "manual", flightTravelDate: "2026-06-20" } }).expect(400);
+    await request(app).post("/api/pilot/hotel-scale-validation/run").send({ collectionDates: { mode: "manual", flightTravelDate: "2026-06-20", hotelCheckInDate: "2026-06-31" } }).expect(400);
     await request(app).post("/api/pilot/hotel-scale-validation/run").send({ limit: 41 }).expect(400);
 
     const singleDiagnosisStatus = await request(app).get("/api/pilot/hotel-single-diagnosis/status").expect(200);
@@ -1937,7 +2096,7 @@ describe("management API", () => {
       mainRatePlan: "大床有早餐"
     });
 
-    const calibrationInput = { checkInDate: "2026-05-25", checkOutDate: "2026-05-26" };
+    const calibrationInput = { collectionDates: { mode: "manual", flightTravelDate: "2026-06-20", hotelCheckInDate: "2026-05-25", hotelCheckOutDate: "2099-01-01" } };
     const calibration = await request(app).post("/api/pilot/hotel-calibration/run").send(calibrationInput).expect(200);
     expect(calibration.body).toMatchObject({
       status: "partial",
@@ -1968,17 +2127,22 @@ describe("management API", () => {
       failureType: "competitor_no_same_hotel",
       failureReason: "门牌号不一致"
     });
-    expect(pilotCollector.runHotelCalibrationProbe).toHaveBeenCalledWith(calibrationInput);
+    expect(pilotCollector.runHotelCalibrationProbe).toHaveBeenCalledWith(
+      expect.objectContaining({ checkInDate: "2026-05-25", checkOutDate: "2026-05-26" }),
+      expect.objectContaining({ hotelCheckInDate: "2026-05-25", hotelCheckOutDate: "2026-05-26" })
+    );
 
     const aliOnlyCalibrationInput = {
-      checkInDate: "2026-05-25",
-      checkOutDate: "2026-05-26",
+      collectionDates: { mode: "manual", flightTravelDate: "2026-06-20", hotelCheckInDate: "2026-05-25" },
       platforms: ["阿里商旅"]
     };
     const aliOnlyCalibration = await request(app).post("/api/pilot/hotel-calibration/run").send(aliOnlyCalibrationInput).expect(200);
     expect(aliOnlyCalibration.body.platformOrder).toEqual(["青猫差旅", "阿里商旅"]);
     expect(aliOnlyCalibration.body.samples[0].platforms.map((platform: { platform: string }) => platform.platform)).toEqual(["青猫差旅", "阿里商旅"]);
-    expect(pilotCollector.runHotelCalibrationProbe).toHaveBeenLastCalledWith(aliOnlyCalibrationInput);
+    expect(pilotCollector.runHotelCalibrationProbe).toHaveBeenLastCalledWith(
+      expect.objectContaining({ checkInDate: "2026-05-25", checkOutDate: "2026-05-26", platforms: ["阿里商旅"] }),
+      expect.objectContaining({ hotelCheckInDate: "2026-05-25", hotelCheckOutDate: "2026-05-26" })
+    );
 
     const invalidCalibration = await request(app)
       .post("/api/pilot/hotel-calibration/run")
@@ -2050,6 +2214,12 @@ describe("management API", () => {
     expect(pilotCollector.runDomesticBatchCollection).toHaveBeenCalledWith(1, expect.objectContaining({
       waitIfPaused: expect.any(Function),
       throwIfStopped: expect.any(Function)
+    }), expect.objectContaining({
+      mode: "default",
+      flightTravelDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      hotelCheckInDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      hotelCheckOutDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      hotelNights: 1
     }));
 
     const realInternationalCollect = await request(app).post("/api/collect-real-international").send({ limit: 1 }).expect(200);
@@ -2060,6 +2230,12 @@ describe("management API", () => {
     expect(pilotCollector.runInternationalBatchCollection).toHaveBeenCalledWith(1, expect.objectContaining({
       waitIfPaused: expect.any(Function),
       throwIfStopped: expect.any(Function)
+    }), expect.objectContaining({
+      mode: "default",
+      flightTravelDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      hotelCheckInDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      hotelCheckOutDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      hotelNights: 1
     }));
 
     pilotCollector.runHotelScaleValidationProbe.mockResolvedValueOnce(buildCompletedHotelScaleValidationResult() as never);

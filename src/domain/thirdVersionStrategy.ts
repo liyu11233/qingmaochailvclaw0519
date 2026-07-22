@@ -343,7 +343,8 @@ export function getThirdVersionSourceBatch(batch: CollectionBatch): CollectionBa
     failedCount: batch.failedCount,
     samples: batch.thirdVersion.rawSamples,
     hotels: batch.thirdVersion.rawHotels,
-    failureNotes: batch.thirdVersion.sourceFailureNotes
+    failureNotes: batch.thirdVersion.sourceFailureNotes,
+    collectionDates: batch.collectionDates
   };
 }
 
@@ -380,6 +381,7 @@ export function buildThirdVersionDeliveryBatch(
     successCount: selectedSampleCount,
     samples: strategy.flights,
     hotels: strategy.hotels,
+    collectionDates: sourceBatch.collectionDates,
     failureNotes: [...selectionNotes, ...(sourceBatch.failureNotes ?? [])],
     thirdVersion: {
       sourceBatchId: sourceBatch.id,

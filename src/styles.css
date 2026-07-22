@@ -2408,6 +2408,178 @@ input[type="range"] {
   opacity: 0.62;
 }
 
+.collection-date-field {
+  gap: var(--space-3);
+}
+
+.collection-date-field.locked {
+  border-color: rgba(135, 149, 170, 0.42);
+  background: #f4f7fb;
+}
+
+.collection-date-field.invalid {
+  border-color: rgba(180, 69, 82, 0.42);
+  background: var(--red-soft);
+}
+
+.collection-date-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.collection-date-head > div:first-child {
+  display: grid;
+  gap: 6px;
+}
+
+.collection-date-head strong {
+  color: var(--ink);
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.collection-date-actions,
+.collection-date-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.collection-date-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.collection-date-summary div {
+  min-height: 72px;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+
+.collection-date-summary span,
+.collection-date-editor label span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.collection-date-summary b {
+  display: block;
+  margin-top: 8px;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.collection-date-editor {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+.collection-date-editor label {
+  display: grid;
+  gap: 8px;
+}
+
+input[type="date"] {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
+  font-weight: 800;
+}
+
+input[type="date"]:disabled {
+  color: var(--muted);
+  background: #eef3f8;
+}
+
+.readonly-date input {
+  border-style: dashed;
+}
+
+.fixed-night-note {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid rgba(7, 137, 95, 0.24);
+  border-radius: var(--radius);
+  background: var(--qing-soft);
+  color: var(--qing-dark);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.collection-date-editor-actions {
+  grid-column: 2 / -1;
+  align-self: center;
+}
+
+.date-action-button {
+  min-height: 38px;
+  padding: 0 13px;
+  border: 1px solid var(--qing);
+  border-radius: var(--radius);
+  background: var(--qing);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.date-action-button.secondary {
+  border-color: var(--line-strong);
+  background: var(--paper);
+  color: var(--muted);
+}
+
+.date-action-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.date-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.collection-date-error,
+.collection-date-lock-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.45;
+}
+
+.collection-date-error {
+  border: 1px solid rgba(180, 69, 82, 0.36);
+  background: #fff8f9;
+  color: var(--red);
+}
+
+.collection-date-lock-note {
+  border: 1px solid rgba(7, 137, 95, 0.24);
+  background: var(--qing-soft);
+  color: var(--qing-dark);
+}
+
 .side-stack {
   display: grid;
   gap: var(--space-5);
@@ -2872,11 +3044,18 @@ input[type="range"] {
   }
 
   .config-grid,
+  .collection-date-summary,
+  .collection-date-editor,
   .status-grid,
   .detail-head,
   .trace-summary,
   .diagnostic-status-grid {
     grid-template-columns: 1fr;
+  }
+
+  .collection-date-editor-actions {
+    grid-column: 1;
+    justify-content: flex-start;
   }
 
   .advanced-actions {
@@ -2923,12 +3102,22 @@ input[type="range"] {
   .segmented,
   .analysis-grid,
   .summary-line,
+  .collection-date-head,
   .slider-row,
   .number-control,
   .file-row,
   .notice-head {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .collection-date-actions,
+  .collection-date-editor-actions {
+    justify-content: stretch;
+  }
+
+  .date-action-button {
+    width: 100%;
   }
 
   .detail-controls {

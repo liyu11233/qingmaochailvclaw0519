@@ -4,7 +4,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { DOMESTIC_FALLBACK_ROUTES, FIXED_ROUTES, INTERNATIONAL_FALLBACK_ROUTES } from "../../src/domain/fakeBatch";
-import type { CollectionBatch, FlightSample, HotelCoverImageFields, PlatformName, PlatformQuote, RouteConfig, RouteScope } from "../../src/domain/types";
+import type { CollectionBatch, CollectionDateConfig, FlightSample, HotelCoverImageFields, PlatformName, PlatformQuote, RouteConfig, RouteScope } from "../../src/domain/types";
 
 type PilotStatus = "idle" | "login-browser-open" | "running" | "completed" | "failed";
 type PilotOutcome = "needs-config" | "opened" | "reachable" | "login-required" | "failed";
@@ -828,6 +828,7 @@ export interface CollectionControlSignal {
 export interface FullBatchCollectionOptions {
   flightCandidateLimit?: number;
   hotelCandidateLimit?: number;
+  collectionDates?: CollectionDateConfig;
   control?: CollectionControlSignal;
 }
 
@@ -853,26 +854,26 @@ export interface PilotCollector {
   openLoginSession(): Promise<PilotResult>;
   runSilentProbe(): Promise<PilotResult>;
   runAttachedProbe(): Promise<PilotResult>;
-  runQingmaoCandidateProbe(): Promise<QingmaoCandidateProbeResult>;
-  runQingmaoHotelCandidateProbe(): Promise<QingmaoHotelCandidateProbeResult>;
-  runHotelMainRateProbe(): Promise<HotelMainRateProbeResult>;
-  runHotelGroupMainRateProbe(): Promise<HotelGroupMainRateProbeResult>;
-  runHotelSmallBatchProbe(): Promise<HotelSmallBatchProbeResult>;
+  runQingmaoCandidateProbe(collectionDates?: CollectionDateConfig): Promise<QingmaoCandidateProbeResult>;
+  runQingmaoHotelCandidateProbe(collectionDates?: CollectionDateConfig): Promise<QingmaoHotelCandidateProbeResult>;
+  runHotelMainRateProbe(collectionDates?: CollectionDateConfig): Promise<HotelMainRateProbeResult>;
+  runHotelGroupMainRateProbe(collectionDates?: CollectionDateConfig): Promise<HotelGroupMainRateProbeResult>;
+  runHotelSmallBatchProbe(collectionDates?: CollectionDateConfig): Promise<HotelSmallBatchProbeResult>;
   runHotelScaleValidationProbe(input?: HotelScaleValidationInput): Promise<HotelScaleValidationResult>;
   runHotelSingleDiagnosisProbe(input: HotelSingleDiagnosisInput): Promise<HotelSingleDiagnosisProbeResult>;
   runHotelSingleAllRatePlansProbe(input: HotelSingleAllRatePlansInput): Promise<HotelSingleAllRatePlansResult>;
   runAliHotelSingleVerifyProbe(input: AliHotelSingleVerifyInput): Promise<AliHotelSingleVerifyResult>;
-  runAliHotelMatchProbe(limit?: number): Promise<AliHotelMatchProbeResult>;
-  runHotelRatePlanProbe(): Promise<HotelRatePlanProbeResult>;
-  runHotelAllRatePlanProbe(): Promise<HotelAllRatePlanProbeResult>;
-  runHotelCalibrationProbe(input?: HotelCalibrationInput): Promise<HotelCalibrationResult>;
+  runAliHotelMatchProbe(limit?: number, collectionDates?: CollectionDateConfig): Promise<AliHotelMatchProbeResult>;
+  runHotelRatePlanProbe(collectionDates?: CollectionDateConfig): Promise<HotelRatePlanProbeResult>;
+  runHotelAllRatePlanProbe(collectionDates?: CollectionDateConfig): Promise<HotelAllRatePlanProbeResult>;
+  runHotelCalibrationProbe(input?: HotelCalibrationInput, collectionDates?: CollectionDateConfig): Promise<HotelCalibrationResult>;
   cleanupBrowserPages(): Promise<BrowserCleanupResult>;
-  runSameFlightComparisonProbe(): Promise<SameFlightComparisonProbeResult>;
+  runSameFlightComparisonProbe(collectionDates?: CollectionDateConfig): Promise<SameFlightComparisonProbeResult>;
   runZtripProbe(): Promise<ZtripProbeResult>;
-  runZtripFlightProbe(): Promise<ZtripFlightProbeResult>;
-  runZtripHotelProbe(): Promise<ZtripHotelProbeResult>;
-  runDomesticBatchCollection(limit?: number, control?: CollectionControlSignal): Promise<CollectionBatch>;
-  runInternationalBatchCollection(limit?: number, control?: CollectionControlSignal): Promise<CollectionBatch>;
+  runZtripFlightProbe(collectionDates?: CollectionDateConfig): Promise<ZtripFlightProbeResult>;
+  runZtripHotelProbe(collectionDates?: CollectionDateConfig): Promise<ZtripHotelProbeResult>;
+  runDomesticBatchCollection(limit?: number, control?: CollectionControlSignal, collectionDates?: CollectionDateConfig): Promise<CollectionBatch>;
+  runInternationalBatchCollection(limit?: number, control?: CollectionControlSignal, collectionDates?: CollectionDateConfig): Promise<CollectionBatch>;
   runFullBatchCollection(options?: FullBatchCollectionOptions): Promise<CollectionBatch>;
 }
 
@@ -1060,32 +1061,32 @@ function addDays(date: Date, days: number) {
   return next;
 }
 
-function buildPilotRoute(now: Date): PilotRoute {
+function buildPilotRoute(now: Date, collectionDates?: CollectionDateConfig): PilotRoute {
   return {
     scope: "国内",
     origin: "广州",
     destination: "上海",
-    travelDate: formatDate(addDays(now, 3))
+    travelDate: collectionDates?.flightTravelDate ?? formatDate(addDays(now, 3))
   };
 }
 
-function buildRouteFromConfig(route: RouteConfig, now: Date): PilotRoute {
+function buildRouteFromConfig(route: RouteConfig, now: Date, collectionDates?: CollectionDateConfig): PilotRoute {
   return {
     scope: route.scope,
     origin: route.origin,
     destination: route.destination,
-    travelDate: formatDate(addDays(now, 3))
+    travelDate: collectionDates?.flightTravelDate ?? formatDate(addDays(now, 3))
   };
 }
 
-function buildZtripHotelQuery(now: Date): ZtripHotelQuery {
+function buildZtripHotelQuery(now: Date, collectionDates?: CollectionDateConfig): ZtripHotelQuery {
   const checkInDate = formatDate(addDays(now, 1));
   const checkOutDate = formatDate(addDays(now, 2));
 
   return {
     city: "广州",
-    checkInDate,
-    checkOutDate,
+    checkInDate: collectionDates?.hotelCheckInDate ?? checkInDate,
+    checkOutDate: collectionDates?.hotelCheckOutDate ?? checkOutDate,
     nights: 1
   };
 }
@@ -1099,34 +1100,34 @@ function buildZtripHotelQueryFromQingmao(query: QingmaoHotelCandidateQuery): Ztr
   };
 }
 
-function buildQingmaoHotelCandidateQuery(now: Date): QingmaoHotelCandidateQuery {
+function buildQingmaoHotelCandidateQuery(now: Date, collectionDates?: CollectionDateConfig): QingmaoHotelCandidateQuery {
   const checkInDate = formatDate(addDays(now, 1));
   const checkOutDate = formatDate(addDays(now, 2));
 
   return {
     city: "广州",
     keyword: "如家商旅",
-    checkInDate,
-    checkOutDate,
-    nights: 1
+    checkInDate: collectionDates?.hotelCheckInDate ?? checkInDate,
+    checkOutDate: collectionDates?.hotelCheckOutDate ?? checkOutDate,
+    nights: collectionDates?.hotelNights ?? 1
   };
 }
 
-function buildHotelCandidateQuery(now: Date, keyword: string, city = "广州"): QingmaoHotelCandidateQuery {
+function buildHotelCandidateQuery(now: Date, keyword: string, city = "广州", collectionDates?: CollectionDateConfig): QingmaoHotelCandidateQuery {
   const checkInDate = formatDate(addDays(now, 1));
   const checkOutDate = formatDate(addDays(now, 2));
 
   return {
     city,
     keyword,
-    checkInDate,
-    checkOutDate,
-    nights: 1
+    checkInDate: collectionDates?.hotelCheckInDate ?? checkInDate,
+    checkOutDate: collectionDates?.hotelCheckOutDate ?? checkOutDate,
+    nights: collectionDates?.hotelNights ?? 1
   };
 }
 
-function buildHotelCalibrationQuery(now: Date, input: HotelCalibrationInput = {}): QingmaoHotelCandidateQuery {
-  const defaultQuery = buildQingmaoHotelCandidateQuery(now);
+function buildHotelCalibrationQuery(now: Date, input: HotelCalibrationInput = {}, collectionDates?: CollectionDateConfig): QingmaoHotelCandidateQuery {
+  const defaultQuery = buildQingmaoHotelCandidateQuery(now, collectionDates);
   const checkInDate = input.checkInDate ?? defaultQuery.checkInDate;
   const checkOutDate = input.checkOutDate ?? defaultQuery.checkOutDate;
   const checkIn = new Date(`${checkInDate}T00:00:00`);
@@ -9760,11 +9761,11 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runQingmaoCandidateProbe() {
+    async runQingmaoCandidateProbe(collectionDates?: CollectionDateConfig) {
       const base: QingmaoCandidateProbeResult = {
         ...latestQingmaoCandidates,
         status: "running",
-        route: buildPilotRoute(now()),
+        route: buildPilotRoute(now(), collectionDates),
         candidates: [],
         totalFlights: null,
         updatedAt: new Date().toISOString(),
@@ -9789,7 +9790,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
           throw new Error("未找到青猫差旅已登录页面，请先打开登录浏览器并保持窗口打开");
         }
 
-        const route = buildPilotRoute(now());
+        const route = buildPilotRoute(now(), collectionDates);
         await openQingmaoDomesticFlightTab(page);
         const frame = findQingmaoFlightFrame(page);
 
@@ -9829,8 +9830,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runQingmaoHotelCandidateProbe() {
-      const query = buildQingmaoHotelCandidateQuery(now());
+    async runQingmaoHotelCandidateProbe(collectionDates?: CollectionDateConfig) {
+      const query = buildQingmaoHotelCandidateQuery(now(), collectionDates);
       const base: QingmaoHotelCandidateProbeResult = {
         ...latestQingmaoHotelCandidates,
         status: "running",
@@ -9904,8 +9905,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runHotelMainRateProbe() {
-      const query = buildQingmaoHotelCandidateQuery(now());
+    async runHotelMainRateProbe(collectionDates?: CollectionDateConfig) {
+      const query = buildQingmaoHotelCandidateQuery(now(), collectionDates);
       const base: HotelMainRateProbeResult = {
         ...latestHotelMainRate,
         status: "running",
@@ -9977,7 +9978,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
             const pagesBeforeCandidate = snapshotBrowserPages(context);
             const nextCtripQuote = await searchCtripHotelMainRateQuote(context, options.artifactDir, query, candidate);
             const nextAliQuote = await searchAliHotelMainRateQuote(context, options.artifactDir, query, candidate);
-            const nextZtripQuote = await searchZtripHotelMainRateQuote(context, options.artifactDir, buildZtripHotelQuery(now()), candidate);
+            const nextZtripQuote = await searchZtripHotelMainRateQuote(context, options.artifactDir, buildZtripHotelQuery(now(), collectionDates), candidate);
             const competitorQuotes = [nextCtripQuote, nextAliQuote, nextZtripQuote];
 
             if (!fallbackCandidate) {
@@ -10067,7 +10068,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runHotelGroupMainRateProbe() {
+    async runHotelGroupMainRateProbe(collectionDates?: CollectionDateConfig) {
       const base: HotelGroupMainRateProbeResult = {
         status: "running",
         samples: [],
@@ -10095,7 +10096,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
 
         const samples: HotelGroupMainRateSample[] = [];
         for (const [groupIndex, config] of hotelGroupPilotQueries.entries()) {
-          const query = buildHotelCandidateQuery(now(), config.keyword, config.city ?? "广州");
+          const query = buildHotelCandidateQuery(now(), config.keyword, config.city ?? "广州", collectionDates);
           const groupArtifactDir = path.join(options.artifactDir, "hotel-groups", safeFilename(config.group));
           const pagesBeforeGroup = snapshotBrowserPages(context);
           const updateGroupProgress = (detail: string) => {
@@ -10174,7 +10175,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runHotelSmallBatchProbe() {
+    async runHotelSmallBatchProbe(collectionDates?: CollectionDateConfig) {
       const base: HotelSmallBatchProbeResult = {
         status: "running",
         city: "广州",
@@ -11134,8 +11135,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runAliHotelMatchProbe(limit = 3) {
-      const query = buildHotelCandidateQuery(now(), "如家商旅", "广州");
+    async runAliHotelMatchProbe(limit = 3, collectionDates?: CollectionDateConfig) {
+      const query = buildHotelCandidateQuery(now(), "如家商旅", "广州", collectionDates);
       const base: AliHotelMatchProbeResult = {
         status: "running",
         samples: [],
@@ -11250,7 +11251,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runHotelRatePlanProbe() {
+    async runHotelRatePlanProbe(collectionDates?: CollectionDateConfig) {
       const base: HotelRatePlanProbeResult = {
         status: "running",
         plans: [],
@@ -11288,7 +11289,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
         const sampleLimitPerGroup = 10;
 
         for (const config of hotelGroupPilotQueries) {
-          const query = buildHotelCandidateQuery(now(), config.keyword, config.city ?? "广州");
+          const query = buildHotelCandidateQuery(now(), config.keyword, config.city ?? "广州", collectionDates);
           const pagesBeforeGroup = snapshotBrowserPages(context);
           try {
             const candidates = await selectHotelCandidatesForQuery(qingmaoPage, query, sampleLimitPerGroup, random);
@@ -11411,8 +11412,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runHotelAllRatePlanProbe() {
-      const query = buildHotelCandidateQuery(now(), "如家商旅", "广州");
+    async runHotelAllRatePlanProbe(collectionDates?: CollectionDateConfig) {
+      const query = buildHotelCandidateQuery(now(), "如家商旅", "广州", collectionDates);
       const base: HotelAllRatePlanProbeResult = {
         status: "running",
         query,
@@ -11512,8 +11513,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runHotelCalibrationProbe(input: HotelCalibrationInput = {}) {
-      const query = buildHotelCalibrationQuery(now(), input);
+    async runHotelCalibrationProbe(input: HotelCalibrationInput = {}, collectionDates?: CollectionDateConfig) {
+      const query = buildHotelCalibrationQuery(now(), input, collectionDates);
       const platformOrder = resolveHotelCalibrationPlatformOrder(input);
       const competitorPlatforms = platformOrder.filter((platform) => platform !== "青猫差旅");
       const base: HotelCalibrationResult = {
@@ -11698,8 +11699,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runSameFlightComparisonProbe() {
-      const route = buildPilotRoute(now());
+    async runSameFlightComparisonProbe(collectionDates?: CollectionDateConfig) {
+      const route = buildPilotRoute(now(), collectionDates);
       const base: SameFlightComparisonProbeResult = {
         ...latestSameFlightComparison,
         status: "running",
@@ -11864,8 +11865,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runZtripFlightProbe() {
-      const route = buildPilotRoute(now());
+    async runZtripFlightProbe(collectionDates?: CollectionDateConfig) {
+      const route = buildPilotRoute(now(), collectionDates);
       const base: ZtripFlightProbeResult = {
         ...latestZtripFlight,
         status: "running",
@@ -11939,8 +11940,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runZtripHotelProbe() {
-      const query = buildZtripHotelQuery(now());
+    async runZtripHotelProbe(collectionDates?: CollectionDateConfig) {
+      const query = buildZtripHotelQuery(now(), collectionDates);
       const base: ZtripHotelProbeResult = {
         ...latestZtripHotel,
         status: "running",
@@ -12009,7 +12010,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
       }
     },
 
-    async runDomesticBatchCollection(limit, control) {
+    async runDomesticBatchCollection(limit?: number, control?: CollectionControlSignal, collectionDates?: CollectionDateConfig) {
       await collectionCheckpoint(control);
       const collectedAt = now();
       const batchId = `batch-${formatBatchTimestamp(collectedAt)}-real-domestic`;
@@ -12069,7 +12070,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
             successCount: samples.length,
             failedCount,
             samples,
-            failureNotes
+            failureNotes,
+            collectionDates
           }, null, 2),
           "utf8"
         ).catch(() => undefined);
@@ -12082,7 +12084,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
             break;
           }
 
-          const route = buildRouteFromConfig(routeConfig, collectedAt);
+          const route = buildRouteFromConfig(routeConfig, collectedAt, collectionDates);
           const sampleIndex = samples.length + 1;
           const sampleId = `real-domestic-${String(sampleIndex).padStart(2, "0")}`;
           const sampleArtifactDir = path.join(batchArtifactDir, sampleId);
@@ -12176,11 +12178,12 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
         successCount: samples.length,
         failedCount,
         samples,
-        failureNotes
+        failureNotes,
+        collectionDates
       };
     },
 
-    async runInternationalBatchCollection(limit, control) {
+    async runInternationalBatchCollection(limit?: number, control?: CollectionControlSignal, collectionDates?: CollectionDateConfig) {
       await collectionCheckpoint(control);
       const collectedAt = now();
       const batchId = `batch-${formatBatchTimestamp(collectedAt)}-real-international`;
@@ -12232,7 +12235,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
             successCount: samples.length,
             failedCount,
             samples,
-            failureNotes
+            failureNotes,
+            collectionDates
           }, null, 2),
           "utf8"
         ).catch(() => undefined);
@@ -12245,7 +12249,7 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
             break;
           }
 
-          const route = buildRouteFromConfig(routeConfig, collectedAt);
+          const route = buildRouteFromConfig(routeConfig, collectedAt, collectionDates);
           const sampleIndex = samples.length + 1;
           const sampleId = `real-international-${String(sampleIndex).padStart(2, "0")}`;
           const sampleArtifactDir = path.join(batchArtifactDir, sampleId);
@@ -12339,7 +12343,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
         successCount: samples.length,
         failedCount,
         samples,
-        failureNotes
+        failureNotes,
+        collectionDates
       };
     },
 
@@ -12351,9 +12356,9 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
         : 20;
       const domesticTarget = Math.min(10, Math.ceil(flightCandidateLimit / 2));
       const internationalTarget = Math.min(10, Math.max(1, flightCandidateLimit - domesticTarget));
-      const domesticBatch = await this.runDomesticBatchCollection(domesticTarget, control);
+      const domesticBatch = await this.runDomesticBatchCollection(domesticTarget, control, fullOptions.collectionDates);
       await collectionCheckpoint(control);
-      const internationalBatch = await this.runInternationalBatchCollection(internationalTarget, control);
+      const internationalBatch = await this.runInternationalBatchCollection(internationalTarget, control, fullOptions.collectionDates);
       await collectionCheckpoint(control);
       const batchId = `batch-${formatBatchTimestamp(now())}-real-full`;
       const samples = [...domesticBatch.samples, ...internationalBatch.samples].map((sample, index) => {
@@ -12391,7 +12396,8 @@ export function createPlaywrightPilotCollector(options: PilotCollectorOptions): 
         successCount: samples.length,
         failedCount: 0,
         samples,
-        failureNotes: [...(domesticBatch.failureNotes ?? []), ...(internationalBatch.failureNotes ?? [])]
+        failureNotes: [...(domesticBatch.failureNotes ?? []), ...(internationalBatch.failureNotes ?? [])],
+        collectionDates: fullOptions.collectionDates
       };
     }
   };

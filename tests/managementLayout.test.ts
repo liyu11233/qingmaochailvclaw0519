@@ -140,4 +140,57 @@ describe("third version management layout", () => {
     expect(source).toContain('<option value="">请选择竞品平台</option>');
     expect(source).not.toContain('nextOptions.specifiedPlatform = "携程商旅"');
   });
+
+  it("places collection time as the first full-width config item with default date summary", () => {
+    const source = readAppSource();
+
+    const configGrid = source.indexOf('className="config-grid"');
+    const collectionTime = source.indexOf("采集时间", configGrid);
+    const hotelDisplayLimit = source.indexOf("酒店展示数量", configGrid);
+
+    expect(configGrid).toBeGreaterThan(-1);
+    expect(collectionTime).toBeGreaterThan(configGrid);
+    expect(collectionTime).toBeLessThan(hotelDisplayLimit);
+    expect(source).toContain("collection-date-field");
+    expect(source).toContain("系统默认");
+    expect(source).toContain("默认航班出行");
+    expect(source).toContain("默认酒店入住");
+    expect(source).toContain("默认酒店离店");
+  });
+
+  it("supports inline manual collection date editing and restoring default", () => {
+    const source = readAppSource();
+
+    expect(source).toContain("collectionDateEditing");
+    expect(source).toContain("指定时间");
+    expect(source).toContain("航班出行日期");
+    expect(source).toContain("酒店入住日期");
+    expect(source).toContain("酒店离店日期");
+    expect(source).toContain("当前酒店固定采 1 晚");
+    expect(source).toContain("保存指定时间");
+    expect(source).toContain("恢复默认");
+    expect(source).toContain("restoreDefaultCollectionDates");
+    expect(source).toContain("readOnly");
+  });
+
+  it("blocks full collection while collection time is editing or invalid", () => {
+    const source = readAppSource();
+    const fullCollectionHandler = source.indexOf("onClick={collectRealFull}");
+    const fullCollectionButton = source.slice(source.lastIndexOf("<button", fullCollectionHandler), source.indexOf(">", fullCollectionHandler));
+
+    expect(source).toContain("validateCollectionDateDraft");
+    expect(source).toContain("collectionDateBlocked");
+    expect(source).toContain("日期校验失败");
+    expect(fullCollectionButton).toContain("collectionDateBlocked");
+  });
+
+  it("locks collection date controls while collection is running and reports locked dates in result notice", () => {
+    const source = readAppSource();
+
+    expect(source).toContain("dateConfigLocked");
+    expect(source).toContain("lockedCollectionDates");
+    expect(source).toContain("本轮日期");
+    expect(source).toContain("collectionDates");
+    expect(source).toContain("采集中锁定");
+  });
 });

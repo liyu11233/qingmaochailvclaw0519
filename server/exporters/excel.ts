@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
 import { summarizeFlight, summarizeQuoteSet } from "../../src/domain/comparison";
+import { collectionDateModeLabel, describeBatchCollectionDates } from "../../src/domain/collectionDates";
 import {
   resolveHotelDisplayDecision,
   resolveHotelPrimaryRatePlan
@@ -178,6 +179,28 @@ function addTitle(sheet: ExcelJS.Worksheet, title: string, subtitle: string, col
   sheet.getRow(3).height = 24;
 }
 
+function titleNoteWithCollectionDates(batch: CollectionBatch, note = DELIVERY_NOTE) {
+  return `${note} ${describeBatchCollectionDates(batch)}`;
+}
+
+function collectionDateSummaryRows(batch: CollectionBatch): Array<[string, string, string]> {
+  const dates = batch.collectionDates;
+  if (!dates) {
+    return [
+      ["本次目标查询日期", "本批次未记录统一目标查询日期", describeBatchCollectionDates(batch)]
+    ];
+  }
+
+  return [
+    ["本次目标查询日期", "已记录", describeBatchCollectionDates(batch)],
+    ["collectionDates.mode", collectionDateModeLabel(dates.mode), "本次目标查询日期来源"],
+    ["flightTravelDate", dates.flightTravelDate, "航班出行日期"],
+    ["hotelCheckInDate", dates.hotelCheckInDate, "酒店入住日期"],
+    ["hotelCheckOutDate", dates.hotelCheckOutDate, "酒店离店日期"],
+    ["hotelNights", String(dates.hotelNights), "酒店入住晚数"]
+  ];
+}
+
 function addTableShell(sheet: ExcelJS.Worksheet, title: string, subtitle: string, columns: number, header: string[], note?: string) {
   addTitle(sheet, title, subtitle, columns, note);
   const headerRow = sheet.getRow(HEADER_ROW);
@@ -285,7 +308,7 @@ function hotelSalesDisplayReason(hotel: HotelSample) {
 
 function addOverviewSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
   const sheet = workbook.addWorksheet("总览页", { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
-  addTitle(sheet, "青猫差旅价格对比总览", `数据整理时间：${formatDateTime(batch.generatedAt)}。批次：${batch.id}`, 8);
+  addTitle(sheet, "青猫差旅价格对比总览", `数据整理时间：${formatDateTime(batch.generatedAt)}。批次：${batch.id}`, 8, titleNoteWithCollectionDates(batch));
 
   const hotelSamples = batch.hotels ?? [];
   const hotelRateRows = hotelSamples.reduce((sum, hotel) => sum + hotel.ratePlans.length, 0);
@@ -305,6 +328,7 @@ function addOverviewSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
 
   const summaryRows = [
     ["项目", "结果", "说明"],
+    ...collectionDateSummaryRows(batch),
     ...thirdVersionRows,
     ["航班样本", batch.samples.length, "国内和国际航班四平台价格"],
     ["酒店样本", hotelSamples.length, "五个集团，每家酒店推荐口径和其他口径"],
@@ -372,7 +396,7 @@ function addFlightSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
     "青猫差额",
     "对比结论",
     "网页截图索引"
-  ]);
+  ], titleNoteWithCollectionDates(batch));
 
   for (const [index, sample] of batch.samples.entries()) {
     const summary = summarizeFlight(sample, options);
@@ -445,7 +469,7 @@ function addHotelSummarySheet(workbook: ExcelJS.Workbook, batch: CollectionBatch
     "对比结论",
     "网页截图索引",
     "缺失原因"
-  ]);
+  ], titleNoteWithCollectionDates(batch));
 
   const displayHotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
 
@@ -534,7 +558,7 @@ function addHotelGroupDetailSheet(workbook: ExcelJS.Workbook, batch: CollectionB
     "阿里证据编号",
     "在途证据编号",
     "缺失原因"
-  ]);
+  ], titleNoteWithCollectionDates(batch));
 
   let rowIndex = 0;
   const displayHotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
@@ -638,7 +662,7 @@ function addFlightEvidenceSheet(workbook: ExcelJS.Workbook, batch: CollectionBat
     "价格",
     "来源页面",
     "说明"
-  ]);
+  ], titleNoteWithCollectionDates(batch));
 
   let rowIndex = 0;
   batch.samples.forEach((sample, sampleIndex) => {
@@ -683,7 +707,7 @@ function addHotelEvidenceSheet(workbook: ExcelJS.Workbook, batch: CollectionBatc
     "价格",
     "来源页面",
     "说明"
-  ]);
+  ], titleNoteWithCollectionDates(batch));
 
   let rowIndex = 0;
   (batch.hotels ?? []).forEach((hotel, hotelIndex) => {
@@ -749,9 +773,41 @@ function addInternalTraceSheet(workbook: ExcelJS.Workbook, batch: CollectionBatc
     "航班是否达标",
     "酒店是否达标",
     "截图索引"
-  ]);
+  ], titleNoteWithCollectionDates(batch, "内部留痕页记录本次目标查询日期、平台状态、原始字段、第三版筛选结果和证据路径，用于内部复盘。"));
 
   let rowIndex = 0;
+  collectionDateSummaryRows(batch).forEach(([label, value, note]) => {
+    const row = sheet.addRow([
+      "本次目标查询日期",
+      sourceBatch.id,
+      label,
+      value,
+      note,
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "本次目标查询日期",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ]);
+    styleBodyRow(row, rowIndex);
+    rowIndex += 1;
+  });
+
   sourceBatch.samples.forEach((sample, sampleIndex) => {
     const summary = summarizeFlight(sample, options);
     const stats = competitorPriceStats(sample.quotes, options);
@@ -844,9 +900,10 @@ function addFailureSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
     "原因",
     "证据路径",
     "来源URL"
-  ]);
+  ], titleNoteWithCollectionDates(batch, "失败记录页保留候选放弃、平台缺失、口径缺失等原因，并写明本次目标查询日期。"));
 
   const records: Array<[string, string, string, string, string, string, string, string]> = [];
+  records.push(["本次目标查询日期", batch.id, "", "", "说明", describeBatchCollectionDates(batch), "", ""]);
   for (const note of batch.failureNotes ?? []) {
     records.push([note.startsWith("第三版") ? "第三版策略" : "批次说明", batch.id, "", "", "说明", note, "", ""]);
   }
@@ -855,7 +912,7 @@ function addFailureSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
     sample.quotes
       .filter((quote) => !quote.available || typeof quote.price !== "number")
       .forEach((quote) => {
-        records.push(["航班", `${routeName(sample.origin, sample.destination)} ${sample.flightNo}`, quote.platform, sample.cabin, quote.status, quote.missingReason || quote.status, quote.evidencePath, quote.sourceUrl]);
+        records.push(["航班", `${routeName(sample.origin, sample.destination)} ${sample.flightNo}`, quote.platform, sample.cabin, quote.status, `目标航班出行日期 ${sample.travelDate}；${quote.missingReason || quote.status}`, quote.evidencePath, quote.sourceUrl]);
       });
   });
 
@@ -867,7 +924,7 @@ function addFailureSheet(workbook: ExcelJS.Workbook, batch: CollectionBatch) {
       ratePlan.quotes
         .filter((quote) => !quote.available || typeof quote.price !== "number")
         .forEach((quote) => {
-          records.push(["酒店", hotel.hotelName, quote.platform, ratePlan.label, quote.status, quote.missingReason || quote.status, quote.evidencePath, quote.sourceUrl]);
+          records.push(["酒店", hotel.hotelName, quote.platform, ratePlan.label, quote.status, `目标酒店入住 ${hotel.checkInDate}，离店 ${hotel.checkOutDate}，${hotel.nights} 晚；${quote.missingReason || quote.status}`, quote.evidencePath, quote.sourceUrl]);
         });
     });
   });

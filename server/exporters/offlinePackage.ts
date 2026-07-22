@@ -2,6 +2,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { summarizeFlight, summarizeQuoteSet } from "../../src/domain/comparison";
+import { describeBatchCollectionDates } from "../../src/domain/collectionDates";
 import {
   analyzeHotelRatePlanCompleteness,
   HOTEL_DISPLAY_RATE_PLAN_PRIORITY,
@@ -84,6 +85,21 @@ function comparisonOptions(batch: CollectionBatch): PriceComparisonOptions {
   return {
     comparisonMode: batch.thirdVersion?.options.comparisonMode,
     specifiedPlatform: batch.thirdVersion?.options.specifiedPlatform
+  };
+}
+
+function collectionDateDisplay(batch: CollectionBatch) {
+  const dates = batch.collectionDates;
+  const fallbackFlightDate = batch.samples[0]?.travelDate ?? "";
+  const fallbackHotel = batch.hotels?.[0];
+
+  return {
+    summary: describeBatchCollectionDates(batch),
+    flightTravelDate: dates?.flightTravelDate ?? fallbackFlightDate,
+    hotelCheckInDate: dates?.hotelCheckInDate ?? fallbackHotel?.checkInDate ?? "",
+    hotelCheckOutDate: dates?.hotelCheckOutDate ?? fallbackHotel?.checkOutDate ?? "",
+    hotelNights: dates?.hotelNights ?? fallbackHotel?.nights ?? 1,
+    hasUnifiedDates: Boolean(dates)
   };
 }
 
@@ -256,6 +272,7 @@ function renderHomeHotelRatePreview(hotel: HotelSample) {
 function renderIndex(batch: CollectionBatch) {
   const displayTime = formatDisplayTime(batch.generatedAt);
   const options = comparisonOptions(batch);
+  const dates = collectionDateDisplay(batch);
   const hotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
   const flightAdvantageSamples = batch.samples.filter((sample) => {
     const summary = summarizeFlight(sample, options);
@@ -284,11 +301,12 @@ ${rootHead("青猫差旅价格对比离线包")}
       <div class="home-copy">
         <h1>青猫差旅价格对比</h1>
         <p>销售现场可分别查看航班与酒店价格。</p>
-        <div class="home-rules"><span>同一航班 · 同一日期 · 同一舱位</span><i></i><span>同一酒店 · 同一日期 · 同一床型早餐口径</span><i></i><span>当前口径：${escapeHtml(comparisonModeLabel(options))}</span></div>
+        <div class="home-rules"><span>航班出行：${escapeHtml(dates.flightTravelDate || "按样本行展示")}</span><i></i><span>酒店：${escapeHtml(dates.hotelCheckInDate || "按样本行")} 入住 / ${escapeHtml(dates.hotelCheckOutDate || "按样本行")} 离店 / 固定 ${dates.hotelNights} 晚</span><i></i><span>当前口径：${escapeHtml(comparisonModeLabel(options))}</span></div>
       </div>
       <aside class="home-stamp">
         <span>数据更新时间</span>
         <strong>${escapeHtml(displayTime)}</strong>
+        <small>${escapeHtml(dates.summary)}</small>
         <small>数据整理时间：${escapeHtml(displayTime)}</small>
         <em>离线网页包 / 不依赖本地服务</em>
       </aside>
@@ -351,6 +369,7 @@ function renderFlightQuoteRows(quotes: PlatformQuote[]) {
 function renderFlights(batch: CollectionBatch) {
   const displayTime = formatDisplayTime(batch.generatedAt);
   const options = comparisonOptions(batch);
+  const dates = collectionDateDisplay(batch);
   const advantageSamples = batch.samples.filter((sample) => {
     const summary = summarizeFlight(sample, options);
     return summary.qingmaoGap !== null && summary.qingmaoGap < 0;
@@ -401,7 +420,7 @@ ${sharedHead("航班价格对比")}
       <div>
         <p class="eyebrow">数据整理时间：${escapeHtml(displayTime)}</p>
         <h1>青猫差旅航班价格对比</h1>
-        <p>同一航班 · 同一日期 · 同一舱位 · 当前口径：${escapeHtml(comparisonModeLabel(options))}</p>
+        <p>本次目标查询日期：航班出行 ${escapeHtml(dates.flightTravelDate || "按样本行展示")} · 同一航班 · 同一舱位 · 当前口径：${escapeHtml(comparisonModeLabel(options))}</p>
       </div>
       <div class="compare-visual" aria-label="四平台同航班价格动态示意">
         <div class="compare-orbit">
@@ -566,6 +585,7 @@ function renderHotelPlanView(hotel: HotelSample, activeLabel: string, options: P
 function renderHotels(batch: CollectionBatch) {
   const displayTime = formatDisplayTime(batch.generatedAt);
   const options = comparisonOptions(batch);
+  const dates = collectionDateDisplay(batch);
   const hotels = (batch.hotels ?? []).filter(hotelSalesDisplayEligible);
   const groups = GROUP_ORDER.filter((group) => hotels.some((hotel) => hotel.group === group));
   const defaultGroup = groups[0];
@@ -601,7 +621,7 @@ ${sharedHead("酒店价格对比")}
       <div class="hotel-tabs" role="tablist">${tabs}</div>
       <div class="hotel-chips">
         <span>数据整理时间：${escapeHtml(displayTime)}</span>
-        <span>入住 ${escapeHtml(checkIn)} · 离店 ${escapeHtml(checkOut)} · 1 间夜</span>
+        <span>本次目标查询日期：入住 ${escapeHtml(dates.hotelCheckInDate || checkIn)} · 离店 ${escapeHtml(dates.hotelCheckOutDate || checkOut)} · 固定 ${dates.hotelNights} 晚</span>
         <span>同一酒店 · 同一日期 · 同一床型早餐口径</span>
         <span>当前口径：${escapeHtml(comparisonModeLabel(options))}</span>
         <div class="rate-selector" aria-label="选择主对比口径">

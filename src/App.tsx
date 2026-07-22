@@ -22,6 +22,7 @@ interface StatusResponse {
   hotelCount: number;
   successCount: number;
   failedCount: number;
+  collectionDates?: CollectionDateConfig | null;
   artifacts: ArtifactLinks | null;
   activeOperation?: {
     label: string;
@@ -51,6 +52,21 @@ interface CollectionResultNotice {
   tone: "success" | "failed" | "info";
   title: string;
   detail: string;
+}
+
+type CollectionDateMode = "default" | "manual";
+
+interface CollectionDateDraft {
+  flightTravelDate: string;
+  hotelCheckInDate: string;
+}
+
+interface CollectionDateConfig {
+  mode: CollectionDateMode;
+  flightTravelDate: string;
+  hotelCheckInDate: string;
+  hotelCheckOutDate: string;
+  hotelNights: 1;
 }
 
 type PilotStatus = "idle" | "login-browser-open" | "running" | "completed" | "failed";
@@ -255,6 +271,79 @@ const cityCodes: Record<string, string> = {
 function formatDateTime(value: string | null) {
   if (!value) return "暂无";
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
+}
+
+function padDatePart(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function formatDateInput(date: Date) {
+  return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`;
+}
+
+function addDays(date: Date, days: number) {
+  const nextDate = new Date(date);
+  nextDate.setDate(nextDate.getDate() + days);
+  return nextDate;
+}
+
+function parseDateInput(value: string) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(year, month - 1, day);
+  if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) {
+    return null;
+  }
+  return parsed;
+}
+
+function addDaysToDateInput(value: string, days: number) {
+  const parsed = parseDateInput(value);
+  return parsed ? formatDateInput(addDays(parsed, days)) : "";
+}
+
+function buildDefaultCollectionDates(now = new Date()): CollectionDateConfig {
+  const hotelCheckInDate = formatDateInput(addDays(now, 1));
+  return {
+    mode: "default",
+    flightTravelDate: formatDateInput(addDays(now, 3)),
+    hotelCheckInDate,
+    hotelCheckOutDate: addDaysToDateInput(hotelCheckInDate, 1),
+    hotelNights: 1
+  };
+}
+
+function collectionDateDraftFromConfig(config: CollectionDateConfig): CollectionDateDraft {
+  return {
+    flightTravelDate: config.flightTravelDate,
+    hotelCheckInDate: config.hotelCheckInDate
+  };
+}
+
+function buildManualCollectionDates(draft: CollectionDateDraft): CollectionDateConfig {
+  return {
+    mode: "manual",
+    flightTravelDate: draft.flightTravelDate,
+    hotelCheckInDate: draft.hotelCheckInDate,
+    hotelCheckOutDate: addDaysToDateInput(draft.hotelCheckInDate, 1),
+    hotelNights: 1
+  };
+}
+
+function validateCollectionDateDraft(draft: CollectionDateDraft) {
+  if (!draft.flightTravelDate) return "日期校验失败：请填写航班出行日期";
+  if (!parseDateInput(draft.flightTravelDate)) return "日期校验失败：航班出行日期格式应为 YYYY-MM-DD";
+  if (!draft.hotelCheckInDate) return "日期校验失败：请填写酒店入住日期";
+  if (!parseDateInput(draft.hotelCheckInDate)) return "日期校验失败：酒店入住日期格式应为 YYYY-MM-DD";
+  return "";
+}
+
+function formatCollectionDateSummary(config: CollectionDateConfig) {
+  return `航班出行 ${config.flightTravelDate}；酒店 ${config.hotelCheckInDate} 入住，${config.hotelCheckOutDate} 离店（固定 1 晚）`;
 }
 
 function routeCodeLabel(routeLabel: string) {
@@ -550,6 +639,11 @@ export function App() {
   const [flightDetailExpanded, setFlightDetailExpanded] = useState(false);
   const [hotelDetailExpanded, setHotelDetailExpanded] = useState(false);
   const [failureTraceOpen, setFailureTraceOpen] = useState(true);
+  const [defaultCollectionDates, setDefaultCollectionDates] = useState<CollectionDateConfig>(() => buildDefaultCollectionDates());
+  const [collectionDateMode, setCollectionDateMode] = useState<CollectionDateMode>("default");
+  const [collectionDateEditing, setCollectionDateEditing] = useState(false);
+  const [collectionDateDraft, setCollectionDateDraft] = useState<CollectionDateDraft>(() => collectionDateDraftFromConfig(buildDefaultCollectionDates()));
+  const [lockedCollectionDates, setLockedCollectionDates] = useState<CollectionDateConfig | null>(null);
 
   const view = useMemo(() => (batch ? buildDashboardView(batch) : null), [batch]);
   const connection = useMemo(() => connectionStatus(pilot, pilotBusy, pilotError), [pilot, pilotBusy, pilotError]);
@@ -595,6 +689,19 @@ export function App() {
   const canStopCollection = Boolean(serverOperation?.canStop);
   const fullCollectionRunning = fullCollecting || serverOperation?.label === "完整真实采集";
   const artifactRegenerationRunning = regeneratingArtifacts || serverOperation?.label === "重新生成交付包";
+  const manualCollectionDates = useMemo(() => buildManualCollectionDates(collectionDateDraft), [collectionDateDraft]);
+  const effectiveCollectionDates = collectionDateMode === "manual" ? manualCollectionDates : defaultCollectionDates;
+  const currentBatchCollectionDates = batch?.collectionDates ?? status?.collectionDates ?? null;
+  const collectionDateValidationMessage = collectionDateEditing ? validateCollectionDateDraft(collectionDateDraft) : "";
+  const collectionDateBlocked = collectionDateEditing || Boolean(collectionDateValidationMessage);
+  const dateConfigLocked = isOperationRunning;
+  const collectionDateStateLabel = dateConfigLocked
+    ? "采集中锁定"
+    : collectionDateEditing
+      ? "编辑中"
+      : collectionDateMode === "manual"
+        ? "已指定"
+        : "系统默认";
   const thirdVersionValidationMessage = validateThirdVersionOptions(thirdVersionOptions);
   const thirdVersionBlocked = Boolean(thirdVersionValidationMessage || thirdVersionError);
   const connectionReady = connection.tone === "connected";
@@ -623,6 +730,45 @@ export function App() {
   const failureScreenshotCount = visibleFailureTraceRows.filter((note) => /截图|screenshot|\.png|\.jpe?g/i.test(note)).length;
   const failureHtmlSnapshotCount = visibleFailureTraceRows.filter((note) => /html|网页快照|快照|\.html/i.test(note)).length;
   const pendingManualReviewCount = visibleFailureTraceRows.filter((note) => /待|复核|人工/i.test(note)).length;
+
+  function refreshDefaultCollectionDates() {
+    const nextDefaultDates = buildDefaultCollectionDates();
+    setDefaultCollectionDates(nextDefaultDates);
+    return nextDefaultDates;
+  }
+
+  function startCollectionDateEditing() {
+    if (dateConfigLocked) return;
+    const baseDates = collectionDateMode === "manual" ? manualCollectionDates : refreshDefaultCollectionDates();
+    setCollectionDateDraft(collectionDateDraftFromConfig(baseDates));
+    setCollectionDateEditing(true);
+  }
+
+  function saveManualCollectionDates() {
+    if (dateConfigLocked) return;
+    const validationMessage = validateCollectionDateDraft(collectionDateDraft);
+    if (validationMessage) return;
+    setCollectionDateMode("manual");
+    setCollectionDateEditing(false);
+  }
+
+  function restoreDefaultCollectionDates() {
+    if (dateConfigLocked) return;
+    const nextDefaultDates = refreshDefaultCollectionDates();
+    setCollectionDateDraft(collectionDateDraftFromConfig(nextDefaultDates));
+    setCollectionDateMode("default");
+    setCollectionDateEditing(false);
+  }
+
+  function collectionDatesForRequest() {
+    return collectionDateMode === "manual" ? manualCollectionDates : buildDefaultCollectionDates();
+  }
+
+  function lockCollectionDatesForStart() {
+    const lockedDates = collectionDateMode === "manual" ? buildManualCollectionDates(collectionDateDraft) : refreshDefaultCollectionDates();
+    setLockedCollectionDates(lockedDates);
+    return lockedDates;
+  }
 
   function markCollectionStart() {
     const startedAt = Date.now();
@@ -726,6 +872,7 @@ export function App() {
   }
 
   async function collectRealDomestic() {
+    const collectionDates = lockCollectionDatesForStart();
     markCollectionStart();
     setRealCollecting(true);
     setError("");
@@ -734,7 +881,7 @@ export function App() {
       const result = await readJson<BatchResponse>("/api/collect-real-domestic", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({})
+        body: JSON.stringify({ collectionDates })
       });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
@@ -752,6 +899,7 @@ export function App() {
   }
 
   async function collectRealInternational() {
+    const collectionDates = lockCollectionDatesForStart();
     markCollectionStart();
     setInternationalCollecting(true);
     setError("");
@@ -760,7 +908,7 @@ export function App() {
       const result = await readJson<BatchResponse>("/api/collect-real-international", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({})
+        body: JSON.stringify({ collectionDates })
       });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
@@ -784,7 +932,17 @@ export function App() {
       setCollectionResult({ tone: "failed", title: "第三版配置未保存", detail: validationMessage });
       return;
     }
+    if (collectionDateEditing) {
+      setCollectionResult({ tone: "failed", title: "采集时间未保存", detail: "采集时间还在编辑中，请先保存指定时间或恢复默认。" });
+      return;
+    }
+    const collectionDateDraftMessage = collectionDateMode === "manual" ? validateCollectionDateDraft(collectionDateDraft) : "";
+    if (collectionDateDraftMessage) {
+      setCollectionResult({ tone: "failed", title: "采集时间校验失败", detail: collectionDateDraftMessage });
+      return;
+    }
 
+    const collectionDates = lockCollectionDatesForStart();
     markCollectionStart();
     setFullCollecting(true);
     setError("");
@@ -793,7 +951,10 @@ export function App() {
       const result = await readJson<BatchResponse>("/api/collect-real-full", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(thirdVersionOptions)
+        body: JSON.stringify({
+          ...thirdVersionOptions,
+          collectionDates
+        })
       });
       setBatch(result.batch);
       setArtifacts(result.artifacts);
@@ -801,7 +962,11 @@ export function App() {
         setThirdVersionOptions(result.thirdVersion.options);
         setThirdVersionStatus(result.thirdVersion.status);
       }
-      setCollectionResult({ tone: "success", title: "完整真实采集完成", detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和离线网页。` });
+      setCollectionResult({
+        tone: "success",
+        title: "完整真实采集完成",
+        detail: `已生成 ${result.batch.sampleCount} 条样本，可以导出 Excel 和离线网页。本轮日期：${formatCollectionDateSummary(collectionDates)}。`
+      });
       await refreshStatus();
     } catch (collectionError) {
       const message = collectionError instanceof Error ? collectionError.message : "完整真实采集失败";
@@ -809,7 +974,7 @@ export function App() {
       setCollectionResult({
         tone: message.includes("采集已停止") ? "info" : "failed",
         title: message.includes("采集已停止") ? "完整真实采集已停止" : "完整真实采集失败",
-        detail: message
+        detail: `${message}。本轮日期：${formatCollectionDateSummary(collectionDates)}。`
       });
     } finally {
       setFullCollecting(false);
@@ -931,7 +1096,11 @@ export function App() {
     setPilotError("");
 
     try {
-      const result = await readJson<QingmaoCandidateProbeResult>("/api/pilot/qingmao-candidates/run", { method: "POST" });
+      const result = await readJson<QingmaoCandidateProbeResult>("/api/pilot/qingmao-candidates/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ collectionDates: collectionDatesForRequest() })
+      });
       setQingmaoCandidates(result);
     } catch (probeError) {
       setPilotError(probeError instanceof Error ? probeError.message : "青猫候选航班读取失败");
@@ -945,7 +1114,11 @@ export function App() {
     setPilotError("");
 
     try {
-      const result = await readJson<SameFlightComparisonProbeResult>("/api/pilot/same-flight/run", { method: "POST" });
+      const result = await readJson<SameFlightComparisonProbeResult>("/api/pilot/same-flight/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ collectionDates: collectionDatesForRequest() })
+      });
       setSameFlightComparison(result);
     } catch (probeError) {
       setPilotError(probeError instanceof Error ? probeError.message : "同航班比价失败");
@@ -973,7 +1146,11 @@ export function App() {
     setPilotError("");
 
     try {
-      const result = await readJson<ZtripFlightProbeResult>("/api/pilot/ztrip-flight/run", { method: "POST" });
+      const result = await readJson<ZtripFlightProbeResult>("/api/pilot/ztrip-flight/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ collectionDates: collectionDatesForRequest() })
+      });
       setZtripFlight(result);
     } catch (probeError) {
       setPilotError(probeError instanceof Error ? probeError.message : "在途商旅航班样本采集失败");
@@ -987,7 +1164,11 @@ export function App() {
     setPilotError("");
 
     try {
-      const result = await readJson<ZtripHotelProbeResult>("/api/pilot/ztrip-hotel/run", { method: "POST" });
+      const result = await readJson<ZtripHotelProbeResult>("/api/pilot/ztrip-hotel/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ collectionDates: collectionDatesForRequest() })
+      });
       setZtripHotel(result);
     } catch (probeError) {
       setPilotError(probeError instanceof Error ? probeError.message : "在途商旅酒店样本采集失败");
@@ -1100,7 +1281,7 @@ export function App() {
               <span><b>连接当前登录窗口</b><small>检查青猫、携程、阿里、在途</small></span>
               <span className="state">{pilotBusy === "attached" ? "连接中" : connectionReady ? "已连接" : "待连接"}</span>
             </button>
-            <button className="op-button primary" type="button" onClick={collectRealFull} disabled={isOperationRunning || Boolean(pilotBusy) || loading || thirdVersionSaving || thirdVersionBlocked || !connectionReady}>
+            <button className="op-button primary" type="button" onClick={collectRealFull} disabled={isOperationRunning || Boolean(pilotBusy) || loading || thirdVersionSaving || thirdVersionBlocked || collectionDateBlocked || !connectionReady}>
               <span className="step">3</span>
               <span><b>开始完整真实采集</b><small>采集期间锁定登录和探测按钮</small></span>
               <span className="state">{fullCollectionRunning ? "采集中" : "主操作"}</span>
@@ -1205,6 +1386,108 @@ export function App() {
             </div>
           ) : null}
           <div className="config-grid">
+            <div className={`field wide collection-date-field ${collectionDateEditing ? "editing" : ""} ${dateConfigLocked ? "locked" : ""} ${collectionDateValidationMessage ? "invalid" : ""}`}>
+              <div className="collection-date-head">
+                <div>
+                  <span className="field-label">采集时间</span>
+                  <strong>{collectionDateStateLabel}</strong>
+                </div>
+                <div className="collection-date-actions">
+                  {collectionDateMode === "manual" && !collectionDateEditing ? (
+                    <button className="date-action-button secondary" type="button" onClick={restoreDefaultCollectionDates} disabled={dateConfigLocked}>
+                      恢复默认
+                    </button>
+                  ) : null}
+                  <button className="date-action-button" type="button" onClick={startCollectionDateEditing} disabled={dateConfigLocked || collectionDateEditing}>
+                    {collectionDateMode === "manual" ? "修改指定时间" : "指定时间"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="collection-date-summary" aria-label="采集时间摘要">
+                {collectionDateMode === "default" && !collectionDateEditing ? (
+                  <>
+                    <div>
+                      <span>默认航班出行</span>
+                      <b>{defaultCollectionDates.flightTravelDate}</b>
+                    </div>
+                    <div>
+                      <span>默认酒店入住</span>
+                      <b>{defaultCollectionDates.hotelCheckInDate}</b>
+                    </div>
+                    <div>
+                      <span>默认酒店离店</span>
+                      <b>{defaultCollectionDates.hotelCheckOutDate}</b>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <span>航班出行</span>
+                      <b>{effectiveCollectionDates.flightTravelDate || "待填写"}</b>
+                    </div>
+                    <div>
+                      <span>酒店入住</span>
+                      <b>{effectiveCollectionDates.hotelCheckInDate || "待填写"}</b>
+                    </div>
+                    <div>
+                      <span>酒店离店</span>
+                      <b>{effectiveCollectionDates.hotelCheckOutDate || "待计算"}</b>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {collectionDateEditing ? (
+                <div className="collection-date-editor" aria-label="指定时间设置">
+                  <label>
+                    <span>航班出行日期</span>
+                    <input
+                      type="date"
+                      value={collectionDateDraft.flightTravelDate}
+                      disabled={dateConfigLocked}
+                      onChange={(event) => {
+                        const flightTravelDate = event.currentTarget.value;
+                        setCollectionDateDraft((draft) => ({ ...draft, flightTravelDate }));
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>酒店入住日期</span>
+                    <input
+                      type="date"
+                      value={collectionDateDraft.hotelCheckInDate}
+                      disabled={dateConfigLocked}
+                      onChange={(event) => {
+                        const hotelCheckInDate = event.currentTarget.value;
+                        setCollectionDateDraft((draft) => ({ ...draft, hotelCheckInDate }));
+                      }}
+                    />
+                  </label>
+                  <label className="readonly-date">
+                    <span>酒店离店日期</span>
+                    <input type="date" value={manualCollectionDates.hotelCheckOutDate} readOnly disabled />
+                  </label>
+                  <div className="fixed-night-note">当前酒店固定采 1 晚</div>
+                  <div className="collection-date-editor-actions">
+                    <button className="date-action-button" type="button" onClick={saveManualCollectionDates} disabled={dateConfigLocked || Boolean(collectionDateValidationMessage)}>
+                      保存指定时间
+                    </button>
+                    <button className="date-action-button secondary" type="button" onClick={restoreDefaultCollectionDates} disabled={dateConfigLocked}>
+                      恢复默认
+                    </button>
+                  </div>
+                  {collectionDateValidationMessage ? (
+                    <div className="collection-date-error" role="alert">
+                      {collectionDateValidationMessage}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {dateConfigLocked && lockedCollectionDates ? (
+                <p className="collection-date-lock-note">本轮日期已锁定：{formatCollectionDateSummary(lockedCollectionDates)}</p>
+              ) : null}
+            </div>
             <div className="field">
               <label>酒店展示数量</label>
               <div className="number-control">
@@ -1379,6 +1662,7 @@ export function App() {
                 <p>客户主表和离线网页只展示当前比价口径；内部留痕保留四平台原始价格、截图索引和失败原因。</p>
                 <div className="section-meta">
                   <span><CalendarDays size={15} /> 国内 / 国际航班</span>
+                  <span>本轮日期：{currentBatchCollectionDates ? formatCollectionDateSummary(currentBatchCollectionDates) : "本批次未记录统一目标查询日期"}</span>
                   <span>数据日期：{view.samples[0]?.travelDate ?? "暂无"}</span>
                 </div>
               </div>

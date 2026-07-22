@@ -3,6 +3,14 @@ export type RouteScope = "国内" | "国际";
 export type PlatformName = "青猫差旅" | "携程商旅" | "阿里商旅" | "在途商旅";
 export type CompetitorPlatformName = Exclude<PlatformName, "青猫差旅">;
 export type ComparisonMode = "internal_discussion" | "external_sales" | "specified_platform";
+export type CollectionDateMode = "default" | "manual";
+export interface CollectionDateConfig {
+  mode: CollectionDateMode;
+  flightTravelDate: string;
+  hotelCheckInDate: string;
+  hotelCheckOutDate: string;
+  hotelNights: 1;
+}
 export type ComparisonBasis =
   | "lowestCompetitor"
   | "competitorAverage"
@@ -103,6 +111,7 @@ export interface CollectionBatch {
   hotels?: HotelSample[];
   failureNotes?: string[];
   thirdVersion?: ThirdVersionBatchTrace;
+  collectionDates?: CollectionDateConfig;
 }
 
 export interface FlightSummary {

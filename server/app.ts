@@ -4,6 +4,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildFakeBatch } from "../src/domain/fakeBatch";
+import { collectionDatesFromRequestBody, describeCollectionDates } from "../src/domain/collectionDates";
 import { enrichHotelSampleDisplayDecision } from "../src/domain/hotelRatePlans";
 import {
   applyThirdVersionStrategy,
@@ -14,7 +15,7 @@ import {
   type ThirdVersionBatchStatus,
   type ThirdVersionStrategyOptions
 } from "../src/domain/thirdVersionStrategy";
-import type { CollectionBatch, CompetitorPlatformName, ComparisonMode, HotelGroup, HotelRatePlanLabel, HotelSample, PlatformName, PlatformQuote, QuoteStatus } from "../src/domain/types";
+import type { CollectionBatch, CollectionDateConfig, CompetitorPlatformName, ComparisonMode, HotelGroup, HotelRatePlanLabel, HotelSample, PlatformName, PlatformQuote, QuoteStatus } from "../src/domain/types";
 import {
   type AliHotelSingleVerifyInput,
   type AliHotelSingleVerifyResult,
@@ -378,7 +379,7 @@ function buildFlightHotelCollectionBatch(
   flightBatch: CollectionBatch,
   hotelResult: HotelScaleValidationResult,
   generatedAt: Date,
-  options: { idSuffix: string; requireFullAcceptance?: boolean }
+  options: { idSuffix: string; requireFullAcceptance?: boolean; collectionDates?: CollectionDateConfig }
 ): CollectionBatch {
   const completedHotelSamples = hotelResult.groups.flatMap((group) =>
     group.samples.filter((sample) => sample.status === "completed")
@@ -411,7 +412,9 @@ function buildFlightHotelCollectionBatch(
     failedCount: flightBatch.failedCount + hotelResult.failedCount + hotelResult.partialCount + hotelResult.skippedCount + hotelResult.timeoutCount + hotelResult.unattemptedCount,
     samples: flightBatch.samples,
     hotels,
+    collectionDates: options.collectionDates,
     failureNotes: [
+      ...(options.collectionDates ? [describeCollectionDates(options.collectionDates)] : []),
       `航班来源批次：${flightBatch.id}，四平台完整样本 ${flightCount} 条。`,
       `酒店来源验收：${hotelResult.summaryPath ?? hotelResult.artifactDir ?? "本次 40 家酒店放量验证"}，四平台完整酒店 ${hotelCount} 家。`,
       ...(flightBatch.failureNotes ?? []),
@@ -631,7 +634,7 @@ function parseHotelScaleValidationInput(value: unknown): { ok: true; input: Hote
   };
 }
 
-export function createApp(options: { outputDir?: string; pilotCollector?: PilotCollector; exporters?: Partial<ArtifactExporters> } = {}) {
+export function createApp(options: { outputDir?: string; pilotCollector?: PilotCollector; exporters?: Partial<ArtifactExporters>; now?: () => Date } = {}) {
   const app = express();
   const outputDir = options.outputDir ?? path.join(servedOutputsRoot, "current");
   const workbookExporter = options.exporters?.workbook ?? exportBatchWorkbook;
@@ -643,6 +646,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       artifactDir: path.join(outputDir, "pilot")
     });
   let activeOperation: ActiveOperation | null = null;
+  const now = options.now ?? (() => new Date());
 
   function toOutputUrl(filePath: string) {
     const relativePath = path.relative(servedOutputsRoot, filePath);
@@ -742,6 +746,33 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     const offlinePackage = await offlinePackageExporter(deliveryBatch, outputDir);
 
     return setCurrentBatchArtifacts(deliveryBatch, excel.path, offlinePackage.path);
+  }
+
+  function parseLockedCollectionDatesForResponse(body: unknown, res: express.Response) {
+    const parsed = collectionDatesFromRequestBody(body, now());
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error, thirdVersion: buildThirdVersionResponse() });
+      return null;
+    }
+    return parsed.value;
+  }
+
+  function hotelCollectionInput(collectionDates: CollectionDateConfig) {
+    return {
+      checkInDate: collectionDates.hotelCheckInDate,
+      checkOutDate: collectionDates.hotelCheckOutDate
+    };
+  }
+
+  function attachCollectionDates(batch: CollectionBatch, collectionDates: CollectionDateConfig): CollectionBatch {
+    return {
+      ...batch,
+      collectionDates,
+      failureNotes: [
+        describeCollectionDates(collectionDates),
+        ...(batch.failureNotes ?? [])
+      ]
+    };
   }
 
   function serializeActiveOperation(operation: ActiveOperation | null) {
@@ -1105,6 +1136,7 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       hotelCount: state.batch?.hotels?.length ?? 0,
       successCount: state.batch?.successCount ?? 0,
       failedCount: state.batch?.failedCount ?? 0,
+      collectionDates: state.batch?.collectionDates ?? null,
       artifacts: state.artifacts,
       activeOperation: serializeActiveOperation(activeOperation),
       thirdVersion: buildThirdVersionResponse()
@@ -1181,18 +1213,24 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
   });
 
   app.post("/api/collect-real-domestic", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("国内真实采集", res, next, async (control) => {
       const rawLimit = isRecord(req.body) && typeof req.body.limit === "number" ? req.body.limit : undefined;
-      const batch = await pilotCollector.runDomesticBatchCollection(rawLimit, control);
-      return exportThirdVersionArtifacts(batch);
+      const batch = await pilotCollector.runDomesticBatchCollection(rawLimit, control, collectionDates);
+      return exportThirdVersionArtifacts(attachCollectionDates(batch, collectionDates));
     });
   });
 
   app.post("/api/collect-real-international", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("国际真实采集", res, next, async (control) => {
       const rawLimit = isRecord(req.body) && typeof req.body.limit === "number" ? req.body.limit : undefined;
-      const batch = await pilotCollector.runInternationalBatchCollection(rawLimit, control);
-      return exportThirdVersionArtifacts(batch);
+      const batch = await pilotCollector.runInternationalBatchCollection(rawLimit, control, collectionDates);
+      return exportThirdVersionArtifacts(attachCollectionDates(batch, collectionDates));
     });
   });
 
@@ -1202,24 +1240,29 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
       res.status(400).json({ error: parsed.error, thirdVersion: buildThirdVersionResponse() });
       return;
     }
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
 
     await runExclusiveOperation("完整真实采集", res, next, async (control) => {
       state.thirdVersionOptions = parsed.options;
       const collectionLimits = thirdVersionCollectionLimits(state.thirdVersionOptions) ?? {};
       const flightBatch = await pilotCollector.runFullBatchCollection({
         ...collectionLimits,
+        collectionDates,
         control
       });
       await control.waitIfPaused();
       control.throwIfStopped();
       const hotelResult = await pilotCollector.runHotelScaleValidationProbe({
         limit: Math.min(collectionLimits.hotelCandidateLimit ?? 40, 40),
-        disableBudgets: true
+        disableBudgets: true,
+        ...hotelCollectionInput(collectionDates)
       });
       await control.waitIfPaused();
       control.throwIfStopped();
       const batch = buildFlightHotelCollectionBatch(flightBatch, hotelResult, new Date(), {
-        idSuffix: "real-full"
+        idSuffix: "real-full",
+        collectionDates
       });
       return exportThirdVersionArtifacts(batch);
     });
@@ -1339,9 +1382,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateQingmaoCandidateResult(state.qingmaoCandidates));
   });
 
-  app.post("/api/pilot/qingmao-candidates/run", async (_req, res, next) => {
+  app.post("/api/pilot/qingmao-candidates/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("读取青猫候选航班", res, next, async () => {
-      state.qingmaoCandidates = await pilotCollector.runQingmaoCandidateProbe();
+      state.qingmaoCandidates = await pilotCollector.runQingmaoCandidateProbe(collectionDates);
       return decorateQingmaoCandidateResult(state.qingmaoCandidates);
     });
   });
@@ -1351,9 +1397,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateQingmaoHotelCandidateResult(state.qingmaoHotelCandidates));
   });
 
-  app.post("/api/pilot/qingmao-hotel-candidates/run", async (_req, res, next) => {
+  app.post("/api/pilot/qingmao-hotel-candidates/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("读取青猫酒店候选池", res, next, async () => {
-      state.qingmaoHotelCandidates = await pilotCollector.runQingmaoHotelCandidateProbe();
+      state.qingmaoHotelCandidates = await pilotCollector.runQingmaoHotelCandidateProbe(collectionDates);
       return decorateQingmaoHotelCandidateResult(state.qingmaoHotelCandidates);
     });
   });
@@ -1363,9 +1412,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateHotelMainRateResult(state.hotelMainRate));
   });
 
-  app.post("/api/pilot/hotel-main-rate/run", async (_req, res, next) => {
+  app.post("/api/pilot/hotel-main-rate/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("酒店主口径验证", res, next, async () => {
-      state.hotelMainRate = await pilotCollector.runHotelMainRateProbe();
+      state.hotelMainRate = await pilotCollector.runHotelMainRateProbe(collectionDates);
       return decorateHotelMainRateResult(state.hotelMainRate);
     });
   });
@@ -1375,9 +1427,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateHotelGroupMainRateResult(state.hotelGroupMainRate));
   });
 
-  app.post("/api/pilot/hotel-group-main-rate/run", async (_req, res, next) => {
+  app.post("/api/pilot/hotel-group-main-rate/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("酒店集团主口径小样本验证", res, next, async () => {
-      state.hotelGroupMainRate = await pilotCollector.runHotelGroupMainRateProbe();
+      state.hotelGroupMainRate = await pilotCollector.runHotelGroupMainRateProbe(collectionDates);
       return decorateHotelGroupMainRateResult(state.hotelGroupMainRate);
     });
   });
@@ -1387,9 +1442,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateHotelSmallBatchResult(state.hotelSmallBatch));
   });
 
-  app.post("/api/pilot/hotel-small-batch/run", async (_req, res, next) => {
+  app.post("/api/pilot/hotel-small-batch/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("10 家酒店小放量", res, next, async () => {
-      state.hotelSmallBatch = await pilotCollector.runHotelSmallBatchProbe();
+      state.hotelSmallBatch = await pilotCollector.runHotelSmallBatchProbe(collectionDates);
       return decorateHotelSmallBatchResult(state.hotelSmallBatch);
     });
   });
@@ -1400,7 +1458,9 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
   });
 
   app.post("/api/pilot/hotel-scale-validation/run", async (req, res, next) => {
-    const parsed = parseHotelScaleValidationInput(req.body);
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+    const parsed = parseHotelScaleValidationInput(isRecord(req.body) ? { ...req.body, ...hotelCollectionInput(collectionDates) } : hotelCollectionInput(collectionDates));
     if (!parsed.ok) {
       res.status(400).json({ error: parsed.error });
       return;
@@ -1471,9 +1531,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateAliHotelMatchResult(state.aliHotelMatch));
   });
 
-  app.post("/api/pilot/ali-hotel-match/run", async (_req, res, next) => {
+  app.post("/api/pilot/ali-hotel-match/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("阿里酒店同店匹配验证", res, next, async () => {
-      state.aliHotelMatch = await pilotCollector.runAliHotelMatchProbe(3);
+      state.aliHotelMatch = await pilotCollector.runAliHotelMatchProbe(3, collectionDates);
       return decorateAliHotelMatchResult(state.aliHotelMatch);
     });
   });
@@ -1483,9 +1546,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateHotelRatePlanProbeResult(state.hotelRatePlanProbe));
   });
 
-  app.post("/api/pilot/hotel-rate-plan-probe/run", async (_req, res, next) => {
+  app.post("/api/pilot/hotel-rate-plan-probe/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("酒店主口径难度探针", res, next, async () => {
-      state.hotelRatePlanProbe = await pilotCollector.runHotelRatePlanProbe();
+      state.hotelRatePlanProbe = await pilotCollector.runHotelRatePlanProbe(collectionDates);
       return decorateHotelRatePlanProbeResult(state.hotelRatePlanProbe);
     });
   });
@@ -1495,9 +1561,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateHotelAllRatePlanProbeResult(state.hotelAllRatePlan));
   });
 
-  app.post("/api/pilot/hotel-all-rate-plans/run", async (_req, res, next) => {
+  app.post("/api/pilot/hotel-all-rate-plans/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("四平台四口径酒店价格采集", res, next, async () => {
-      state.hotelAllRatePlan = await pilotCollector.runHotelAllRatePlanProbe();
+      state.hotelAllRatePlan = await pilotCollector.runHotelAllRatePlanProbe(collectionDates);
       return decorateHotelAllRatePlanProbeResult(state.hotelAllRatePlan);
     });
   });
@@ -1508,14 +1577,16 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
   });
 
   app.post("/api/pilot/hotel-calibration/run", async (req, res, next) => {
-    const parsed = parseHotelCalibrationInput(req.body);
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+    const parsed = parseHotelCalibrationInput(isRecord(req.body) ? { ...req.body, ...hotelCollectionInput(collectionDates) } : hotelCollectionInput(collectionDates));
     if (!parsed.ok) {
       res.status(400).json({ error: parsed.error });
       return;
     }
 
     await runExclusiveOperation("3 家酒店校准测试", res, next, async () => {
-      state.hotelCalibration = await pilotCollector.runHotelCalibrationProbe(parsed.input);
+      state.hotelCalibration = await pilotCollector.runHotelCalibrationProbe(parsed.input, collectionDates);
       return decorateHotelCalibrationResult(state.hotelCalibration);
     });
   });
@@ -1531,9 +1602,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateSameFlightComparisonResult(state.sameFlightComparison));
   });
 
-  app.post("/api/pilot/same-flight/run", async (_req, res, next) => {
+  app.post("/api/pilot/same-flight/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("随机同航班比价", res, next, async () => {
-      state.sameFlightComparison = await pilotCollector.runSameFlightComparisonProbe();
+      state.sameFlightComparison = await pilotCollector.runSameFlightComparisonProbe(collectionDates);
       return decorateSameFlightComparisonResult(state.sameFlightComparison);
     });
   });
@@ -1555,9 +1629,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateZtripFlightResult(state.ztripFlight));
   });
 
-  app.post("/api/pilot/ztrip-flight/run", async (_req, res, next) => {
+  app.post("/api/pilot/ztrip-flight/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("在途航班样本采集", res, next, async () => {
-      state.ztripFlight = await pilotCollector.runZtripFlightProbe();
+      state.ztripFlight = await pilotCollector.runZtripFlightProbe(collectionDates);
       return decorateZtripFlightResult(state.ztripFlight);
     });
   });
@@ -1567,9 +1644,12 @@ export function createApp(options: { outputDir?: string; pilotCollector?: PilotC
     res.json(decorateZtripHotelResult(state.ztripHotel));
   });
 
-  app.post("/api/pilot/ztrip-hotel/run", async (_req, res, next) => {
+  app.post("/api/pilot/ztrip-hotel/run", async (req, res, next) => {
+    const collectionDates = parseLockedCollectionDatesForResponse(req.body, res);
+    if (!collectionDates) return;
+
     await runExclusiveOperation("在途酒店样本采集", res, next, async () => {
-      state.ztripHotel = await pilotCollector.runZtripHotelProbe();
+      state.ztripHotel = await pilotCollector.runZtripHotelProbe(collectionDates);
       return decorateZtripHotelResult(state.ztripHotel);
     });
   });
